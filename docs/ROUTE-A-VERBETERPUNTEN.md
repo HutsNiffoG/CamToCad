@@ -30,7 +30,7 @@ Aanleiding was de melding "Geen objectcontour gevonden" van de eerste gebruiker 
   - De eigen rastermat had nog een tweede halve-pixelfout.
   - v0.2 meet de verschuiving bij de start en corrigeert die, voor elke versie.
 - **Stille fouten waren het grootste risico.**
-  - In de stresstests (§2) ging v0.1 in 9 van de 13 situaties onderuit. Drie keer was dat een crash. Zes keer kwam er zonder waarschuwing een fout model uit: verkeerde maten, spookgaten, ontbrekende gaten.
+  - In de stresstests (§2) ging v0.1 in 10 van de 13 situaties onderuit. Drie keer was dat een crash. Zeven keer kwam er zonder waarschuwing een fout model uit: verkeerde maten (onder OpenCV 4.12 0,3 mm te hoog), spookgaten, ontbrekende gaten.
   - v0.2 heeft een kwaliteitspoort: twijfelgevallen krijgen "betrouwbaarheid: laag" met de reden, onzin wordt een foutmelding met uitleg.
 - **Grootste open punten:**
   - nauwkeurigheid en een eerlijke U95. De fit telt pixels, en afrondingen komen niet beter dan ±0,3 mm.
@@ -62,7 +62,7 @@ Ruis, JPEG-compressie, vignettering en verscherping zitten in alle scenario's be
 | Klein, weinig lage foto's | Idem, bovenaanzichten 6° scheef | **Crash** | Goed: 29,84 × 19,88 × 5,12, Ø 4,55. Afrondingen onzeker |
 | Ring | Ø 25 × 8, gat Ø 8, weinig lage foto's | **Stil fout**: spookobject 56 × 154 mm, IoU 0,52 | Goed: Ø 24,88 × 8,08, gat Ø 7,99 |
 | Zwaar | Schaduw, bolle mat, handschaduw en verspreide bovenaanzichten samen | **Stil fout**: h 11,89, geen gaten, IoU 0,93 | Goed: 79,91 × 39,94 × 12,05, 2 × Ø 6,58 (één extra korte rand) |
-| OpenCV 4.12 | Basisscan met de oudere OpenCV | h 12,31; 79,80 × 39,82 | 12,02; 79,92 × 39,93 (hoekverschuiving gemeten en gecorrigeerd) |
+| OpenCV 4.12 | Basisscan met de oudere OpenCV | **Stil fout**: h 12,31; 79,80 × 39,82 | 12,02; 79,92 × 39,93 (hoekverschuiving gemeten en gecorrigeerd) |
 
 ¹ Gedraaid vóór de laatste reparatie van de gatherkenning. Die reparatie lostte hetzelfde probleem op in "realistisch" (daar nu beide gaten Ø 6,59); deze twee scenario's zijn daarna niet opnieuw gedraaid.
 
