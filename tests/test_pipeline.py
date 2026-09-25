@@ -39,7 +39,8 @@ def test_bracket_scan_end_to_end(tmp_path):
     assert np.allclose(Vs.max(axis=0) - Vs.min(axis=0), [80.0, 40.0])
     assert np.allclose(part.outer.fillets, part.outer.fillets[0])
     assert abs(part.outer.fillets[0] - 3.0) < 0.35
-    assert all(h.d == 6.6 for h in part.holes)
+    # gaten: gelijk gegroepeerd; 6,6 (ISO 273 M6) of, als 6,5 even aannemelijk is, ongesnapt dichtbij
+    assert part.holes[0].d == part.holes[1].d and abs(part.holes[0].d - 6.6) < 0.1, [h.d for h in part.holes]
     assert result["summary"]["betrouwbaarheid"] == "normaal"
 
     # uitvoer: geldige STEP, en het script bouwt hetzelfde model

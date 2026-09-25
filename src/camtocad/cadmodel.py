@@ -40,8 +40,13 @@ class Uncertainty:
         return dict(self.__dict__)
 
 
-def estimate_uncertainty(mm_per_px: float, n_views: int, n_top: int, systematic: float = 0.03) -> Uncertainty:
+def estimate_uncertainty(mm_per_px: float, n_views: int, n_top: int, systematic: float | None = None) -> Uncertainty:
+    """1σ per soort maat. Het toevallige deel neemt af met het aantal foto's; het systematische deel
+    (maskerrand, fit, pose: in de stresstests ~0,2 px per rand, allemaal dezelfde kant op) niet.
+    Nog te kalibreren op echte metingen (Fase 0)."""
     n_views, n_top = max(n_views, 1), max(n_top, 1)
+    if systematic is None:
+        systematic = max(0.2 * mm_per_px, 0.03)
     edge = math.hypot(0.35 * mm_per_px / math.sqrt(n_views), systematic)
     return Uncertainty(
         edge=edge, height=edge,
@@ -182,7 +187,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             snaps.append(s)
 
     diam = [h.d for h in part.holes]
-    for g in _groups(diam, 2.5 * unc.hole_d):
+    # 3σ: het verschil tussen een gat en het groepsgemiddelde is zelf ook onzeker (~1,15σ)
+    for g in _groups(diam, 3.0 * unc.hole_d):
         d = float(np.mean([diam[i] for i in g]))
         s = snap(f"gat Ø ({len(g)}x)", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
                  threshold=threshold)

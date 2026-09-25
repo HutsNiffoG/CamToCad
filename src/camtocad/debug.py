@@ -4,7 +4,8 @@ Staat in `<uitvoer>/debug/`, ook als de verwerking halverwege stopt:
 
 * `masker_<foto>.jpg`   – objectmasker over de foto (oranje = object, blauw = zekere mat);
 * `lokalisatie.png`     – grove visual hull van boven over de mat (lichter = hoger), met zoekgebied;
-* `bovenaanzicht.png`   – stemmen van de bovenaanzichten op de gekozen hoogte, met de startcontour;
+* `bovenaanzicht.png`   – stemmen van de bovenaanzichten op de gekozen hoogte (geel = allemaal
+                          object), met de startcontour in cyaan;
 * `diagnose.json`       – per foto: bovenaanzicht ja/nee, kanteling, objectaandeel, ruis, hoeken.
 """
 
@@ -52,7 +53,7 @@ def hull_image(coarse: VoxelGrid, board_bounds, bounds=None) -> np.ndarray:
 
 
 def footprint_image(fp: Footprint) -> np.ndarray:
-    """Stemfractie van de bovenaanzichten (rood = alle foto's zien object), contour in wit."""
+    """Stemfractie van de bovenaanzichten (geel = alle foto's zien object), startcontour in cyaan."""
     frac = np.nan_to_num(fp.frac, nan=-1.0)
     img = (np.clip(frac, 0, 1) * 255).astype(np.uint8)[::-1]  # rijen = -Y
     col = cv2.applyColorMap(img, cv2.COLORMAP_INFERNO)
@@ -60,7 +61,7 @@ def footprint_image(fp: Footprint) -> np.ndarray:
     contours, _ = cv2.findContours(fp.mask[::-1].astype(np.uint8), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
     f = max(1, int(np.ceil(700 / max(col.shape[1], 1))))
     col = _upscale(col, 700)
-    cv2.drawContours(col, [c * f + f // 2 for c in contours], -1, (255, 255, 255), 1)
+    cv2.drawContours(col, [c * f + f // 2 for c in contours], -1, (255, 255, 0), 1 if f > 1 else 2)
     return col
 
 

@@ -18,11 +18,12 @@ from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
+from scipy import ndimage
 
 from .calib import Pose
 from .hull import VoxelGrid
 from .masks import ViewMasks
-from .profile import Part2p5D, from_footprint, regularize_angles
+from .profile import Part2p5D, from_footprint, regularize_angles, remove_short_edges
 
 Views = list[tuple[Pose, ViewMasks]]
 Bounds = tuple[float, float, float, float]
@@ -157,19 +158,23 @@ def _threshold_mask(frac: np.ndarray, threshold: float) -> np.ndarray:
 
 def footprint(top: Views, K: np.ndarray, height: float, bounds: Bounds, px: float = 0.25,
               threshold: float | None = None, roi: np.ndarray | None = None) -> Footprint:
-    """Contour op hoogte `height`: cellen die in (bijna) alle bovenaanzichten object zijn.
+    """Contour op hoogte `height`: cellen die in de meerderheid van de bovenaanzichten object zijn.
 
-    Standaard (threshold None) een strenge meerderheid van 0,7: de wand aan de camerakant, die
-    elke foto net iets anders ziet, valt dan weg en gaten krijgen hun volle maat. Zijn de maskers
-    daarvoor te rommelig (veel minder oppervlak dan bij 0,45), dan de gewone meerderheid.
+    Standaard (threshold None) de buitencontour bij meerderheid 0,5 en de gaten bij een strengere
+    0,7: door een gat kijkt maar een deel van de foto's heen (parallax), dus bij 0,7 krijgt een gat
+    zijn volle maat, terwijl de buitenrand bij 0,5 het rechtst blijft (bij 0,7 wordt bijvoorbeeld een
+    binnenhoek rafelig). Zijn de maskers te rommelig voor 0,7, dan alles bij 0,5.
     """
     frac, origin = vote_map(top, K, height, bounds, px)
     if roi is not None:
         frac = np.where(roi, frac, np.nan)
     if threshold is None:
-        strict, loose = _threshold_mask(frac, 0.7), _threshold_mask(frac, 0.45)
-        threshold = 0.7 if strict.sum() >= 0.85 * loose.sum() else 0.45
-        fp = strict if threshold == 0.7 else loose
+        loose, strict = _threshold_mask(frac, 0.5), _threshold_mask(frac, 0.7)
+        fp = loose
+        if strict.sum() >= 0.85 * loose.sum():
+            holes = ndimage.binary_fill_holes(strict) & ~strict
+            fp = loose & ~holes
+        threshold = 0.5
     else:
         fp = _threshold_mask(frac, threshold)
     return Footprint(fp, origin, px, frac, height, "", len(top), threshold)
@@ -191,6 +196,7 @@ def _usable(fp: Footprint) -> bool:
 def to_part(fp: Footprint, height: float) -> Part2p5D:
     outer, holes, cutouts = from_footprint(fp.mask, fp.origin, fp.px, lenient_holes=True)
     outer, _ = regularize_angles(outer)
+    outer = remove_short_edges(outer, 3 * fp.px)
     if not outer.is_valid():
         raise ValueError("contour levert geen geldige omtrek op")
     return Part2p5D(height, outer, holes, cutouts)
@@ -273,7 +279,8 @@ def locate(views: Views, K: np.ndarray, coarse: VoxelGrid, board_bounds: Bounds,
     for name, top, thr, use_hull, bounds in attempts:
         if not top:
             continue
-        roi_fn = (lambda h, shape, b=bounds: hull_roi(coarse, b, 0.5)) if use_hull else None
+        roi_sweep = hull_roi(coarse, bounds, 0.5) if use_hull else None
+        roi_fn = (lambda h, shape: roi_sweep) if use_hull else None
         sweep = None
         h = height
         if h is None:

@@ -136,3 +136,45 @@ def test_chamfer_does_not_tilt_the_part_frame():
     assert p.is_valid()
     rot = Part2p5D(5.0, p).transformed(math.radians(17.0), np.array([100.0, 50.0])).outer
     assert abs(math.degrees(profile.dominant_angle(rot)) - 17.0) < 1e-6
+
+
+def test_hole_with_mask_blemish_stays_a_hole():
+    """Een gat met een 'staart' (maskerfout) moet een rond gat blijven, geen uitsparing."""
+    px = 0.25
+    rows, cols = np.mgrid[0:240, 0:320]
+    img = np.zeros((240, 320), np.uint8)
+    img[20:220, 20:300] = 1
+    img[(cols * px - 30.0) ** 2 + (rows * px - 30.0) ** 2 < 3.3 ** 2] = 0  # gat Ø 6,6
+    img[(rows * px > 32.0) & (rows * px < 35.2) & (np.abs(cols * px - 29.5) < 0.9)] = 0  # staart onder het gat
+    outer, holes, cutouts = profile.from_footprint(img > 0, (0.0, 0.0), px, lenient_holes=True)
+    assert not cutouts and len(holes) == 1
+    assert abs(holes[0].d - 6.6) < 0.3 and abs(holes[0].x - 30.0) < 0.2 and abs(holes[0].y - 30.0) < 0.2
+
+
+def test_short_edges_are_removed():
+    """Een trapje van 0,01 mm in een hoek (twee extra randen) verdwijnt; de rechthoek blijft."""
+    # rechthoek 30 x 20; onderrand in twee stukken op y = 0 en y = 0,01 met een mini-rand ertussen
+    angles = np.array([-np.pi / 2, np.pi, -np.pi / 2, 0.0, np.pi / 2, np.pi])
+    offsets = np.array([0.0, -0.3, 0.01, 30.0, 20.0, 0.0])  # rand 1: x = 0,3 (verticaal stukje van 0,01 mm)
+    p = Profile("polygon", np.zeros(2), angles, offsets, np.zeros(6))
+    q = profile.remove_short_edges(p, 0.75)
+    assert q.n == 4 and q.is_valid()
+    V = q.vertices()
+    assert np.allclose(V.min(axis=0), [0.0, 0.0], atol=0.02) and np.allclose(V.max(axis=0), [30.0, 20.0], atol=0.02)
+
+
+def test_slightly_slanted_edge_does_not_bias_the_frame():
+    """Een korte rand die maar ~6° afwijkt (binnen het zoekvenster) mag de hoofdrichting niet verschuiven."""
+    corners = [(0, 0), (80, 0), (80, 20), (79, 30), (79, 40), (0, 40)]
+    n = len(corners)
+    angles, offsets = np.zeros(n), np.zeros(n)
+    for k in range(n):  # rand k loopt van hoek k naar hoek k+1; buitennormaal rechts van de looprichting
+        (x0, y0), (x1, y1) = corners[k], corners[(k + 1) % n]
+        normal = np.array([y1 - y0, -(x1 - x0)], float)
+        normal /= np.linalg.norm(normal)
+        angles[k] = math.atan2(normal[1], normal[0])
+        offsets[k] = normal @ np.array([x0, y0], float)
+    p = Profile("polygon", np.zeros(2), angles, offsets, np.zeros(n))
+    assert p.is_valid()
+    rot = Part2p5D(5.0, p).transformed(math.radians(-25.0), np.array([100.0, 50.0])).outer
+    assert abs(math.degrees(profile.dominant_angle(rot)) + 25.0) < 1e-6

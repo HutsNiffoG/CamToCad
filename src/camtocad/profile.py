@@ -172,7 +172,16 @@ def dominant_angle(profile: Profile, window_deg: float = 3.0) -> float:
     candidates = np.radians(np.arange(0.0, 90.0, 0.25))
     support = [lengths[spread(c) < win].sum() for c in candidates]
     mode = float(candidates[int(np.argmax(support))])
+    # binnen het venster de lengtegewogen mediaan (één schuine rand in het venster trekt niet mee),
+    # dan het gemiddelde over de randen die daar werkelijk bij horen
     sel = spread(mode) < win
+    dev = (profile.angles[sel] - mode + quarter / 2) % quarter - quarter / 2
+    w = lengths[sel]
+    order = np.argsort(dev)
+    cum = np.cumsum(w[order])
+    med = mode + float(dev[order][np.searchsorted(cum, 0.5 * cum[-1])])
+    mad = float(np.sum(w * np.abs(dev - (med - mode))) / max(w.sum(), 1e-12))
+    sel = spread(med) < max(math.radians(0.5), 2.0 * mad)
     z = np.sum(lengths[sel] * np.exp(4j * profile.angles[sel]))
     return float(np.angle(z) / 4)
 
@@ -207,6 +216,37 @@ def regularize_angles(profile: Profile, tol_deg: float = 3.0) -> tuple[Profile, 
         else:
             k += 1
     return out, theta0
+
+
+def remove_short_edges(profile: Profile, min_len: float) -> Profile:
+    """Randen korter dan min_len (ruis van de contour, bijv. een trapje van 0,01 mm in een hoek)
+    weglaten: de buren snijden elkaar, of worden één rand als ze evenwijdig zijn."""
+    out = profile.copy()
+    while out.kind == "polygon" and out.n > 3:
+        try:
+            V = out.vertices()
+        except np.linalg.LinAlgError:
+            break
+        lengths = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand k: V[k] -> V[k+1]
+        k = int(np.argmin(lengths))
+        if lengths[k] >= min_len:
+            break
+        # draaien zodat de korte rand index 1 heeft (buren 0 en 2); hoekpunt i ligt tussen rand i-1 en i
+        shift = 1 - k
+        a, off, fil = (np.roll(x, shift) for x in (out.angles, out.offsets, out.fillets))
+        L = np.roll(lengths, shift)
+        cand = out.copy()
+        if math.cos(a[2] - a[0]) > math.cos(math.radians(0.5)):  # evenwijdige buren: samenvoegen
+            off[0] = (L[0] * off[0] + L[2] * off[2]) / max(L[0] + L[2], 1e-9)
+            drop = [1, 2]
+            cand.angles, cand.offsets, cand.fillets = np.delete(a, drop), np.delete(off, drop), np.delete(fil, drop)
+        else:
+            fil[2] = max(fil[1], fil[2])
+            cand.angles, cand.offsets, cand.fillets = np.delete(a, 1), np.delete(off, 1), np.delete(fil, 1)
+        if cand.n < 3 or not cand.is_valid():
+            break
+        out = cand
+    return out
 
 
 def _signed_area(P: np.ndarray) -> float:
@@ -359,6 +399,35 @@ def polygon_from_contour(P: np.ndarray, px: float, eps_mm: float | None = None,
     return prof
 
 
+def _circle_with_blemish(contour: np.ndarray, shape, origin, px: float) -> tuple[float, float, float] | None:
+    """Een rond gat met een kleine storing aan de rand (bijv. een 'staart' door een maskerfout)?
+
+    Zoekt de grootste ingeschreven cirkel en fit daarna een cirkel op alleen de contourpunten die
+    daarbij horen. Geeft (x, y, d) in mm, of None als de opening echt niet rond is (sleuf, hoek).
+    """
+    region = np.zeros(shape, np.uint8)
+    cv2.drawContours(region, [contour], -1, 1, thickness=-1)
+    cv2.drawContours(region, [contour], -1, 0, thickness=1)  # de contour zelf hoort bij het object
+    dt = cv2.distanceTransform(region, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    r_in = float(dt.max())
+    if r_in < 2.0:
+        return None
+    cy, cx = np.unravel_index(int(np.argmax(dt)), dt.shape)
+    pts = contour.reshape(-1, 2).astype(float)
+    dist = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+    near = np.abs(dist - r_in) < max(1.5, 0.15 * r_in)
+    # de passende punten moeten rondom liggen (een lange staart heeft veel randpunten, maar het gat
+    # is goed bepaald zolang de cirkel over het grootste deel van de omtrek zichtbaar is)
+    ang = np.arctan2(pts[near, 1] - cy, pts[near, 0] - cx)
+    coverage = len(np.unique(np.floor((ang + math.pi) / (2 * math.pi) * 36).astype(int))) / 36
+    if coverage < 0.6 or region.sum() > 1.8 * math.pi * r_in ** 2:
+        return None
+    hx, hy, hr, hrms = fit_circle(_contour_mm(pts[near].reshape(-1, 1, 2), origin, px))
+    if hrms > max(0.6 * px, 0.05 * hr) or abs(hr - r_in * px) > max(2 * px, 0.2 * hr):
+        return None
+    return hx, hy, 2 * hr - px
+
+
 def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5, min_fillet: float = 1.0,
                    lenient_holes: bool = False) -> tuple[Profile, list[Hole], list[np.ndarray]]:
     """Bovenaanzicht (bool-raster, rijen = y) → buitencontour, ronde gaten en overige uitsparingen.
@@ -398,6 +467,8 @@ def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5
         if hrms < max(0.6 * px, 0.03 * hr) or (lenient_holes and roundish):
             # de gatcontour loopt door de objectpixels rond het gat: een halve pixel buiten de rand
             holes.append(Hole(hx, hy, 2 * hr - px))
+        elif lenient_holes and (circ := _circle_with_blemish(contours[i], img.shape, origin, px)) is not None:
+            holes.append(Hole(*circ))
         else:
             approx = cv2.approxPolyDP(Q.astype(np.float32).reshape(-1, 1, 2), max(1.2 * px, 0.5), True)
             poly = approx.reshape(-1, 2).astype(float)
