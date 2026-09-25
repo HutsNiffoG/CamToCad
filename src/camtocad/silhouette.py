@@ -19,7 +19,7 @@ import numpy as np
 
 from .calib import Pose, project
 from .masks import ViewMasks
-from .profile import Hole, Part2p5D
+from .profile import Hole, Part2p5D, circle_polygon
 
 SHIFT = 4  # subpixel-coördinaten voor cv2.fillPoly (1/16 pixel)
 
@@ -127,8 +127,7 @@ def render(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray | None =
     # doorkijk door gaten: binnen de projectie van zowel de boven- als de onderrand
     tmp_t = np.zeros_like(mask)
     tmp_b = np.zeros_like(mask)
-    rings = [np.column_stack([hl.x + hl.d / 2 * np.cos(a), hl.y + hl.d / 2 * np.sin(a)])
-             for hl in part.holes for a in [np.linspace(0, 2 * np.pi, 48, endpoint=False)]]
+    rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
     rings += list(part.cutouts)
     for r2 in rings:
         m2 = len(r2)
@@ -156,34 +155,6 @@ def energy(part: Part2p5D, K: np.ndarray, views: list[ViewData], w_unknown: floa
 def is_top_view(pose: Pose, max_tilt_deg: float = 25.0) -> bool:
     """Kijkt de camera (bijna) loodrecht omlaag? De optische as in mat-coördinaten is R[2]."""
     return float(pose.R[2, 2]) < -math.cos(math.radians(max_tilt_deg))
-
-
-def footprint_from_top_views(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, height: float,
-                             bounds: tuple[float, float, float, float], px: float = 0.25):
-    """Projecteert de objectmaskers van bovenaanzichten terug op het vlak z = height.
-
-    Van bovenaf valt het silhouet van een prisma samen met de projectie van de bovenrand;
-    teruggeprojecteerd op z = hoogte geeft dat de contour. Geeft (bool-raster, oorsprong) of None.
-    """
-    x0, x1, y0, y1 = bounds
-    w, h = int(np.ceil((x1 - x0) / px)), int(np.ceil((y1 - y0) / px))
-    T = np.array([[px, 0, x0], [0, px, y0], [0, 0, 1.0]])
-    acc = np.zeros((h, w), np.float32)
-    count = 0
-    # liefst echt loodrechte opnamen: bij schuin kijken verdwijnt de doorkijk door gaten (parallax)
-    steep = [(p, m) for p, m in views if is_top_view(p, 8.0)]
-    selected = steep if len(steep) >= 2 else [(p, m) for p, m in views if is_top_view(p)]
-    for pose, m in selected:
-        Hm = K @ np.column_stack([pose.R[:, 0], pose.R[:, 1], pose.R[:, 2] * height + pose.t]) @ T
-        warped = cv2.warpPerspective(m.fg.astype(np.float32), Hm, (w, h),
-                                     flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0)
-        acc += warped
-        count += 1
-    if count == 0:
-        return None
-    fp = acc / count > 0.5
-    fp = cv2.morphologyEx(fp.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
-    return fp, np.array([x0, y0])
 
 
 # ----------------------------------------------------------------------------- parameters
@@ -255,9 +226,10 @@ def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Pa
 
 
 def fit_height(part: Part2p5D, K: np.ndarray, views: list[ViewData], h_max: float,
-               step: float = 1.0) -> Part2p5D:
+               step: float = 1.0, h_min: float | None = None) -> Part2p5D:
     """1D-zoektocht naar de hoogte (het bovenvlak is uit een visual hull niet te halen)."""
-    hs = np.arange(step, max(h_max, 2 * step) + step, step)
+    start = max(step, h_min if h_min is not None else step)
+    hs = np.arange(start, max(h_max, start + step) + step, step)
     es = [energy(_set(part, part.outer.angles, "h", float(h)), K, views) for h in hs]
     k = int(np.argmin(es))
     best = float(hs[k])
@@ -271,13 +243,24 @@ def fit_height(part: Part2p5D, K: np.ndarray, views: list[ViewData], h_max: floa
 
 def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int = 1500,
            log=None) -> tuple[Part2p5D, float, int]:
-    """Kompaszoektocht per parameter met halverende stappen; ongeldige geometrie wordt overgeslagen."""
+    """Kompaszoektocht per parameter met halverende stappen; ongeldige geometrie wordt overgeslagen.
+
+    Twee aanvullingen tegen te vroeg stoppen in een smalle vallei (bijv. hoogte en randen die
+    elkaar in schuine foto's compenseren): na elke ronde een patroonstap (Hooke-Jeeves: de hele
+    verplaatsing van die ronde nog eens), en na convergentie een herstart met grotere stappen.
+    """
     base = part.outer.angles.copy()
     params = _params(part)
     steps = {p.name: p.step for p in params}
     best, e_best = part, energy(part, K, views)
     evals = 1
+
+    def valid(cand: Part2p5D) -> bool:
+        return cand.outer.kind != "polygon" or cand.outer.is_valid()
+
+    restarts, e_restart = 0, e_best
     while evals < max_evals:
+        start = {p.name: _get(best, base, p.name) for p in params}
         moved_any = False
         for p in params:
             if steps[p.name] < p.min_step:
@@ -289,7 +272,7 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
                 if val < p.lower:
                     continue
                 cand = _set(best, base, p.name, val)
-                if cand.outer.kind == "polygon" and not cand.outer.is_valid():
+                if not valid(cand):
                     continue
                 e = energy(cand, K, views)
                 evals += 1
@@ -300,8 +283,23 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
                 moved_any = True
             else:
                 steps[p.name] *= 0.5
+        if moved_any and evals < max_evals:
+            cand = best
+            for p in params:
+                x = _get(best, base, p.name)
+                if x != start[p.name] and x + (x - start[p.name]) >= p.lower:
+                    cand = _set(cand, base, p.name, x + (x - start[p.name]))
+            if cand is not best and valid(cand):
+                e = energy(cand, K, views)
+                evals += 1
+                if e < e_best:
+                    best, e_best = cand, e
         if not moved_any and all(steps[p.name] < p.min_step for p in params):
-            break
+            if restarts >= 2 or e_best >= e_restart:
+                break
+            restarts, e_restart = restarts + 1, e_best
+            for p in params:
+                steps[p.name] = 0.25 * p.step
     if log:
         log(f"verfijning: {evals} evaluaties, E = {e_best:.0f}")
     return best, e_best, evals

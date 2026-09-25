@@ -11,7 +11,9 @@ import json
 import queue
 import re
 import secrets
+import shutil
 import socket
+import sys
 import threading
 import time
 import traceback
@@ -19,7 +21,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from ..mat import PRESETS, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
@@ -28,6 +30,7 @@ STATIC = Path(__file__).parent / "static"
 OUTPUTS = {"model.step", "model.stl", "model.py", "report.html", "report.json"}
 MAX_FILES = 300
 MAX_BYTES = 40 * 1024 * 1024
+MAX_REQUEST = 2 * 1024 ** 3  # hele upload; losse bestanden blijven onder MAX_BYTES
 JOB_ID = re.compile(r"^[0-9a-f]{12}$")
 
 
@@ -48,10 +51,11 @@ class JobStore:
             raise HTTPException(404, "Onbekende scan")
         return p
 
-    def create(self, mat: str) -> str:
+    def create(self, mat: str, meetlijn: float = 100.0) -> str:
         job_id = uuid.uuid4().hex[:12]
         (self.root / job_id / "fotos").mkdir(parents=True)
-        self.write(job_id, {"id": job_id, "state": "upload", "mat": mat, "created": time.time(), "log": []})
+        self.write(job_id, {"id": job_id, "state": "upload", "mat": mat, "meetlijn": meetlijn, "created": time.time(),
+                            "log": []})
         return job_id
 
     def read(self, job_id: str) -> dict:
@@ -86,17 +90,24 @@ class JobStore:
             self.update(job_id, log=lines[-50:])
 
         try:
-            result = self.runner(base / "fotos", base / "resultaat", ScanOptions(mat=status["mat"]), log=log,
-                                 scan_name=job_id)
+            opts = ScanOptions(mat=status["mat"], mat_scale=float(status.get("meetlijn", 100.0)) / 100.0)
+            result = self.runner(base / "fotos", base / "resultaat", opts, log=log, scan_name=job_id)
             self.update(job_id, state="klaar", finished=time.time(), summary=result.get("summary", {}),
                         warnings=result.get("warnings", [])[:20])
         except Exception as e:  # noqa: BLE001 - de fout moet in de UI zichtbaar worden
             self.update(job_id, state="fout", finished=time.time(), error=str(e) or e.__class__.__name__,
                         trace=traceback.format_exc()[-2000:])
 
+    def remove(self, job_id: str) -> None:
+        shutil.rmtree(self.root / job_id, ignore_errors=True)
+
     def worker(self) -> None:
         while True:
-            self.process(self.queue.get())
+            job_id = self.queue.get()
+            try:
+                self.process(job_id)
+            except Exception:  # noqa: BLE001 - de enige worker mag nooit stoppen
+                traceback.print_exc(file=sys.stderr)
 
 
 def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runner=run_scan) -> FastAPI:
@@ -105,13 +116,26 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
     if not run_inline:
         threading.Thread(target=store.worker, daemon=True).start()
 
-    def check(request: Request) -> None:
+    def authorized(request: Request) -> bool:
         if token is None:
-            return
+            return True
         given = (request.query_params.get("token") or request.cookies.get("ctc_token")
                  or request.headers.get("x-token") or "")
-        if not secrets.compare_digest(given, token):
+        return secrets.compare_digest(given, token)
+
+    def check(request: Request) -> None:
+        if not authorized(request):
             raise HTTPException(401, "Ongeldige of ontbrekende toegangscode (token)")
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        # vóórdat de body gelezen wordt: anders spoolt een upload zonder token eerst gigabytes naar schijf
+        if not authorized(request):
+            return JSONResponse({"detail": "Ongeldige of ontbrekende toegangscode (token)"}, status_code=401)
+        length = request.headers.get("content-length")
+        if length is not None and length.isdigit() and int(length) > MAX_REQUEST:
+            return JSONResponse({"detail": "Upload te groot"}, status_code=413)
+        return await call_next(request)
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -129,33 +153,39 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
     @app.get("/api/scans/{job_id}")
     def get_scan(job_id: str, request: Request):
         check(request)
-        return store.read(job_id)
+        return {k: v for k, v in store.read(job_id).items() if k != "trace"}
 
     @app.post("/api/scans")
-    async def upload(request: Request, fotos: list[UploadFile] = File(...), mat: str = Form("A4")):
+    async def upload(request: Request, fotos: list[UploadFile] = File(...), mat: str = Form("A4"),
+                     meetlijn: float = Form(100.0)):
         check(request)
         if mat not in PRESETS:
             raise HTTPException(400, f"Onbekende mat: {mat}")
+        if not 95.0 <= meetlijn <= 105.0:
+            raise HTTPException(400, "Meetlijn buiten 95-105 mm: print de mat opnieuw op 100%")
         if not fotos or len(fotos) > MAX_FILES:
             raise HTTPException(400, f"Upload tussen 1 en {MAX_FILES} foto's")
-        job_id = store.create(mat)
+        job_id = store.create(mat, meetlijn)
         target = store.path(job_id) / "fotos"
         saved = 0
-        for i, f in enumerate(fotos):
-            ext = Path(f.filename or "").suffix.lower()
-            if ext not in IMAGE_EXT:
-                continue
-            size = 0
-            with open(target / f"foto_{i:04d}{ext}", "wb") as out:
-                while chunk := await f.read(1 << 20):
-                    size += len(chunk)
-                    if size > MAX_BYTES:
-                        raise HTTPException(413, f"{f.filename}: bestand te groot")
-                    out.write(chunk)
-            saved += 1
-        if saved == 0:
-            store.update(job_id, state="fout", error="Geen bruikbare foto's (JPG/PNG) ontvangen")
-            raise HTTPException(400, "Geen bruikbare foto's (JPG/PNG) ontvangen")
+        try:
+            for i, f in enumerate(fotos):
+                ext = Path(f.filename or "").suffix.lower()
+                if ext not in IMAGE_EXT:
+                    continue
+                size = 0
+                with open(target / f"foto_{i:04d}{ext}", "wb") as out:
+                    while chunk := await f.read(1 << 20):
+                        size += len(chunk)
+                        if size > MAX_BYTES:
+                            raise HTTPException(413, f"{f.filename}: bestand te groot")
+                        out.write(chunk)
+                saved += 1
+            if saved == 0:
+                raise HTTPException(400, "Geen bruikbare foto's (JPG/PNG) ontvangen")
+        except BaseException:
+            store.remove(job_id)  # geen halve scans laten staan
+            raise
         store.update(job_id, state="wachtrij", photos=saved)
         if run_inline:
             store.process(job_id)

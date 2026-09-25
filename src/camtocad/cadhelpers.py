@@ -22,7 +22,7 @@ def afgeronde_hoeken(punten):
         d1x, d1y = (x1 - x0) / l1, (y1 - y0) / l1
         d2x, d2y = (x2 - x1) / l2, (y2 - y1) / l2
         phi = math.atan2(d1x * d2y - d1y * d2x, d1x * d2x + d1y * d2y)  # draaihoek, + = linksom
-        if abs(phi) < 1e-9:
+        if abs(phi) < 1e-9 or abs(phi) > math.pi - 1e-6:  # rechtdoor of (bijna) omkeren: geen boog
             hoeken.append(((x1, y1), None, (x1, y1), None, 0.0))
             continue
         t = r * math.tan(abs(phi) / 2)
@@ -31,7 +31,7 @@ def afgeronde_hoeken(punten):
         s = 1.0 if phi > 0 else -1.0
         c = (t1[0] - s * r * d1y, t1[1] + s * r * d1x)
         vx, vy = x1 - c[0], y1 - c[1]
-        lv = math.hypot(vx, vy)
+        lv = math.hypot(vx, vy) or 1e-12
         m = (c[0] + r * vx / lv, c[1] + r * vy / lv)
         hoeken.append((t1, m, t2, c, r))
     return hoeken

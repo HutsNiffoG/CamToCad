@@ -16,6 +16,17 @@ import numpy as np
 from .cadhelpers import afgeronde_hoeken
 
 
+def circle_polygon(center, radius: float, n: int) -> np.ndarray:
+    """Regelmatige n-hoek met dezelfde oppervlakte als de cirkel.
+
+    Een ingeschreven n-hoek is kleiner dan de cirkel (30 hoeken: 0,4% in straal); een model dat
+    zo getekend wordt, fit dan net zoveel te groot. Hoekpunten iets buiten de cirkel heffen dat op.
+    """
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    r = radius * math.sqrt(2 * math.pi / (n * math.sin(2 * math.pi / n)))
+    return np.asarray(center, float) + r * np.column_stack([np.cos(a), np.sin(a)])
+
+
 @dataclass
 class Hole:
     x: float
@@ -58,8 +69,7 @@ class Profile:
         """Dichte polylijn (tegen de klok in) van de contour, inclusief bogen."""
         if self.kind == "circle":
             k = max(24, int(360 / max_step_deg))
-            a = np.linspace(0, 2 * np.pi, k, endpoint=False)
-            return self.center + self.radius * np.column_stack([np.cos(a), np.sin(a)])
+            return circle_polygon(self.center, self.radius, k)
         pts = []
         for t1, m, t2, c, r in afgeronde_hoeken(self.corner_table()):
             if m is None:
@@ -78,6 +88,12 @@ class Profile:
         return np.array(pts)
 
     def is_valid(self) -> bool:
+        try:
+            return self._is_valid()
+        except (ArithmeticError, ValueError, np.linalg.LinAlgError):
+            return False
+
+    def _is_valid(self) -> bool:
         if self.kind == "circle":
             return self.radius > 0
         if np.any(self.fillets < 0):
@@ -116,6 +132,17 @@ class Part2p5D:
         return Part2p5D(self.height, self.outer.copy(), [Hole(h.x, h.y, h.d) for h in self.holes],
                         [c.copy() for c in self.cutouts])
 
+    def scaled(self, factor: float) -> "Part2p5D":
+        """Alle maten x factor (om de oorsprong), bijv. voor een mat die niet op 100% is geprint."""
+        out = self.copy()
+        out.height = self.height * factor
+        o = out.outer
+        o.center, o.offsets, o.fillets, o.radius = o.center * factor, o.offsets * factor, o.fillets * factor, \
+            o.radius * factor
+        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor) for h in self.holes]
+        out.cutouts = [c * factor for c in self.cutouts]
+        return out
+
     def transformed(self, angle: float, shift) -> "Part2p5D":
         """Starre 2D-transformatie p -> R(angle) p + shift."""
         c, s = math.cos(angle), math.sin(angle)
@@ -129,13 +156,24 @@ class Part2p5D:
         return out
 
 
-def dominant_angle(profile: Profile) -> float:
-    """Hoofdrichting (mod 90°) van de randen, gewogen naar randlengte."""
+def dominant_angle(profile: Profile, window_deg: float = 3.0) -> float:
+    """Hoofdrichting (mod 90°) van de randen: de lengtegewogen modus, verfijnd over de randen binnen
+    ±window_deg daarvan. Een schuine rand (afschuining) trekt de hoofdrichting zo niet scheef."""
     if profile.kind != "polygon" or profile.n == 0:
         return 0.0
     V = profile.vertices()
     lengths = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand k loopt van V[k] naar V[k+1]
-    z = np.sum(lengths * np.exp(4j * profile.angles))
+    quarter = math.pi / 2
+
+    def spread(center: float) -> np.ndarray:  # hoekafstand modulo 90°
+        return np.abs((profile.angles - center + quarter / 2) % quarter - quarter / 2)
+
+    win = math.radians(window_deg)
+    candidates = np.radians(np.arange(0.0, 90.0, 0.25))
+    support = [lengths[spread(c) < win].sum() for c in candidates]
+    mode = float(candidates[int(np.argmax(support))])
+    sel = spread(mode) < win
+    z = np.sum(lengths[sel] * np.exp(4j * profile.angles[sel]))
     return float(np.angle(z) / 4)
 
 
@@ -154,6 +192,20 @@ def regularize_angles(profile: Profile, tol_deg: float = 3.0) -> tuple[Profile, 
             mid = 0.5 * (V[k] + V[(k + 1) % profile.n]) - profile.center
             out.angles[k] = target
             out.offsets[k] = float(np.array([math.cos(target), math.sin(target)]) @ mid)
+    # buren die nu precies evenwijdig zijn hebben geen snijpunt meer: de kortste vervalt
+    V = profile.vertices()
+    length = list(np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1))  # rand k loopt van V[k] naar V[k+1]
+    k = 0
+    while out.n > 3 and k < out.n:
+        if math.cos(out.angles[k] - out.angles[k - 1]) > math.cos(math.radians(0.01)):
+            drop = k if length[k] <= length[k - 1] else (k - 1) % out.n
+            out.angles = np.delete(out.angles, drop)
+            out.offsets = np.delete(out.offsets, drop)
+            out.fillets = np.delete(out.fillets, drop)
+            length.pop(drop)
+            k = 0
+        else:
+            k += 1
     return out, theta0
 
 
@@ -260,7 +312,8 @@ def polygon_from_contour(P: np.ndarray, px: float, eps_mm: float | None = None,
         for i in order:
             e = edges[i]
             prev, nxt = edges[i - 1], edges[(i + 1) % len(edges)]
-            if e[2] > 0.35 * min(prev[2], nxt[2]) and e[2] > 2 * px:
+            # vergelijk met de langste buur: bij een hoek van meerdere koorden is de andere buur ook kort
+            if e[2] > 0.35 * max(prev[2], nxt[2]) and e[2] > 2 * px:
                 continue
             t1, t2 = turn(prev, e), turn(e, nxt)
             if t1 > 85 or t2 > 85 or t1 + t2 > 120:  # een echte trede draait 2 x 90°
@@ -291,6 +344,8 @@ def polygon_from_contour(P: np.ndarray, px: float, eps_mm: float | None = None,
     for k2, v in enumerate(V):
         n1, n2 = prof.normals()[k2 - 1], prof.normals()[k2]
         alpha = math.pi - math.acos(float(np.clip(n1 @ n2, -1, 1)))  # binnenhoek tussen de randen
+        if alpha < 1e-3:  # teruglopende randen (piek in een rommelige contour): geen afronding
+            continue
         delta = float(np.min(np.linalg.norm(P - v, axis=1))) - 0.7 * px
         factor = 1.0 / math.sin(alpha / 2) - 1.0
         r = max(delta, 0.0) / factor if factor > 1e-6 else 0.0

@@ -211,9 +211,13 @@ class BoardRaster:
     spec: MatSpec
 
     def mat_to_pixel_matrix(self) -> np.ndarray:
-        """3x3-matrix die homogene mat-coördinaten (X, Y, 1) afbeeldt op (kolom, rij, 1)."""
+        """3x3-matrix die homogene mat-coördinaten (X, Y, 1) afbeeldt op (kolom, rij, 1).
+
+        Pixelconventie van OpenCV: het midden van pixel (0, 0) ligt op (0, 0). Een vak dat bij het
+        rasteren de pixels c0 .. c1-1 vult, loopt dus van c0 - 0,5 tot c1 - 0,5 (vandaar de -0,5).
+        """
         k, m, h = self.px_per_mm, self.margin_mm, self.spec.board_h_mm
-        return np.array([[k, 0.0, k * m], [0.0, -k, k * (h + m)], [0.0, 0.0, 1.0]])
+        return np.array([[k, 0.0, k * m - 0.5], [0.0, -k, k * (h + m) - 0.5], [0.0, 0.0, 1.0]])
 
 
 def rasterize_board(

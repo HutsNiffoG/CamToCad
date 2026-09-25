@@ -56,6 +56,9 @@
       <input id="maak" type="file" accept="image/*" capture="environment">
       <select id="mat" aria-label="Formaat kalibratiemat"><option>A4</option><option>A3</option></select>
     </div>
+    <p class="row"><label for="meetlijn">Gemeten meetlijn op de mat:</label>
+      <input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"
+             style="width:6em"> mm <span class="muted">(100,0 als de print klopt)</span></p>
     <p id="teller" class="muted">Nog geen foto's geselecteerd.</p>
     <div class="row">
       <button id="upload" class="primary" disabled>Uploaden en verwerken</button>
@@ -86,6 +89,7 @@ $("upload").addEventListener("click", () => {
   const form = new FormData();
   files.forEach((f) => form.append("fotos", f, f.name));
   form.append("mat", $("mat").value);
+  form.append("meetlijn", $("meetlijn").value.replace(",", ".") || "100");
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "api/scans");
   $("voortgang").hidden = false; $("upload").disabled = true;

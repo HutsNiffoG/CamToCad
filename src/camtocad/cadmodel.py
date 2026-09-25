@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import math
+import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -46,7 +47,9 @@ def estimate_uncertainty(mm_per_px: float, n_views: int, n_top: int, systematic:
         edge=edge, height=edge,
         hole_d=math.hypot(0.5 * mm_per_px / math.sqrt(n_top), systematic),
         hole_xy=math.hypot(0.35 * mm_per_px / math.sqrt(n_top), systematic),
-        fillet=math.hypot(1.0 * mm_per_px / math.sqrt(n_views), 0.1),
+        # een afronding bepaalt maar een klein stukje silhouet en de fout (onscherpte, rastering in de
+        # hoek) is in alle foto's dezelfde kant op: niet kleiner met meer foto's (stresstests: ±0,8 px)
+        fillet=math.hypot(0.8 * mm_per_px, 0.1),
     )
 
 
@@ -172,7 +175,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         for g in _groups([radii[i] for i in nz], 2.5 * unc.fillet):
             members = [nz[j] for j in g]
             r = float(np.mean([radii[i] for i in members]))
-            s = snap(f"afronding R ({len(members)}x)", r, unc.fillet, radius_candidates(r), threshold=threshold)
+            s = snap(f"afronding R ({len(members)}x)", r, unc.fillet / math.sqrt(len(members)) + 0.03,
+                     radius_candidates(r), threshold=threshold)
             for i in members:
                 o.fillets[i] = s.value
             snaps.append(s)
@@ -245,6 +249,11 @@ def _comment(s: Snap | None) -> str:
     return f"  # gemeten {s.measured:.3f} ± {s.u95:.3f} (U95) — {s.reason}"
 
 
+def _safe_text(value) -> str:
+    """Tekst voor in de docstring van het script: geen aanhalingstekens, backslashes of regeleinden."""
+    return re.sub(r"[^\w .,()+-]", "_", str(value))[:80]
+
+
 def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
     """Leesbaar CadQuery-script met benoemde maten; levert hetzelfde model als build()."""
     meta = meta or {}
@@ -253,7 +262,7 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         '"""Cam-to-CAD — parametrisch model (CadQuery).',
         "",
         f"Gegenereerd door camtocad {__version__} op {date.today().isoformat()}"
-        + (f" uit scan '{meta['scan']}'" if meta.get("scan") else "") + ".",
+        + (f" uit scan '{_safe_text(meta['scan'])}'" if meta.get("scan") else "") + ".",
         "Eenheden: mm. Oorsprong: datum (linker- en onderrand), Z omhoog vanaf het contactvlak.",
         "Per maat: ontwerpwaarde, met in het commentaar de gemeten waarde, U95 en de reden.",
         '"""',

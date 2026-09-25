@@ -89,10 +89,45 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
     return out
 
 
+def _local_stats(o: np.ndarray, p: np.ndarray, k: int):
+    """Gemiddelden, varianties en covariantie van o en p in vensters van k x k pixels."""
+    box = lambda x: cv2.boxFilter(x, cv2.CV_32F, (k, k))  # noqa: E731
+    mo, mp = box(o), box(p)
+    vo = np.maximum(box(o * o) - mo * mo, 0.0)
+    vp = np.maximum(box(p * p) - mp * mp, 0.0)
+    return mo, mp, vo, vp, box(o * p) - mo * mp
+
+
+def _normconv(values: np.ndarray, weight: np.ndarray, sigma: float, fallback: float, min_weight: float = 0.05):
+    """Genormaliseerde convolutie: gewogen gemiddelde van `values` in een Gauss-venster."""
+    f = int(max(1, min(8, sigma // 4)))  # brede vensters op lagere resolutie: veel sneller, zelfde uitkomst
+    h, w = values.shape
+    vw, ww = (values * weight).astype(np.float32), weight.astype(np.float32)
+    if f > 1:
+        size = (max(w // f, 1), max(h // f, 1))
+        vw, ww = cv2.resize(vw, size, interpolation=cv2.INTER_AREA), cv2.resize(ww, size, interpolation=cv2.INTER_AREA)
+    num = cv2.GaussianBlur(vw, (0, 0), sigma / f)
+    den = cv2.GaussianBlur(ww, (0, 0), sigma / f)
+    out = np.where(den > min_weight, num / np.maximum(den, 1e-6), fallback).astype(np.float32)
+    return cv2.resize(out, (w, h), interpolation=cv2.INTER_LINEAR) if f > 1 else out
+
+
 def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sigma: float = 6.0,
-             tau_min: float = 14.0, texture_min: float = 18.0, min_area_frac: float = 2e-4,
-             misreg_px: float = 0.4) -> ViewMasks:
-    """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend."""
+             tau_min: float = 14.0, texture_min: float = 10.0, min_area_frac: float = 2e-4,
+             misreg_px: float = 0.4, ncc_mat: float = 0.75, window: int = 7, use_gain: bool = True,
+             use_texture_missing: bool = True) -> ViewMasks:
+    """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend.
+
+    Twee soorten bewijs:
+    * *grijswaarde*: wijkt de pixel af van de voorspelde mat (na belichtingscorrectie)?
+    * *textuur*: herhaalt het venster rond de pixel het voorspelde matpatroon (lokale correlatie)?
+
+    Alleen pixels waarvan het venster het patroon herhaalt, zijn *zekere* mat. Een donker object
+    op een zwart vak lijkt per pixel op de mat, maar mist de stippen en randen eromheen: dat is
+    geen zekere mat meer (en waar textuur verwacht wordt maar ontbreekt, is het object). De
+    correlatie is ongevoelig voor versterking: een schaduw op de mat blijft mat, en de lokale
+    versterking die daaruit volgt, corrigeert ook de egale vlakken in de schaduw.
+    """
     if observed.ndim == 3:
         observed = cv2.cvtColor(observed, cv2.COLOR_BGR2GRAY)
     o = cv2.GaussianBlur(observed.astype(np.float32), (0, 0), 0.8)
@@ -102,31 +137,69 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     # traag verlopende belichtingsverschillen wegwerken (genormaliseerde convolutie over de mat)
     r = o - (a * p + b)
     w = (valid & (np.abs(r) < max(4 * sigma, 8.0))).astype(np.float32)
-    num = cv2.GaussianBlur(r * w, (0, 0), 35.0)
-    den = cv2.GaussianBlur(w, (0, 0), 35.0)
-    o = o - np.where(den > 0.05, num / np.maximum(den, 1e-6), 0.0)
+    o = o - _normconv(r, w, 35.0, 0.0)
+
+    # textuurbewijs: lokale correlatie tussen foto en voorspelling
+    _, _, vo, vp, cov = _local_stats(o, p, window)
+    ncc = cov / np.sqrt(vo * vp + 1e-6)
+    s_pred = np.sqrt(vp) * abs(a)  # verwacht lokaal contrast (grijswaarden van de foto)
+    s_obs = np.sqrt(vo)
+    textured = valid & (s_pred > texture_min)
+    mat_seen = textured & (ncc > ncc_mat) & (s_obs > 0.25 * s_pred) & (s_obs < 2.5 * s_pred)
 
     # tolerantie voor een kleine posefout: evenredig met de lokale gradiënt van de voorspelling
     # (een vast 3x3-min/max-venster is te ruim: objectpixels op patroonranden zouden dan 'mat' lijken)
     gx = cv2.Sobel(p, cv2.CV_32F, 1, 0, ksize=3) / 8.0
     gy = cv2.Sobel(p, cv2.CV_32F, 0, 1, ksize=3) / 8.0
-    tol = misreg_px * abs(a) * np.sqrt(gx * gx + gy * gy)
-    res = np.maximum(np.abs(o - (a * p + b)) - tol, 0.0)
+    grad = misreg_px * abs(a) * np.sqrt(gx * gx + gy * gy)
+    texture_missing = textured & (s_pred > 1.5 * texture_min) & (ncc < 0.3) & (s_obs < 0.35 * s_pred)
+    if not use_texture_missing:
+        texture_missing = np.zeros_like(textured)
     k3 = np.ones((3, 3), np.uint8)
-    _, _, sigma = _robust_affine(o, p, valid)
-    tau = max(k_sigma * sigma, tau_min)
-    fg = (valid & (res > tau)).astype(np.uint8)
-    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
-    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3)
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
-    min_area = min_area_frac * fg.size
-    keep = np.zeros(n, bool)
-    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
-    fg = keep[labels]
-    fg = _refine_boundary(fg, o, a * p + b, valid, tau)
+    min_area = min_area_frac * observed.size
 
-    mean = cv2.blur(p, (15, 15))
-    texture = np.sqrt(np.maximum(cv2.blur(p * p, (15, 15)) - mean * mean, 0.0)) * abs(a)
-    edge_bg = valid & ~fg & (texture > texture_min)
+    def foreground(gain):
+        bgv = gain * (a * p + b)
+        res = np.maximum(np.abs(o - bgv) - gain * grad, 0.0)
+        sel = valid & mat_seen if mat_seen.sum() > 1000 else valid
+        sig = 1.4826 * float(np.median(np.abs((o - bgv)[sel][::7]))) + 1e-3
+        tau = max(k_sigma * sig, tau_min)
+        fg = (valid & ((res > tau) | texture_missing)).astype(np.uint8)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3)
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
+        keep = np.zeros(n, bool)
+        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
+        return keep[labels], bgv, res, tau, sig
+
+    # lokale versterking (schaduw, glans): verhouding van lokale sommen van foto en voorspelling,
+    # alleen over pixels waarvan het venster het matpatroon herhaalt (objectpixels tellen dus niet
+    # mee). Tweede ronde zonder pixels die niet bij die versterking passen (bijv. een objectrand
+    # met toevallig hoge correlatie). Kleine afwijkingen (< 3%) zijn ruis en worden 1.
+    den_img = a * p + b
+    gain = np.ones_like(o)
+    if use_gain:
+        src = mat_seen.astype(np.float32)
+        for _ in range(2):
+            num = cv2.GaussianBlur(o * src, (0, 0), 6.0)
+            den = cv2.GaussianBlur(den_img * src, (0, 0), 6.0)
+            wsum = cv2.GaussianBlur(src, (0, 0), 6.0)
+            gain = np.where(wsum > 0.05, np.clip(num / np.maximum(den, 1e-3), 0.2, 2.5), 1.0).astype(np.float32)
+            fit = np.abs(o - gain * den_img) < np.maximum(3.0 * sigma, 0.08 * gain * den_img)
+            src = (mat_seen & fit).astype(np.float32)
+        dev = gain - 1.0
+        gain = (1.0 + np.sign(dev) * np.maximum(np.abs(dev) - 0.03, 0.0)).astype(np.float32)
+    fg, bgv, res, tau, sigma = foreground(gain)
+    fg = _refine_boundary(fg, o, bgv, valid, tau)
+
+    # Zekere mat voor het uitsnijden (hull): het eigen venster herhaalt het matpatroon. Voor de fit
+    # ook de pixels tot aan de objectrand: hun venster overlapt het object, maar een venster er vlak
+    # naast (binnen de vensterstraal) is wel geverifieerd. Zonder die randstrook zou het model
+    # goedkoop over de rand kunnen groeien ('onbekend' kost minder dan 'mat').
+    match = valid & ~fg & (res <= tau)
+    mean15 = cv2.blur(p, (15, 15))
+    texture15 = np.sqrt(np.maximum(cv2.blur(p * p, (15, 15)) - mean15 * mean15, 0.0)) * abs(a)
+    near_seen = cv2.dilate(mat_seen.astype(np.uint8), np.ones((window, window), np.uint8)) > 0
+    edge_bg = match & near_seen & (texture15 > 1.8 * texture_min)
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
-    return ViewMasks(fg=fg, bg=edge_bg & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma)
+    return ViewMasks(fg=fg, bg=match & mat_seen & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma)

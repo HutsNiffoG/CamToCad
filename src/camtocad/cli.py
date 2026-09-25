@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-zijde", type=int, default=2000, help="werkresolutie, langste zijde in pixels")
     p.add_argument("--snapdrempel", type=float, default=0.8, help="minimale kans om een maat te snappen (0-1)")
     p.add_argument("--inch", action="store_true", help="snappen naar inchmaten in plaats van mm")
+    p.add_argument("--meetlijn", type=float, default=100.0,
+                   help="gemeten lengte (mm) van de 100 mm-meetlijn op de geprinte mat; corrigeert de printschaal")
 
     p = sub.add_parser("demo", help="synthetische testscan renderen en verwerken (zonder camera)")
     p.add_argument("--uit", default="camtocad-demo")
@@ -37,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--token", default=None, help="toegangscode (standaard: willekeurig gegenereerd)")
 
     args = parser.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # Windows-console (cp1252) kent o.a. '≤' niet
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     try:
         if args.cmd == "mat":
             from .mat import write_mat
@@ -49,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             from .pipeline import ScanOptions, run_scan
             out = args.uit or f"{Path(args.fotos).resolve()}_cad"
             opts = ScanOptions(mat=args.mat, max_side=args.max_zijde, snap_threshold=args.snapdrempel,
-                               imperial=args.inch)
+                               imperial=args.inch, mat_scale=args.meetlijn / 100.0)
             result = run_scan(args.fotos, out, opts)
             _print_result(result)
         elif args.cmd == "demo":

@@ -30,7 +30,7 @@ class VoxelGrid:
 
 
 def _grid(lo: np.ndarray, hi: np.ndarray, voxel: float) -> tuple[np.ndarray, tuple[int, int, int]]:
-    shape = tuple(int(np.ceil((h - l) / voxel)) for l, h in zip(lo, hi))
+    shape = tuple(int(np.ceil((b - a) / voxel)) for a, b in zip(lo, hi))
     return lo + voxel / 2, shape
 
 

@@ -54,3 +54,62 @@ def test_mat_pdf(client):
     client.get("/?token=geheim")
     r = client.get("/mat/A4.pdf")
     assert r.status_code == 200 and r.content.startswith(b"%PDF")
+
+
+def test_upload_without_token_is_refused_before_reading(tmp_path):
+    app = create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner)
+    c = TestClient(app)
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4"})
+    assert r.status_code == 401
+    assert not [p for p in tmp_path.iterdir() if p.is_dir()]  # niets aangemaakt of weggeschreven
+
+
+def test_too_large_upload_leaves_no_half_scan(tmp_path, monkeypatch):
+    import camtocad.server.app as server
+
+    monkeypatch.setattr(server, "MAX_BYTES", 100)
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg() + b"x" * 200, "image/jpeg"))], data={"mat": "A4"})
+    assert r.status_code == 413
+    assert c.get("/api/scans").json() == []
+
+
+def test_worker_survives_a_crashing_job(tmp_path):
+    import threading
+    import time
+
+    from camtocad.server.app import JobStore
+
+    store = JobStore(tmp_path, fake_runner)
+    done = []
+
+    def process(job_id):
+        if job_id == "kapot":
+            raise PermissionError("status.json is bezet")
+        done.append(job_id)
+
+    store.process = process
+    threading.Thread(target=store.worker, daemon=True).start()
+    store.queue.put("kapot")
+    store.queue.put("goed")
+    for _ in range(100):
+        if done:
+            break
+        time.sleep(0.02)
+    assert done == ["goed"]
+
+
+def test_measured_ruler_is_passed_as_mat_scale(tmp_path):
+    seen = {}
+
+    def runner(photos, out, opts, log, scan_name=""):
+        seen["scale"] = opts.mat_scale
+        return fake_runner(photos, out, opts, log, scan_name)
+
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=runner))
+    c.get("/?token=geheim")
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4", "meetlijn": "99.5"})
+    assert r.status_code == 200 and seen["scale"] == pytest.approx(0.995)
+    bad = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4", "meetlijn": "90"})
+    assert bad.status_code == 400

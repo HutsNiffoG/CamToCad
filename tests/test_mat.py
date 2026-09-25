@@ -66,3 +66,24 @@ def test_board_to_mat_is_proper_rotation():
     assert np.isclose(np.linalg.det(A), 1.0)
     p = mat.board_to_mat(np.array([[0.0, 0.0, 0.0], [spec.board_w_mm, spec.board_h_mm, 0.0]]), spec)
     assert np.allclose(p, [[0, spec.board_h_mm, 0], [spec.board_w_mm, 0, 0]])
+
+
+def test_raster_follows_opencv_pixel_convention():
+    """mat_to_pixel_matrix: pixelmiddens op gehele coördinaten, dus een vakrand ligt op het 50%-punt."""
+    spec = mat.PRESETS["A4"]
+    raster = mat.rasterize_board(spec, px_per_mm=10, margin_mm=3, dots=False)
+    M = raster.mat_to_pixel_matrix()
+    s = spec.square_mm
+    for black_row in range(spec.squares_y):
+        y_mm = spec.board_h_mm - (black_row + 0.5) * s  # midden van een rij vakken (mat-Y omhoog)
+        x_edge = s  # grens tussen de eerste twee vakken van die rij
+        col, row, _ = M @ [x_edge, y_mm, 1.0]
+        line = raster.image[int(round(row))].astype(float)
+        c0 = int(np.floor(col))
+        left, right = line[c0 - 3], line[c0 + 4]
+        if abs(left - right) < 200:  # rand tussen een marker en een zwart vak: niet egaal
+            continue
+        mid = np.interp(col, np.arange(len(line)), line)
+        assert abs(mid - (left + right) / 2) < 3.0
+        return
+    pytest.fail("geen geschikte vakrand gevonden")

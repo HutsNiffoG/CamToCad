@@ -122,3 +122,17 @@ def test_shrink_makes_fillpoly_exact():
 def test_uncertainty_is_reported(value, sigma):
     s = snapping.snap("x", value, sigma, snapping.length_candidates(value))
     assert s.u95 == pytest.approx(2 * sigma)
+
+
+def test_chamfer_does_not_tilt_the_part_frame():
+    """Eén schuine rand (afschuining 30°) mag de hoofdrichting niet scheef trekken."""
+    # rechthoek 80 x 40 met één hoek schuin afgesneden (17,3 x 10 mm), dan 17° gedraaid
+    angles = np.array([-np.pi / 2, 0.0, np.radians(60.0), np.pi / 2, np.pi])
+    p = Profile("polygon", np.zeros(2), angles, np.zeros(5), np.zeros(5))
+    corners = [(0, 0), (80, 0), (80, 30), (62.68, 40), (0, 40)]
+    for k, a in enumerate(angles):  # rand k loopt van hoek k naar hoek k+1
+        n = np.array([np.cos(a), np.sin(a)])
+        p.offsets[k] = n @ np.array(corners[k], float)
+    assert p.is_valid()
+    rot = Part2p5D(5.0, p).transformed(math.radians(17.0), np.array([100.0, 50.0])).outer
+    assert abs(math.degrees(profile.dominant_angle(rot)) - 17.0) < 1e-6

@@ -96,19 +96,79 @@ def make_detector(board) -> "cv2.aruco.CharucoDetector":
     return cv2.aruco.CharucoDetector(board, charuco, params)
 
 
-def detect(gray: np.ndarray, board, name: str = "", detector=None) -> BoardDetection | None:
-    """Zoekt het bord in een grijswaardenbeeld; None als er te weinig hoeken zijn."""
+def detect(gray: np.ndarray, board, name: str = "", detector=None, bias=None) -> BoardDetection | None:
+    """Zoekt het bord in een grijswaardenbeeld; None als er te weinig hoeken zijn.
+
+    `bias`: systematische verschuiving van de detector (zie `detector_bias`), wordt afgetrokken.
+    """
     if gray.ndim == 3:
         gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
     detector = detector or make_detector(board)
     corners, ids, _, marker_ids = detector.detectBoard(gray)
     if ids is None or len(ids) < 6:
         return None
+    corners = corners.reshape(-1, 2).astype(np.float64)
+    if bias is not None:
+        corners = corners - np.asarray(bias, float)
     return BoardDetection(
         name=name, width=gray.shape[1], height=gray.shape[0],
-        corners=corners.reshape(-1, 2).astype(np.float64), ids=ids.ravel().astype(np.int32),
+        corners=corners, ids=ids.ravel().astype(np.int32),
         n_markers=0 if marker_ids is None else len(marker_ids),
     )
+
+
+_BIAS: dict[tuple, np.ndarray] = {}
+
+
+def detector_bias(spec: MatSpec) -> np.ndarray:
+    """Systematische verschuiving (px) van de ChArUco-hoeken in de geïnstalleerde OpenCV-versie.
+
+    OpenCV 4.x legt de hoeken gemiddeld ~0,5 px naar rechtsonder (een andere pixelconventie), 5.x
+    niet. Voor de kalibratie maakt dat weinig uit (het hoofdpunt schuift mee), maar dan valt de
+    voorspelde mat (masks.py) een halve pixel naast de foto en worden silhouetten en maten
+    onzuiver. Gemeten op synthetische beelden van de mat met bekende geometrie, één keer per proces.
+    """
+    key = (spec, cv2.__version__)
+    if key not in _BIAS:
+        _BIAS[key] = _measure_bias(spec)
+    return _BIAS[key]
+
+
+def _measure_bias(spec: MatSpec) -> np.ndarray:
+    from .mat import rasterize_board
+    from .render import look_at
+
+    board = make_board(spec)
+    detector = make_detector(board)
+    raster = rasterize_board(spec, 10.0, 3.0)
+    A, a = board_to_mat_transform(spec)
+    chess = np.asarray(board.getChessboardCorners(), float).reshape(-1, 3) @ A.T + a
+    w, h, f, s = 1600, 1200, 1300.0, 2
+    K = np.array([[f, 0.0, (w - 1) / 2], [0.0, f, (h - 1) / 2], [0.0, 0.0, 1.0]])
+    Ks = K.copy()
+    Ks[:2, :2] *= s
+    Ks[:2, 2] = s * K[:2, 2] + 0.5 * (s - 1)  # supersampling met dezelfde pixelconventie
+    to_raster = np.linalg.inv(raster.mat_to_pixel_matrix())
+    target = np.array([spec.board_w_mm / 2, spec.board_h_mm / 2, 0.0])
+    distance = 1.4 * f * spec.board_w_mm / w
+    offsets = []
+    for tilt, az in ((3, 0), (30, 40), (30, 160), (30, 280), (45, 100), (45, 220)):
+        ti, az_ = np.radians(tilt), np.radians(az)
+        center = target + distance * np.array([np.sin(ti) * np.cos(az_), np.sin(ti) * np.sin(az_), np.cos(ti)])
+        R, t = look_at(center, target)
+        Hm = Ks @ np.column_stack([R[:, 0], R[:, 1], t]) @ to_raster
+        img = cv2.warpPerspective(raster.image.astype(np.float32), Hm, (w * s, h * s), flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+        img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA) * 0.85 + 15.0
+        det = detect(np.clip(img, 0, 255).astype(np.uint8), board, detector=detector)
+        if det is None:
+            continue
+        uv, _ = project(chess[det.ids], Pose("", R, t), K)
+        offsets.append(det.corners - uv)
+    if not offsets:
+        return np.zeros(2)
+    bias = np.median(np.vstack(offsets), axis=0)
+    return bias if np.all(np.abs(bias) < 1.5) else np.zeros(2)
 
 
 def _object_image_points(det: BoardDetection, board) -> tuple[np.ndarray, np.ndarray]:
@@ -158,14 +218,16 @@ def calibrate(
                 f"Te weinig bruikbare foto's voor kalibratie ({len(usable)}; minimaal 6 met ≥ {min_corners} hoeken)"
             )
         flags = cv2.CALIB_FIX_K3 if fix_k3 else 0
-        for _ in range(2):  # tweede ronde zonder uitschieters
+        for round_ in range(4):  # opnieuw zonder uitschieters, tot er geen meer zijn
             objs = [u[1] for u in usable]
             imgs = [u[2] for u in usable]
             rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(objs, imgs, (w, h), None, None, flags=flags)
             errs = [_view_rms(o, i, r, t, K, dist) for o, i, r, t in zip(objs, imgs, rvecs, tvecs)]
             limit = max(3.0 * float(np.median(errs)), 2.0)
             keep = [k for k, e in enumerate(errs) if e <= limit]
-            if len(keep) == len(usable) or len(keep) < 6:
+            # stoppen zolang rvecs/tvecs/errs nog precies bij `usable` horen (anders krijgen foto's
+            # de pose van hun buurman)
+            if len(keep) == len(usable) or len(keep) < 6 or round_ == 3:
                 break
             for k, e in enumerate(errs):
                 if e > limit:
