@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "camtocad"
-version = "0.2.0"
+version = "0.3.0"
 description = "Cam-to-CAD (route A): lokale, open-source pipeline van foto's op een kalibratiemat naar een parametrisch CAD-model"
 readme = "README.md"
 requires-python = ">=3.10"

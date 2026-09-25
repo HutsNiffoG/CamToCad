@@ -16,7 +16,7 @@ def test_raster_matches_opencv_board():
     assert (np.abs(ours.astype(int) - ref.astype(int)) < 128).mean() > 0.99
 
 
-@pytest.mark.parametrize("name", ["A4", "A3"])
+@pytest.mark.parametrize("name", list(mat.PRESETS))
 def test_all_corners_detected_with_dots(name):
     spec = mat.PRESETS[name]
     board = mat.make_board(spec)
@@ -87,3 +87,43 @@ def test_raster_follows_opencv_pixel_convention():
         assert abs(mid - (left + right) / 2) < 3.0
         return
     pytest.fail("geen geschikte vakrand gevonden")
+
+
+def test_v2_marker_ranges_identify_the_format():
+    """Elke v2-mat heeft een eigen ID-bereik, buiten de ID's van v1 (0-249 uit DICT_5X5_250)."""
+    v2 = [s for s in mat.PRESETS.values() if s.version == 2]
+    ranges = [set(s.marker_ids.tolist()) for s in v2]
+    for i, a in enumerate(ranges):
+        assert min(a) >= 250
+        for b in ranges[i + 1:]:
+            assert not a & b
+    for s in v2:  # het bord gebruikt die ID's echt
+        assert np.array_equal(mat.make_board(s).getIds().ravel(), s.marker_ids)
+
+
+def test_v2_texture_keeps_corners_and_edges_clear():
+    """Stippen blijven weg van de schaakbordhoeken (daar verfijnt OpenCV) en van de vakranden."""
+    spec = mat.PRESETS["A4"]
+    s = spec.square_mm
+    dots = [r for r in mat.board_rects(spec) if r[4] == 1.0]
+    assert len(dots) > 30 * spec.n_markers  # dicht raster in elk zwart vak
+    for x, y, w, h, _ in dots:
+        i, j = int((x + w / 2) // s), int((y + h / 2) // s)
+        lx, ly = x - i * s, y - j * s  # binnen het vak
+        assert min(lx, ly, s - lx - w, s - ly - h) >= 1.5 - 1e-9
+        xs, ys = np.clip([0.0, s], lx, lx + w), np.clip([0.0, s], ly, ly + h)  # dichtstbijzijnde stippunten
+        assert min(np.hypot(abs(cx - px), abs(cy - py)) for cx, px in zip((0.0, s), xs)
+                   for cy, py in zip((0.0, s), ys)) >= 4.0 - 1e-9
+
+
+def test_print_scale_maps_true_mm_onto_the_nominal_drawing():
+    spec = mat.PRESETS["A4"]
+    scaled = spec.with_scale(1.012, 0.991)
+    M0 = mat.rasterize_board(spec, 4, 3, supersample=1, dots=False).mat_to_pixel_matrix()
+    M1 = mat.rasterize_board(scaled, 4, 3, supersample=1, dots=False).mat_to_pixel_matrix()
+    for X, Y in ((0.0, 0.0), (37.0, 11.0), (240.0, 160.0)):
+        assert np.allclose(M1 @ [1.012 * X, 0.991 * Y, 1.0], M0 @ [X, Y, 1.0])
+    assert scaled.size_mm == pytest.approx((240 * 1.012, 160 * 0.991))
+    p = mat.board_to_mat(np.array([[0.0, 0.0, 0.0], [240.0, 160.0, 0.0]]), scaled)
+    assert np.allclose(p, [[0.0, 160 * 0.991, 0.0], [240 * 1.012, 0.0, 0.0]])
+    assert scaled.nominal() == spec and mat.get_spec("letter").name == "Letter"

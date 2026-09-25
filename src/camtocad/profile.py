@@ -155,6 +155,18 @@ class Part2p5D:
         out.cutouts = [(R @ cu.T).T + shift for cu in self.cutouts]
         return out
 
+    def to_dict(self) -> dict:
+        """Geometrie voor report.json (mm): contour, gaten, uitsparingen en hoogte."""
+        o = self.outer
+        if o.kind == "circle":
+            contour = {"soort": "cirkel", "middelpunt": [float(v) for v in o.center], "diameter": 2 * float(o.radius)}
+        else:
+            contour = {"soort": "polygoon", "hoekpunten": [list(c) for c in o.corner_table()],
+                       "toelichting": "per hoek (x, y, afrondingsstraal), tegen de klok in"}
+        return {"hoogte": float(self.height), "contour": contour,
+                "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d)} for h in self.holes],
+                "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts]}
+
 
 def dominant_angle(profile: Profile, window_deg: float = 3.0) -> float:
     """Hoofdrichting (mod 90°) van de randen: de lengtegewogen modus, verfijnd over de randen binnen

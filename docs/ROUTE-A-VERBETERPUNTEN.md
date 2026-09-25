@@ -1,6 +1,6 @@
 # Route A — verbeterpunten (onderzoek, september 2026)
 
-Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3); de rest staat hier als geprioriteerde lijst (§4).
+Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3), het gereedschap voor Fase 0 in v0.3 (§3b); de rest staat hier als geprioriteerde lijst (§4).
 
 Het onderzoek bestond uit drie delen:
 
@@ -95,26 +95,39 @@ Wat opvalt in v0.2:
 | OpenCV 4.8 laadt niet met numpy 2 | Minimaal `opencv-python-headless>=4.10` | `pyproject.toml` |
 | Brede belichtingscorrectie traag (~0,2 s per foto) | Op 1/8 resolutie (7 ms), zelfde uitkomst | `masks.py` |
 
+## 3b. Opgelost in v0.3 (Fase 0)
+
+| # | Wat | Hoe | Waar |
+|---|---|---|---|
+| V1 | Gereedschap voor de meetset met echte onderdelen | `camtocad valideer`: per onderdeel een map met foto's en een `maten.json` met schuifmaatmetingen. Koppelt elke maat aan het model en geeft per maat de fout en of die binnen U95 valt. Per soort maat volgen bias en spreiding, plus een printschaalcontrole (alle lengtes procentueel te groot of te klein). Het protocol staat in [FASE-0.md](FASE-0.md). De demo levert ook zo'n map op. **De fotoset zelf moet nog gemaakt worden** | `validate.py` |
+| V5 | Mat v2 | Een raster witte stippen (1 mm, steek 2,5 mm) in elk zwart vak. De zone rond de schaakbordhoeken (4 mm) en een strook langs de randen blijven vrij, zodat de hoekdetectie en de onscherptemeting niet gestoord worden. Elk formaat heeft een eigen marker-ID-bereik (DICT_5X5_1000: A4 250–297, Letter 300–343, A3 350–457): formaat én versie worden aan de foto's herkend (`--mat` is standaard `auto`). Letter-formaat toegevoegd. De v1-matten blijven werken | `mat.py`, `calib.py` |
+| V6 | Fotocontrole vooraf | Per foto ~0,1 s: mat gevonden, onscherpte, belichting en kijkhoek, met een oordeel goed, matig of onbruikbaar. De onscherpte is σ in pixels, gemeten door de voorspelde matpatches te vervagen tot ze op de foto passen (nauwkeurig tot ~0,05 px). Per scan: waar het object ligt (hoeken en markers die steeds ontbreken), een dekkingskaart per richting en hoogte, en concrete aanwijzingen. De telefoonpagina uploadt per foto met direct oordeel, toont de dekkingskaart, laat slechte foto's verwijderen en foto's toevoegen aan een bestaande of mislukte scan, en toont de debugbeelden. Verkleinen op de telefoon maakt de upload ~5× kleiner. Op de opdrachtregel: `camtocad controleer` | `preflight.py`, `server/` |
+| V7 | Printschaal per richting | Meetlijnen X en Y (`--meetlijn X Y`, twee velden op de telefoonpagina). De schaal zit in de matgeometrie van kalibratie, poses en maskers, dus ook een ongelijke schaal wordt goed verwerkt, en de hoogte schaalt mee | `mat.py`, `calib.py`, `pipeline.py` |
+| — | Onscherpte en dekking in de verwerking | Per foto de onscherpte in `diagnose.json`, met een waarschuwing bij σ > 1,8 px. Bij "geen bovenaanzichten" of "geen objectcontour" staat in de melding welke foto's rond het object ontbreken; bij een onvolledige set volgt een waarschuwing in het rapport | `pipeline.py` |
+| — | Maskers rond het object | Drie reparaties, gevonden bij het testen van mat v2 en ook nuttig met v1: (1) de lokale versterking (schaduw) gebruikt alleen vensters waar niveau en contrast dezelfde versterking geven, en niet vlak naast bewijs voor het object; anders liet een gatrand die samenvalt met een vakrand het object ernaast als "beschaduwd wit" wegvallen. (2) De randstrook "zekere mat" voor de fit bevat alleen pixels die duidelijk op de mat lijken. (3) Randpixels zonder bruikbaar contrast volgen de meerderheid van hun buren. De maskerrand heeft daardoor geen bias meer die met het matpatroon meeverandert | `masks.py` |
+
 ## 4. Open verbeterpunten, op prioriteit
 
 Impact en moeite: **H**oog, **M**iddel, **L**aag. Moeite S/M/L staat voor dagen, een week, of meerdere weken.
 
-### 4.1 Eerst (Fase 0 en v0.3)
+### 4.1 Eerst (Fase 0 en v0.4)
+
+V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b). Hieronder staat per punt wat er nog open is.
 
 | # | Verbetering | Waarom | Aanpak | Impact | Moeite |
 |---|---|---|---|---|---|
-| V1 | **Echte fotoset met schuifmaatmetingen** | Alle drempels en U95 zijn nu op synthetische scans afgesteld | 10–20 onderdelen: metaal, zwart, wit, kunststof. Referentie met eindmaten en een ringkaliber, in de stijl van [ISO 10360-13 / VDI 2634](https://www.nist.gov/publications/vdivde-2634-2-and-iso-10360-13-performance-evaluation-tests-and-systematic-errors). Draaien als regressiesuite | H | M |
+| V1 | **Echte fotoset met schuifmaatmetingen** (gereedschap klaar in v0.3) | Alle drempels en U95 zijn nu op synthetische scans afgesteld | 10–20 onderdelen: metaal, zwart, wit, kunststof. Referentie met eindmaten en een ringkaliber, in de stijl van [ISO 10360-13 / VDI 2634](https://www.nist.gov/publications/vdivde-2634-2-and-iso-10360-13-performance-evaluation-tests-and-systematic-errors). Draaien als regressiesuite. **Open:** de set zelf maken volgens [FASE-0.md](FASE-0.md) en daarmee U95 en de drempels afstellen | H | M |
 | V2 | **Fit op randafstanden in plaats van pixeltelling** | Pixeltelling is een trapfunctie: traag, geen covariantie, en afrondingen dwalen ±0,3 mm. De rasterizer is alleen exact voor randen langs de assen (−0,09 px bij 30°) | Residuen tussen geprojecteerde modelranden en de afstandstransformatie van elk masker (subpixel), met `scipy.optimize.least_squares` (soft-L1). Eventueel subpixelranden met [Devernay (IPOL)](https://www.ipol.im/pub/art/2017/216/) | H | L |
 | V3 | **U95 die klopt** | U95 volgt nu alleen uit de resolutie | Covariantie uit V2, plus leave-one-out of bootstrap over de foto's. Termen voor printschaal (0,3 % · L als er geen meetlijn is opgegeven) en kalibratie-σ ([mrcal](https://mrcal.secretsauce.net/uncertainty.html)). Toetsen op 95 % dekking met V1 | H | M |
 | V4 | **Topologie bijwerken na de fit** | De fit kan geen gaten of randen toevoegen of weghalen: een gemist gat blijft gemist | Clusters "zekere mat" binnen het bovenvlak (in ≥ 2 bovenaanzichten) worden een gat. Korte randen weg als de energie nauwelijks stijgt (BIC). Ronde uitsparingen worden gaten | H | M |
-| V5 | **Mat v2** | Een donker onderdeel op een zwart vak is onzichtbaar: in de stresstest werd maar ~50 % van het silhouet gezien | Fijne textuur in álle vakken, ook donkere stippen in de witte randen. Eigen marker-ID-bereik per formaat, zodat A4/A3/Letter automatisch worden herkend. Letter-formaat toevoegen. Eventueel middengrijze vakken | H | M |
-| V6 | **Preflight bij het uploaden** | Een slechte fotoset blijkt nu pas na de verwerking | Per foto direct (~0,1 s): mat gevonden, scherpte, overbelichting, kijkhoek. Daarna een dekkingskaart en een concrete aanwijzing ("nog 2 foto's recht boven het onderdeel"). Foto's toevoegen aan een bestaande scan, en de debugbeelden in de pagina | H | M |
+| V5 | ~~Mat v2~~ (gedaan in v0.3) | Een donker onderdeel op een zwart vak is onzichtbaar: in de stresstest werd maar ~50 % van het silhouet gezien | Gedaan: stippenraster in de zwarte vakken, eigen marker-ID's per formaat, Letter. **Open:** donkere stippen in de witte marges rond de markers (die zijn maar 2,5 mm breed en de markerdetectie heeft ze nodig), middengrijze vakken, en controleren of de stippen op gewone printers goed uitkomen (V1) | H | M |
+| V6 | ~~Preflight bij het uploaden~~ (gedaan in v0.3) | Een slechte fotoset blijkt nu pas na de verwerking | Gedaan: zie §3b. **Open:** een live camerabeeld met dezelfde controle (V25) | H | M |
 
 ### 4.2 Robuustheid op echte foto's
 
 | # | Verbetering | Aanpak | Impact | Moeite |
 |---|---|---|---|---|
-| V7 | Anisotrope printschaal (sx ≠ sy) en automatische controle | Beide meetlijnen invoeren, of ze in de foto's meten. Een bankpas (85,60 × 53,98 mm) als controle-object | H | S–M |
+| V7 | ~~Anisotrope printschaal (sx ≠ sy)~~ (gedaan in v0.3) | Gedaan: meetlijnen X en Y, de schaal zit in de matgeometrie. De printschaalcontrole zit in `camtocad valideer` (alle lengtes procentueel te groot of te klein). **Open:** de meetlijnen zijn in de foto's zelf niet te meten, want ze schalen mee met de print; alleen een onafhankelijk object met bekende maat (eindmaat, bankpas 85,60 × 53,98 mm) kan de schaal controleren | H | S–M |
 | V8 | Segmentatiecascade | GrabCut met de bestaande driedeling object/mat/onbekend. Kleur (afstand tot de zwart-witte mat) als extra objectbewijs. [PyMatting](https://github.com/pymatting/pymatting) (MIT) voor een subpixel-alfarand. Schaduwdetectie op regioniveau voor egale vlakken ([overzicht](https://arxiv.org/abs/1304.1233)) | H | M |
 | V9 | Optioneel een geleerd masker, alleen met Apache-2.0-code en -gewichten | [SAM 2.1](https://github.com/facebookresearch/sam2), [HQ-SAM 2](https://github.com/SysCV/sam-hq) of [EfficientViT-SAM](https://huggingface.co/mit-han-lab/efficientvit-sam) via ONNX Runtime op de CPU, geprompt met een kader en punten uit het matmasker. Altijd combineren met het matresidu en met meerdere foto's: SAM faalt op spiegelend metaal en lage contrasten. De CPU-snelheid is nog niet gemeten | M–H | M |
 | V10 | Foto's zoals telefoons ze maken | EXIF lezen: oriëntatie, lens, brandpunt, digitale zoom. HEIC via pillow-heif. Groeperen per camera of lens, en een cameramodel per toestel bewaren (voor kleine scans). Waarschuwen bij σ(f)/f > 0,3 % | H | M |
@@ -162,10 +175,10 @@ Voor een project dat AGPL-3.0 wil worden, telt ook de licentie van de **gewichte
 
 ## 6. Voorgestelde volgorde
 
-1. **Nu: Fase 0 met echte foto's.** Eerst V1: meten is weten. Daarna V6 (preflight), V5 (mat v2) en V7 (printschaal).
-2. **v0.3:** V2 (fit op randen), V3 (U95) en V4 (topologie). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid.
-3. **v0.4:** de objectklasse (V15–V19) en de segmentatiecascade (V8, V10).
-4. **v0.5 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
+1. **Fase 0 met echte foto's.** Het gereedschap is klaar in v0.3: V1-harnas, V5 (mat v2), V6 (fotocontrole), V7 (printschaal). Nu de meetset zelf maken en meten volgens [FASE-0.md](FASE-0.md): meten is weten.
+2. **v0.4:** V2 (fit op randen), V3 (U95) en V4 (topologie). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid, afgesteld op de Fase 0-metingen.
+3. **v0.5:** de objectklasse (V15–V19) en de segmentatiecascade (V8, V10).
+4. **v0.6 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
 
 ## 7. Verantwoording
 

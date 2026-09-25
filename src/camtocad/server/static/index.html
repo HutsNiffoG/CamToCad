@@ -5,31 +5,51 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cam-to-CAD lokaal</title>
 <style>
-  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#5b6673; --line:#dde2e8; --accent:#2b5d9b; --ok:#2e7d4f; --err:#b3261e; }
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#5b6673; --line:#dde2e8; --accent:#2b5d9b; --ok:#2e7d4f; --warn:#a15c00; --err:#b3261e;
+    --ok-bg:#e3f2e8; --warn-bg:#fdf0dc; --err-bg:#fbe4e2; --miss:#f6d9d6; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#111418; --card:#1a1f25; --fg:#e6e9ed; --muted:#9aa4af; --line:#2c333b; --accent:#8fb8ea; --ok:#7cc79a; --err:#f2a39c; }
+    :root { --bg:#111418; --card:#1a1f25; --fg:#e6e9ed; --muted:#9aa4af; --line:#2c333b; --accent:#8fb8ea; --ok:#7cc79a; --warn:#f0b35a; --err:#f2a39c;
+      --ok-bg:#1d3325; --warn-bg:#3a2c16; --err-bg:#3d1f1c; --miss:#4a2522; }
   }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
-  main { max-width:720px; margin:0 auto; padding:16px 16px 48px; }
-  h1 { font-size:1.4rem; margin:8px 0 4px; } h2 { font-size:1.05rem; margin:0 0 8px; }
+  main { max-width:760px; margin:0 auto; padding:16px 16px 48px; }
+  h1 { font-size:1.4rem; margin:8px 0 4px; } h2 { font-size:1.05rem; margin:0 0 8px; } h3 { font-size:.95rem; margin:14px 0 6px; }
   .muted { color:var(--muted); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin:14px 0; }
-  ol { padding-left:1.2rem; margin:0; } li { margin:4px 0; }
+  ol, ul { padding-left:1.2rem; margin:0; } li { margin:4px 0; }
   a { color:var(--accent); }
   .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   label.btn, button { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:0 16px;
     border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.small { min-height:32px; padding:0 10px; font-size:.9rem; }
   button:disabled { opacity:.5; cursor:default; }
   input[type=file] { display:none; }
-  select { min-height:44px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; padding:0 8px; }
+  select, input[type=number] { min-height:44px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; padding:0 8px; }
+  input[type=number] { width:6.5em; }
+  .settings { display:grid; grid-template-columns:auto 1fr; gap:8px 12px; align-items:center; margin:8px 0 12px; }
   progress { width:100%; height:10px; }
+  .photos { display:flex; flex-direction:column; gap:4px; margin-top:8px; max-height:320px; overflow-y:auto; }
+  .photo { display:flex; gap:8px; align-items:flex-start; padding:6px 8px; border-radius:8px; background:var(--bg); font-size:.92rem; }
+  .photo .name { flex:0 0 7.5em; font-variant-numeric:tabular-nums; }
+  .photo .notes { flex:1; color:var(--muted); }
+  .badge { flex:0 0 auto; font-size:.8rem; font-weight:600; padding:1px 8px; border-radius:99px; }
+  .goed { background:var(--ok-bg); color:var(--ok); } .matig { background:var(--warn-bg); color:var(--warn); } .onbruikbaar { background:var(--err-bg); color:var(--err); }
+  .overview { display:grid; grid-template-columns:minmax(0, 220px) 1fr; gap:16px; align-items:start; margin-top:12px; }
+  @media (max-width:560px) { .overview { grid-template-columns:1fr; } .overview svg { max-width:260px; margin:0 auto; } }
+  svg .ring { fill:none; stroke:var(--line); } svg .ring.dash { stroke-dasharray:3 3; }
+  svg .miss { fill:var(--miss); } svg .lbl { fill:var(--muted); font-size:9px; text-anchor:middle; }
+  svg .obj { fill:var(--fg); }
+  .advice li { margin:6px 0; }
+  .ready { color:var(--ok); font-weight:600; }
   .scan { border-top:1px solid var(--line); padding:10px 0; }
   .scan:first-child { border-top:0; }
   .state { font-weight:600; }
   .klaar { color:var(--ok); } .fout { color:var(--err); }
-  code { font-size:.9em; }
+  .thumbs { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .thumbs img { width:104px; height:78px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
+  details summary { cursor:pointer; color:var(--accent); }
 </style>
 </head>
 <body>
@@ -40,32 +60,43 @@
   <section class="card">
     <h2>Zo scan je</h2>
     <ol>
-      <li>Print de kalibratiemat op 100%: <a href="mat/A4.pdf">A4</a> of <a href="mat/A3.pdf">A3</a>. Meet de 100 mm-lijnen na.</li>
+      <li>Print de kalibratiemat op 100%: <a href="mat/A4.pdf">A4</a>, <a href="mat/A3.pdf">A3</a> of <a href="mat/Letter.pdf">Letter</a>. Meet beide meetlijnen (X onder, Y links) na met een schuifmaat.</li>
       <li>Leg het onderdeel plat in het midden van de mat, bij diffuus licht (geen felle zon of spot).</li>
-      <li>Maak 30–60 foto's: rondom op twee à drie hoogtes, plus <b>4–6 recht van boven</b>. Zorg dat de mat grotendeels in beeld is, en zoom niet in.</li>
-      <li>Kies of maak de foto's hieronder en upload ze.</li>
+      <li>Maak 30–60 foto's: rondom op twee hoogtes, plus <b>4–6 recht van boven</b>. Houd de mat grotendeels in beeld en zoom niet in.</li>
+      <li>Upload de foto's hieronder: elke foto wordt direct gecontroleerd en je ziet welke foto's nog ontbreken.</li>
     </ol>
   </section>
 
-  <section class="card">
-    <h2>Nieuwe scan</h2>
+  <section class="card" id="nieuw">
+    <h2 id="nieuw-titel">Nieuwe scan</h2>
+    <div class="settings">
+      <label for="mat">Mat</label>
+      <select id="mat">
+        <option value="auto">automatisch herkennen</option>
+        <option value="A4">A4</option><option value="A3">A3</option><option value="Letter">Letter</option>
+        <option value="A4-v1">A4 (oude mat, v1)</option><option value="A3-v1">A3 (oude mat, v1)</option>
+      </select>
+      <label for="meetlijn">Meetlijn X</label>
+      <span><input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"> mm</span>
+      <label for="meetlijn_y">Meetlijn Y</label>
+      <span><input id="meetlijn_y" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"> mm
+        <span class="muted">(100,0 als de print klopt)</span></span>
+    </div>
     <div class="row">
       <label class="btn" for="kies">Foto's kiezen</label>
       <input id="kies" type="file" accept="image/*" multiple>
       <label class="btn" for="maak">Foto maken</label>
       <input id="maak" type="file" accept="image/*" capture="environment">
-      <select id="mat" aria-label="Formaat kalibratiemat"><option>A4</option><option>A3</option></select>
-    </div>
-    <p class="row"><label for="meetlijn">Gemeten meetlijn op de mat:</label>
-      <input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"
-             style="width:6em"> mm <span class="muted">(100,0 als de print klopt)</span></p>
-    <p id="teller" class="muted">Nog geen foto's geselecteerd.</p>
-    <div class="row">
-      <button id="upload" class="primary" disabled>Uploaden en verwerken</button>
-      <button id="wis" disabled>Selectie wissen</button>
+      <label class="row muted" style="gap:6px"><input id="verklein" type="checkbox" checked> verkleinen voor een snellere upload</label>
     </div>
     <progress id="voortgang" value="0" max="1" hidden></progress>
     <p id="melding" class="muted"></p>
+    <div id="lijst" class="photos"></div>
+    <div id="overzicht"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="start" class="primary" disabled>Verwerken</button>
+      <button id="opnieuw" disabled>Nieuwe scan beginnen</button>
+    </div>
   </section>
 
   <section class="card">
@@ -74,36 +105,167 @@
   </section>
 </main>
 <script>
-const files = [];
 const $ = (id) => document.getElementById(id);
-function refreshCount() {
-  $("teller").textContent = files.length ? `${files.length} foto('s) geselecteerd.` : "Nog geen foto's geselecteerd.";
-  $("upload").disabled = files.length === 0;
-  $("wis").disabled = files.length === 0;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} } };
+let current = store.get("ctc_scan");   // id van de scan die nu gevuld wordt
+let busy = false;
+const queue = [];
+
+function settings() {
+  const fd = new FormData();
+  fd.append("mat", $("mat").value);
+  fd.append("meetlijn", $("meetlijn").value.replace(",", ".") || "100");
+  fd.append("meetlijn_y", $("meetlijn_y").value.replace(",", ".") || "100");
+  return fd;
 }
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, body });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || ("fout " + r.status));
+  return data;
+}
+
+// Verkleinen op de telefoon: de pipeline werkt toch op ≤ 2000 px; de upload wordt ~5x kleiner.
+async function shrink(file) {
+  if (!$("verklein").checked || !window.createImageBitmap || !/^image\/(jpeg|png|webp)/.test(file.type)) return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
+    if (scale >= 1) { bmp.close && bmp.close(); return file; }
+    const c = document.createElement("canvas");
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    bmp.close && bmp.close();
+    const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
+    return blob ? new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
+  } catch (e) { return file; }
+}
+
+function upload(file) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append("fotos", file, file.name);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `api/scans/${current}/fotos`);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) { $("voortgang").max = e.total; $("voortgang").value = e.loaded; } };
+    xhr.onload = () => {
+      let data = {}; try { data = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
+      xhr.status === 200 ? resolve(data) : reject(new Error(data.detail || ("fout " + xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error("netwerkfout"));
+    xhr.send(fd);
+  });
+}
+
+async function addFiles(files) {
+  queue.push(...files);
+  if (busy) return;
+  busy = true; $("voortgang").hidden = false;
+  try {
+    if (!current) {
+      const s = await api("POST", "api/scans", settings());
+      current = s.id; store.set("ctc_scan", current);
+    }
+    let done = 0;
+    while (queue.length) {
+      const f = queue.shift();
+      $("melding").textContent = `Foto ${++done} van ${done + queue.length} controleren…`;
+      const data = await upload(await shrink(f));
+      render(data);
+    }
+    $("melding").textContent = "";
+  } catch (e) {
+    $("melding").textContent = "Upload mislukt: " + e.message;
+    queue.length = 0;
+  } finally { busy = false; $("voortgang").hidden = true; }
+}
+
 for (const id of ["kies", "maak"]) {
-  $(id).addEventListener("change", (e) => { files.push(...e.target.files); e.target.value = ""; refreshCount(); });
+  $(id).addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; addFiles(fs); });
 }
-$("wis").addEventListener("click", () => { files.length = 0; refreshCount(); });
-$("upload").addEventListener("click", () => {
-  const form = new FormData();
-  files.forEach((f) => form.append("fotos", f, f.name));
-  form.append("mat", $("mat").value);
-  form.append("meetlijn", $("meetlijn").value.replace(",", ".") || "100");
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "api/scans");
-  $("voortgang").hidden = false; $("upload").disabled = true;
-  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { $("voortgang").max = e.total; $("voortgang").value = e.loaded; } };
-  xhr.onload = () => {
-    $("voortgang").hidden = true;
-    if (xhr.status === 200) { files.length = 0; refreshCount(); $("melding").textContent = "Geüpload: de verwerking loopt op de pc."; load(); }
-    else { $("melding").textContent = "Upload mislukt: " + (JSON.parse(xhr.responseText || "{}").detail || xhr.status); $("upload").disabled = false; }
-  };
-  xhr.onerror = () => { $("voortgang").hidden = true; $("melding").textContent = "Upload mislukt (netwerk)."; $("upload").disabled = false; };
-  xhr.send(form);
+
+function photoRow(p) {
+  const notes = (p.notes || []).join("; ") || (p.tilt_deg != null ? `kijkhoek ${Math.round(p.tilt_deg)}°` : "");
+  return `<div class="photo"><span class="name">${esc(p.name)}</span><span class="badge ${p.verdict}">${esc(p.verdict)}</span>` +
+    `<span class="notes">${esc(notes)}</span><button class="small" data-del="${esc(p.name)}" aria-label="Foto ${esc(p.name)} verwijderen">×</button></div>`;
+}
+
+// Dekkingskaart: het onderdeel in het midden, van boven gezien; afstand tot het midden = hoe schuin.
+function coverage(o) {
+  const R = 100, c = 110, rad = (el) => (90 - el) / 90 * R;
+  let svg = `<svg viewBox="-26 0 272 232" role="img" aria-label="Dekkingskaart: van welke kanten en hoogtes er foto's zijn">`;
+  const bands = { hoog: [50, 80], laag: [20, 50] };
+  for (const [band, [lo, hi]] of Object.entries(bands)) {
+    (o.dekking[band] || []).forEach((n, k) => {
+      if (n > 0) return;
+      const a0 = (k * 45 - 22.5) * Math.PI / 180, a1 = (k * 45 + 22.5) * Math.PI / 180, r0 = rad(hi), r1 = rad(lo);
+      const p = (r, a) => `${(c + r * Math.cos(a)).toFixed(1)},${(c - r * Math.sin(a)).toFixed(1)}`;
+      svg += `<path class="miss" d="M${p(r0, a0)} L${p(r1, a0)} A${r1},${r1} 0 0 0 ${p(r1, a1)} L${p(r0, a1)} A${r0},${r0} 0 0 1 ${p(r0, a0)} Z"/>`;
+    });
+  }
+  for (const el of [80, 50, 20]) svg += `<circle class="ring ${el === 80 ? "dash" : ""}" cx="${c}" cy="${c}" r="${rad(el)}"/>`;
+  svg += `<circle class="ring" cx="${c}" cy="${c}" r="${rad(0)}"/>`;
+  const colors = { goed: "var(--ok)", matig: "var(--warn)", onbruikbaar: "var(--err)" };
+  for (const p of o.punten || []) {
+    const r = rad(p.elevatie), a = p.azimut * Math.PI / 180;
+    svg += `<circle cx="${(c + r * Math.cos(a)).toFixed(1)}" cy="${(c - r * Math.sin(a)).toFixed(1)}" r="3.4" fill="${colors[p.oordeel] || "gray"}"><title>${esc(p.naam)}</title></circle>`;
+  }
+  svg += `<rect class="obj" x="${c - 4}" y="${c - 4}" width="8" height="8" rx="2"/>`;
+  svg += `<text class="lbl" x="${c}" y="7">boven (titel)</text><text class="lbl" x="${c}" y="226">onder (meetlijn X)</text>`;
+  svg += `<text class="lbl" x="-10" y="${c + 3}">links</text><text class="lbl" x="232" y="${c + 3}">rechts</text>`;
+  return svg + "</svg>";
+}
+
+function render(data) {
+  if (!data || !data.overzicht) return;
+  const o = data.overzicht, fotos = data.fotos || [];
+  $("lijst").innerHTML = fotos.map(photoRow).join("");
+  const counts = o.oordelen || {};
+  const head = `<b>${o.fotos} foto's</b> · ${counts.goed || 0} goed, ${counts.matig || 0} matig, ${counts.onbruikbaar || 0} onbruikbaar` +
+    (o.mat ? ` · mat ${esc(o.mat)}` : "") + `<br>recht van boven: ${o.recht_van_boven} (nodig: 4) · rondom: zie de kaart (rood = ontbreekt)`;
+  const advice = (o.advies || []).map((a) => `<li>${esc(a)}</li>`).join("");
+  $("overzicht").innerHTML = fotos.length ? `<div class="overview"><div>${coverage(o)}</div><div><p>${head}</p>` +
+    (o.klaar ? `<p class="ready">Klaar om te verwerken.</p>` : "") + `<ul class="advice">${advice}</ul></div></div>` : "";
+  $("start").disabled = fotos.length < 6;
+  $("opnieuw").disabled = false;
+  $("nieuw-titel").textContent = current ? "Scan vullen" : "Nieuwe scan";
+}
+
+$("lijst").addEventListener("click", async (e) => {
+  const name = e.target.getAttribute && e.target.getAttribute("data-del");
+  if (!name || busy) return;
+  try { render(await api("DELETE", `api/scans/${current}/fotos/${encodeURIComponent(name)}`)); }
+  catch (err) { $("melding").textContent = err.message; }
 });
-const label = { upload: "uploaden", wachtrij: "in de wachtrij", bezig: "bezig", klaar: "klaar", fout: "fout" };
-function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+
+$("start").addEventListener("click", async () => {
+  if (!current || busy) return;
+  try {
+    await api("POST", `api/scans/${current}/start`, settings());
+    $("melding").textContent = "De verwerking loopt op de pc; volg de status hieronder.";
+    reset(false); load();
+  } catch (e) { $("melding").textContent = "Starten mislukt: " + e.message; }
+});
+
+function reset(clearMsg = true) {
+  current = null; store.set("ctc_scan", null);
+  $("lijst").innerHTML = ""; $("overzicht").innerHTML = "";
+  $("start").disabled = true; $("opnieuw").disabled = true;
+  $("nieuw-titel").textContent = "Nieuwe scan";
+  if (clearMsg) $("melding").textContent = "";
+}
+$("opnieuw").addEventListener("click", () => reset());
+
+async function resume(id) {
+  current = id; store.set("ctc_scan", id);
+  try { render(await api("GET", `api/scans/${id}/controle`)); $("nieuw").scrollIntoView({ behavior: "smooth" }); }
+  catch (e) { reset(); }
+}
+
+const label = { upload: "foto's verzamelen", wachtrij: "in de wachtrij", bezig: "bezig", klaar: "klaar", fout: "fout" };
 async function load() {
   try {
     const r = await fetch("api/scans");
@@ -116,15 +278,40 @@ async function load() {
       if (s.state === "klaar") {
         body = ["report.html:rapport", "model.step:STEP", "model.stl:STL", "model.py:CadQuery-script"]
           .map((x) => { const [f, t] = x.split(":"); return `<a href="scans/${s.id}/${f}">${t}</a>`; }).join(" · ");
+        if (s.summary && s.summary.betrouwbaarheid && s.summary.betrouwbaarheid !== "normaal")
+          body += `<div class="fout">betrouwbaarheid ${esc(s.summary.betrouwbaarheid)}</div>`;
       } else if (s.state === "fout") {
         body = `<span class="fout">${esc(s.error || "onbekende fout")}</span>`;
       } else if (s.log && s.log.length) {
         body = `<span class="muted">${esc(s.log[s.log.length - 1])}</span>`;
       }
-      return `<div class="scan"><div><span class="state ${s.state}">${label[s.state] || s.state}</span> · ${esc(when)} · ${s.photos || 0} foto's · mat ${esc(s.mat)}</div><div>${body}</div></div>`;
+      const imgs = (s.debug || []).filter((n) => /\.(jpg|png)$/.test(n));
+      if (imgs.length) {
+        body += `<details><summary>debugbeelden (${imgs.length})</summary><div class="thumbs">` +
+          imgs.map((n) => `<a href="scans/${s.id}/debug/${n}"><img loading="lazy" src="scans/${s.id}/debug/${n}" alt="${esc(n)}"></a>`).join("") +
+          `</div><p class="muted">Oranje = object, blauw = zekere mat.` +
+          ((s.debug || []).includes("diagnose.json") ? ` <a href="scans/${s.id}/debug/diagnose.json">diagnose.json</a>` : "") +
+          `</p></details>`;
+      }
+      const actions = [];
+      if (!["wachtrij", "bezig"].includes(s.state) && s.id !== current)
+        actions.push(`<button class="small" data-resume="${s.id}">${s.state === "upload" ? "verder vullen" : "foto's toevoegen"}</button>`);
+      if (!["wachtrij", "bezig"].includes(s.state)) actions.push(`<button class="small" data-remove="${s.id}">verwijderen</button>`);
+      return `<div class="scan"><div><span class="state ${s.state}">${label[s.state] || s.state}</span> · ${esc(when)} · ` +
+        `${s.photos || 0} foto's · mat ${s.mat === "auto" ? "automatisch" : esc(s.mat)}</div><div>${body}</div><div class="row" style="margin-top:4px">${actions.join("")}</div></div>`;
     }).join("");
   } catch (e) { $("scans").textContent = "Server niet bereikbaar."; }
 }
+$("scans").addEventListener("click", async (e) => {
+  const t = e.target;
+  if (t.dataset && t.dataset.resume) resume(t.dataset.resume);
+  if (t.dataset && t.dataset.remove && confirm("Deze scan en de foto's verwijderen?")) {
+    try { await api("DELETE", `api/scans/${t.dataset.remove}`); if (t.dataset.remove === current) reset(); load(); }
+    catch (err) { $("melding").textContent = err.message; }
+  }
+});
+
+if (current) resume(current);
 load(); setInterval(load, 3000);
 </script>
 </body>

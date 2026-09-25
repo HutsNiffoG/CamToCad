@@ -83,3 +83,30 @@ def test_outlier_rounds_keep_poses_with_their_photos(mat_scan):
     truth = {v.name: v.pose for v in views}
     for name, p in res.poses.items():
         assert np.linalg.norm(p.center - truth[name].center) < 1.0, name
+
+
+def test_mat_format_and_version_are_recognized(mat_scan):
+    spec, cam, views = mat_scan
+    found, _ = calib.identify_mat([(v.name, v.image) for v in views])
+    assert found.name == spec.name
+    for name in ("A3", "Letter", "A4-v1", "A3-v1"):
+        other = mat.PRESETS[name.upper()]
+        vs = render.render_scan(None, other, cam, rings=((50.0, 3),), top_views=1,
+                                distance=450.0 if "A3" in name else 330.0, seed=4)
+        found, _ = calib.identify_mat([v.image for v in vs])
+        assert found is not None and found.name == other.name, name
+
+
+def test_print_scale_is_part_of_the_calibration(mat_scan):
+    """Mat geprint op 100,6% x 99,4%: met de gemeten meetlijnen kloppen poses in werkelijke mm."""
+    spec, cam, _ = mat_scan
+    printed = spec.with_scale(1.006, 0.994)
+    views = render.render_scan(None, printed, cam, rings=((35.0, 5), (55.0, 5), (72.0, 4)), top_views=2, seed=6)
+    board = mat.make_board(spec)
+    dets = [calib.detect(v.image, board, v.name) for v in views]
+    good = calib.calibrate(dets, printed)
+    naive = calib.calibrate(dets, spec)
+    err_good = max(np.linalg.norm(good.poses[v.name].center - v.pose.center) for v in views)
+    err_naive = max(np.linalg.norm(naive.poses[v.name].center - v.pose.center) for v in views)
+    assert err_good < 0.6 and err_naive > 1.0
+    assert good.camera.rms_px < naive.camera.rms_px

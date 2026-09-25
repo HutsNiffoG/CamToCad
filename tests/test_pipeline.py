@@ -50,12 +50,14 @@ def test_bracket_scan_end_to_end(tmp_path):
     assert ns["model"].val().isValid()
 
 
-def test_wrong_mat_size_is_named(tmp_path):
+def test_wrong_mat_choice_is_overruled_by_the_photos(tmp_path):
     views = render.render_scan(None, mat.PRESETS["A3"], render.default_camera(), rings=((50.0, 6),), top_views=0,
                                distance=450.0, seed=2)
-    with pytest.raises(pipeline.ScanError, match="A3-mat"):
+    lines = []
+    with pytest.raises(pipeline.ScanError, match="Geen object"):  # lege mat: wel herkend, geen object
         pipeline.run_scan([(v.name, v.image) for v in views], tmp_path, pipeline.ScanOptions(mat="A4"),
-                          log=lambda m: None)
+                          log=lines.append)
+    assert any("tonen mat A3" in line for line in lines)
 
 
 def test_scaled_part_scales_every_dimension():

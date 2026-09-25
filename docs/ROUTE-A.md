@@ -1,10 +1,10 @@
-# Route A — lokaal en open source (v0.2)
+# Route A — lokaal en open source (v0.3)
 
 Dit is de uitvoering van profiel A uit [OPEN-SOURCE-LOKAAL.md](OPEN-SOURCE-LOKAAL.md): foto's van een onderdeel op een geprinte kalibratiemat gaan naar je eigen pc, die er een CAD-model van maakt. Er is geen cloud nodig en er zijn geen licentiekosten; alle afhankelijkheden hebben een permissieve open-sourcelicentie.
 
 | | |
 |---|---|
-| **Status** | v0.2 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, donkere en witte onderdelen, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x); validatie met echte foto's volgt (Fase 0) |
+| **Status** | v0.3 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, donkere en witte onderdelen, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
 | **Objectklasse** | 2,5D-onderdelen die plat op de mat liggen: extrusie van een contour (rechte randen met scherpe of afgeronde hoeken, of een cirkel) met doorgaande gaten |
 | **Uitvoer** | `model.step`, `model.stl`, parametrisch CadQuery-script `model.py`, meetrapport `report.html` / `report.json` |
 | **Platform** | Windows, macOS en Linux met Python 3.10–3.12; geen GPU nodig |
@@ -27,16 +27,31 @@ camtocad demo --uit camtocad-demo
 
 ## Gebruiken
 
-1. **Mat printen.** `camtocad mat --formaat A4` schrijft `kalibratiemat_A4.pdf`. Print op 100% (werkelijke grootte) op mat papier en meet de lijnen van 100,0 mm na. Is een lijn bijvoorbeeld 99,6 mm, geef dat dan op (`--meetlijn 99.6`, of het veld op de telefoonpagina): alle maten worden dan gecorrigeerd. Leg de mat vlak op een stijve ondergrond.
+1. **Mat printen.** `camtocad mat --formaat A4` (of `A3`, `Letter`) schrijft `kalibratiemat_A4.pdf`.
+   - Print op 100% (werkelijke grootte), op mat papier, en leg de mat vlak op een stijve ondergrond.
+   - Meet beide meetlijnen van 100,0 mm na: **X** onder de mat, **Y** links. Wijken ze af, geef ze dan op, bijvoorbeeld `--meetlijn 99.6 99.8`, of in de velden op de telefoonpagina. De printschaal wordt dan per richting gecorrigeerd.
+   - Dit is mat v2: in elk zwart vak een raster witte stippen, zodat ook een donker onderdeel op een zwart vak te zien is. Een eerder geprinte mat (v1) werkt nog en wordt automatisch herkend, net als het formaat.
 2. **Foto's maken.** Leg het onderdeel plat in het midden van de mat, bij diffuus licht. Maak 30–60 foto's met de gewone camera-app van je telefoon (JPG):
    - rondom, op twee à drie hoogtes (ongeveer 35°, 55° en 70° boven de mat);
    - **4–6 foto's recht van boven**: nodig voor de contour en om door gaten heen te kijken;
    - de mat steeds grotendeels in beeld, niet inzoomen, zelfde lens (geen groothoek/tele wisselen).
-3. **Verwerken**, op één van twee manieren:
-   - **Via de browser van je telefoon:** start `camtocad server` op de pc en open op je telefoon (zelfde wifi) de link die in de terminal verschijnt, inclusief `?token=…`. Kies of maak daar de foto's; na de verwerking staan rapport, STEP, STL en script klaar om te downloaden.
-   - **Via de opdrachtregel:** kopieer de foto's naar een map en draai `camtocad scan <map>`. De uitvoer komt in `<map>_cad/`.
+3. **Controleren en verwerken**, op één van twee manieren:
+   - **Via de browser van je telefoon:** start `camtocad server` op de pc en open op je telefoon (zelfde wifi) de link die in de terminal verschijnt, inclusief `?token=…`. Kies of maak daar de foto's.
+     - Elke foto wordt direct gecontroleerd: is de mat gevonden, is de foto scherp en goed belicht.
+     - Een dekkingskaart toont in het rood welke richtingen nog ontbreken, met aanwijzingen zoals "nog 2 foto's recht boven het onderdeel".
+     - Slechte foto's verwijder je met ×. Ontbrekende foto's voeg je toe, ook later aan een mislukte scan.
+     - Daarna tik je op **Verwerken**. Rapport, STEP, STL en script staan daarna klaar om te downloaden, bij een fout met de debugbeelden erbij.
+   - **Via de opdrachtregel:** kopieer de foto's naar een map. `camtocad controleer <map>` beoordeelt de set in een paar seconden. `camtocad scan <map>` verwerkt hem; de uitvoer komt in `<map>_cad/`.
 
-Opties voor `scan`: `--mat A3`, `--meetlijn 99.6` (gemeten lengte van de 100 mm-lijn), `--max-zijde 2000` (werkresolutie), `--snapdrempel 0.8`, `--inch` (snappen naar inchmaten).
+Opties voor `scan`:
+
+- `--mat`: `A4`, `A3`, `Letter`, `A4-v1` of `A3-v1`. Standaard wordt de mat herkend aan de markers.
+- `--meetlijn X [Y]`: gemeten lengte van de 100 mm-lijnen.
+- `--max-zijde 2000`: werkresolutie.
+- `--snapdrempel 0.8`.
+- `--inch`: snappen naar inchmaten.
+
+Om te meten hoe nauwkeurig scans van je eigen onderdelen zijn, vergelijk je ze met schuifmaatmetingen: `camtocad valideer`, zie [FASE-0.md](FASE-0.md).
 
 ## Als het niet lukt
 
@@ -47,7 +62,7 @@ Elke scan schrijft diagnosebeelden naar `<uitvoer>/debug/`, ook als de verwerkin
 | `masker_<foto>.jpg` | Het objectmasker over de foto: **oranje** = object, **blauw** = zekere mat. Alle gebruikte bovenaanzichten en een paar schuine foto's |
 | `lokalisatie.png` | De grove visual hull van boven over de mat (lichter = hoger), met het zoekgebied |
 | `bovenaanzicht.png` | Hoe vaak de bovenaanzichten "object" zeggen op de gekozen hoogte (geel = allemaal), met de startcontour in cyaan |
-| `diagnose.json` | Per foto: kijkhoek, objectaandeel, ruis en mathoeken; de hoogtezoektocht; de terugvalopties die zijn geprobeerd |
+| `diagnose.json` | Per foto: kijkhoek, onscherpte, objectaandeel, ruis en mathoeken; de dekking rond het object; de hoogtezoektocht; de terugvalopties die zijn geprobeerd |
 
 Meest voorkomende meldingen:
 
@@ -55,16 +70,19 @@ Meest voorkomende meldingen:
   - Kijk in `masker_top*.jpg` of het onderdeel oranje is.
   - Is het grotendeels grijs, dan steekt het te weinig af tegen de mat. Dat gebeurt bij een donker onderdeel op de zwarte vakken of een wit onderdeel op wit.
   - Oplossing: diffuus licht, het onderdeel midden op de mat, en 4–6 foto's recht boven het onderdeel met de hele mat in beeld.
-- **"De foto's tonen de A3-mat, niet de A4-mat"**: kies de juiste mat (`--mat A3`).
+  - Achter de melding staat welke foto's er rond het object nog ontbreken.
+- **"gekozen mat A4, maar de foto's tonen mat A3"**: de mat op de foto's is gebruikt. Controleer of dat de mat is die je bedoelde.
 - **"betrouwbaarheid: laag"** in het rapport. Het model is gemaakt, maar iets klopt niet; de reden staat erbij. Bijvoorbeeld een gat dat als niet-ronde uitsparing is herkend, of een model dat in sommige foto's slecht past. Controleer die maten.
 - **Foto's "niet gebruikt (afwijkend formaat)"**: andere lens, zoom of bijgesneden. Staand opgeslagen foto's worden automatisch teruggedraaid.
+- **"foto's onscherp (σ > 1,8 px)"**: bewogen of niet scherp gesteld. Maak ze opnieuw; `camtocad controleer` laat per foto de onscherpte zien.
 
 ## Hoe het werkt
 
 | Stap | Module | Wat er gebeurt | Architectuur |
 |---|---|---|---|
-| Mat | `mat.py`, `pdf.py` | ChArUco-mat als vector-PDF op exacte schaal, met meetlijnen en stippen voor extra textuur | §4.5 |
-| Camera | `calib.py` | Mat herkennen, camera zelf kalibreren (Zhang), per foto een metrische pose: de mat is de tracker. De hoekverschuiving van de geïnstalleerde OpenCV-versie wordt gemeten en gecorrigeerd; staand opgeslagen foto's worden teruggedraaid | §4.5, OPEN-SOURCE-LOKAAL §2.1 |
+| Mat | `mat.py`, `pdf.py` | ChArUco-mat als vector-PDF op exacte schaal, met meetlijnen X en Y en een stippenraster in de zwarte vakken. Eigen marker-ID's per formaat: de mat wordt herkend | §4.5 |
+| Fotocontrole | `preflight.py` | Per foto: mat, onscherpte (gemeten aan de matranden), belichting, kijkhoek. Per scan: waar ligt het object, dekking per richting en hoogte, aanwijzingen | — |
+| Camera | `calib.py` | Mat herkennen, camera zelf kalibreren (Zhang), per foto een metrische pose: de mat is de tracker. De printschaal (X en Y) zit in de matgeometrie. De hoekverschuiving van de geïnstalleerde OpenCV-versie wordt gemeten en gecorrigeerd; staand opgeslagen foto's worden teruggedraaid | §4.5, OPEN-SOURCE-LOKAAL §2.1 |
 | Maskers | `masks.py` | Voorspel per foto hoe de mat eruitziet; afwijkingen zijn object. "Zekere mat" alleen waar het lokale patroon de mat herhaalt (correlatie), zodat donkere en witte onderdelen niet wegvallen en schaduwen mat blijven. Randpixels volgens de 50%-regel | §5.3 [R3c] |
 | Lokaliseren | `hull.py` | Grove visual hull (2 mm): waar ligt het object, en een bovengrens voor de hoogte | §5.3 [R3c] |
 | Startmodel | `initial.py`, `profile.py` | Hoogte zoeken waarop de bovenaanzichten samenvallen, terugprojecteren → contour → randen, afrondingen, gaten; met terugvalopties en een uitgelegde fout | §6.3–6.5 |
@@ -72,7 +90,8 @@ Meest voorkomende meldingen:
 | Ontwerpintentie | `snapping.py`, `cadmodel.py` | Werkassenstelsel met datum, randen exact haaks, Bayesiaans snappen (hele mm, ISO 273, tapboormaten, standaardstralen), steekcirkels | §6.6 |
 | CAD | `cadmodel.py`, `cadhelpers.py` | OpenCascade-solid via CadQuery, STEP/STL-export, leesbaar script met benoemde maten | §6.9 |
 | Kwaliteit | `pipeline.py`, `debug.py` | Kwaliteitspoort (past het model bij de foto's?) en diagnosebeelden in `debug/` | §4.6 |
-| Rapport | `report.py` | Maten met U95 en snapreden, betrouwbaarheid, bovenaanzicht, samenvatting, waarschuwingen | §4.6 |
+| Rapport | `report.py` | Maten met U95 en snapreden, betrouwbaarheid, bovenaanzicht, samenvatting, waarschuwingen; de geometrie staat ook in `report.json` | §4.6 |
+| Validatie | `validate.py` | Scans vergelijken met schuifmaatmetingen (`maten.json`): fout per maat, binnen U95 ja/nee, bias per soort, printschaalcontrole | §8 |
 
 **Waarom silhouetten en geen MVS?** Voor deze objectklasse zijn silhouetten nauwkeuriger en robuuster: ze hebben geen textuur op het object nodig en zijn ongevoelig voor glans. Een visual hull alléén is niet genoeg: van bovenaf is het bovenvlak niet te zien, en de wanden worden te ruim. De maten komen daarom uit het fitten van het parametrische model op de randen in alle foto's — de "model-gebaseerde verfijning" uit het architectuurdocument. MVS (COLMAP/OpenMVS) volgt voor vrije vormen.
 

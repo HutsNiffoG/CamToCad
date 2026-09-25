@@ -86,6 +86,16 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
     decision = np.abs(o - bgv) > 0.5 * contrast
     out = fg.copy()
     out[usable] = decision[usable]
+    # Randpixels zonder bruikbaar contrast (de voorspelde mat is daar toevallig even grijs als het
+    # object, bijv. op een vervaagde stiprand) zeggen niets: die volgen de meerderheid van de
+    # beslisbare pixels in een 5x5-omgeving, in plaats van standaard 'mat' te zijn.
+    unsure = band & ~usable & (den > 0)
+    if unsure.any():
+        sure = (valid & ~unsure).astype(np.float32)
+        n_fg = cv2.boxFilter(out.astype(np.float32) * sure, -1, (5, 5), normalize=False)
+        n_sure = cv2.boxFilter(sure, -1, (5, 5), normalize=False)
+        fill = unsure & (n_sure > 0)
+        out[fill] = (n_fg > 0.5 * n_sure)[fill]
     return out
 
 
@@ -140,12 +150,19 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     o = o - _normconv(r, w, 35.0, 0.0)
 
     # textuurbewijs: lokale correlatie tussen foto en voorspelling
-    _, _, vo, vp, cov = _local_stats(o, p, window)
+    mo, mp, vo, vp, cov = _local_stats(o, p, window)
     ncc = cov / np.sqrt(vo * vp + 1e-6)
     s_pred = np.sqrt(vp) * abs(a)  # verwacht lokaal contrast (grijswaarden van de foto)
     s_obs = np.sqrt(vo)
     textured = valid & (s_pred > texture_min)
     mat_seen = textured & (ncc > ncc_mat) & (s_obs > 0.25 * s_pred) & (s_obs < 2.5 * s_pred)
+    # Bron voor de lokale versterking: alleen vensters waar niveau en contrast dezelfde versterking
+    # geven, zoals bij mat in schaduw of glans. Een objectrand die toevallig met het patroon
+    # correleert (bijv. de rand van een gat langs een vakrand) geeft twee verschillende 'versterkingen'
+    # en zou anders het object in de buurt als beschaduwde mat laten doorgaan.
+    g_level = mo / np.maximum(a * mp + b, 1.0)
+    g_contrast = s_obs / np.maximum(s_pred, 1e-3)
+    gain_src = mat_seen & (np.abs(np.log(np.maximum(g_level, 1e-3) / np.maximum(g_contrast, 1e-3))) < 0.25)
 
     # tolerantie voor een kleine posefout: evenredig met de lokale gradiënt van de voorspelling
     # (een vast 3x3-min/max-venster is te ruim: objectpixels op patroonranden zouden dan 'mat' lijken)
@@ -179,14 +196,23 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     den_img = a * p + b
     gain = np.ones_like(o)
     if use_gain:
-        src = mat_seen.astype(np.float32)
+        # Niet vlak naast bewijs voor het object: textuur die ontbreekt, of een afwijking waar de mat
+        # geen textuur heeft (een schaduw op gestippeld zwart behoudt zijn textuur en telt dus niet).
+        # Anders kan een objectrand die samenvalt met een vakrand (grijs object naast het donkere
+        # gat, op de plek van een zwart-witovergang) als 'mat in schaduw' de versterking omlaag
+        # trekken, en valt het object ernaast weg als beschaduwd wit.
+        fg0 = foreground(np.ones_like(o))[0]
+        evidence = (texture_missing | (fg0 & ~textured)).astype(np.uint8)
+        near_obj = cv2.dilate(evidence, np.ones((2 * window + 1, 2 * window + 1), np.uint8)) > 0
+        gain_src &= ~near_obj
+        src = gain_src.astype(np.float32)
         for _ in range(2):
             num = cv2.GaussianBlur(o * src, (0, 0), 6.0)
             den = cv2.GaussianBlur(den_img * src, (0, 0), 6.0)
             wsum = cv2.GaussianBlur(src, (0, 0), 6.0)
             gain = np.where(wsum > 0.05, np.clip(num / np.maximum(den, 1e-3), 0.2, 2.5), 1.0).astype(np.float32)
             fit = np.abs(o - gain * den_img) < np.maximum(3.0 * sigma, 0.08 * gain * den_img)
-            src = (mat_seen & fit).astype(np.float32)
+            src = (gain_src & fit).astype(np.float32)
         dev = gain - 1.0
         gain = (1.0 + np.sign(dev) * np.maximum(np.abs(dev) - 0.03, 0.0)).astype(np.float32)
     fg, bgv, res, tau, sigma = foreground(gain)
@@ -196,10 +222,18 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     # ook de pixels tot aan de objectrand: hun venster overlapt het object, maar een venster er vlak
     # naast (binnen de vensterstraal) is wel geverifieerd. Zonder die randstrook zou het model
     # goedkoop over de rand kunnen groeien ('onbekend' kost minder dan 'mat').
+    # Alleen pixels die duidelijk op de mat lijken en niet op het object ernaast: bij een fijn
+    # matpatroon heeft de voorspelde mat vlak naast de rand vaak tussenwaarden (vervaagde stippen),
+    # en dan lijkt ook een objectpixel in de eerste ringen op 'mat'. Zulke twijfelpixels blijven
+    # 'onbekend' in plaats van de fit naar binnen te duwen.
     match = valid & ~fg & (res <= tau)
     mean15 = cv2.blur(p, (15, 15))
     texture15 = np.sqrt(np.maximum(cv2.blur(p * p, (15, 15)) - mean15 * mean15, 0.0)) * abs(a)
     near_seen = cv2.dilate(mat_seen.astype(np.uint8), np.ones((window, window), np.uint8)) > 0
-    edge_bg = match & near_seen & (texture15 > 1.8 * texture_min)
+    inner = cv2.erode(fg.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(np.float32)
+    obj_den = cv2.boxFilter(inner, -1, (11, 11), normalize=False)
+    obj = cv2.boxFilter(o * inner, -1, (11, 11), normalize=False) / np.maximum(obj_den, 1e-6)
+    clearly_mat = (obj_den <= 0) | (np.abs(o - bgv) < 0.3 * np.abs(obj - bgv))
+    edge_bg = match & near_seen & (texture15 > 1.8 * texture_min) & clearly_mat
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
     return ViewMasks(fg=fg, bg=match & mat_seen & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma)

@@ -19,8 +19,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import __version__, cadmodel, calib, debug, hull, initial, masks, report, silhouette
-from .mat import get_spec, rasterize_board
+from . import __version__, cadmodel, calib, debug, hull, initial, masks, preflight, report, silhouette
+from .mat import MatSpec, get_spec, rasterize_board
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
@@ -31,13 +31,22 @@ class ScanError(ValueError):
 
 @dataclass
 class ScanOptions:
-    mat: str = "A4"
+    mat: str = "auto"  # "auto": herkend aan de markers; of een matnaam (A4, A3, Letter, A4-v1, A3-v1)
     max_side: int = 2000  # werkresolutie: langste zijde in pixels
     snap_threshold: float = 0.8
     imperial: bool = False
     max_evals: int = 1500
     debug_images: bool = True
-    mat_scale: float = 1.0  # gemeten / nominale lengte van de meetlijn (printschaal van de mat)
+    # printschaal: gemeten / nominale lengte van de meetlijnen; één getal (beide richtingen) of (X, Y)
+    mat_scale: float | tuple[float, float] = 1.0
+
+    @property
+    def scale_xy(self) -> tuple[float, float]:
+        s = self.mat_scale
+        if isinstance(s, (int, float)):
+            return float(s), float(s)
+        sx, sy = s
+        return float(sx), float(sy)
 
 
 def load_images(folder: str | Path, max_side: int = 2000, log=print) -> list[tuple[str, np.ndarray]]:
@@ -45,7 +54,7 @@ def load_images(folder: str | Path, max_side: int = 2000, log=print) -> list[tup
     paths = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in IMAGE_EXT)
     out = []
     for p in paths:
-        img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
+        img = preflight.read_gray(p)  # ook met niet-ASCII-tekens in het pad (Windows)
         if img is None:
             log(f"  overgeslagen (onleesbaar): {p.name}")
             continue
@@ -69,20 +78,20 @@ NO_CONTOUR_HELP = (
 )
 
 
-def _check_other_mats(images, spec) -> None:
-    """Weinig mat gevonden: is het misschien een ander matformaat dan gekozen?"""
-    from .mat import PRESETS
+def choose_mat(images, requested: str | None, warnings: list[str], log=print) -> MatSpec:
+    """De mat op de foto's (herkend aan de markers); een afwijkende keuze wordt gemeld en overruled."""
+    asked = None if not requested or requested.lower() == "auto" else get_spec(requested)
+    found, _ = calib.identify_mat(images)
+    if found is None:  # niets herkend: de detectie hieronder geeft de uitleg
+        return asked or get_spec("A4")
+    if asked is not None and found.name != asked.name:
+        warnings.append(f"gekozen mat {asked.label}, maar de foto's tonen mat {found.label}: die is gebruikt")
+        log(f"LET OP: de foto's tonen mat {found.label}, niet {asked.label}; mat {found.label} gebruikt")
+    return found
 
-    sample = images[:: max(1, len(images) // 6)][:6]
-    for other in PRESETS.values():
-        if other.name == spec.name:
-            continue
-        board = calib.make_board(other)
-        det = calib.make_detector(board)
-        hits = sum(calib.detect(img, board, name, det) is not None for name, img in sample)
-        if hits >= max(2, len(sample) // 2):
-            raise ScanError(f"De foto's tonen de {other.name}-mat, niet de {spec.name}-mat: kies mat {other.name} "
-                            f"(opdrachtregel: --mat {other.name})")
+
+def _advice(cov: dict) -> str:
+    return (" Voor een nieuwe fotoset: " + " ".join(cov["advies"])) if cov.get("advies") else ""
 
 
 def _quality_issues(part, stats: dict, evals: int, max_evals: int) -> list[str]:
@@ -107,13 +116,19 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     t_start = time.time()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    spec = get_spec(opts.mat)
+    sx, sy = opts.scale_xy
+    for axis, s in (("X", sx), ("Y", sy)):
+        if not 0.9 < s < 1.1:
+            raise ScanError(f"Meetlijn {axis} {100 * s:.1f} mm wijkt te veel af van 100 mm: print de mat opnieuw op "
+                            "100% (werkelijke grootte)")
     if not isinstance(images, list):
         scan_name = scan_name or Path(images).name
         images = load_images(images, opts.max_side, log)
     if len(images) < 6:
         raise ScanError(f"Te weinig foto's ({len(images)}); maak er minstens 20, rondom en recht van boven")
     warnings: list[str] = []
+    spec = choose_mat(images, opts.mat, warnings, log).with_scale(sx, sy)
+    log(f"kalibratiemat: {spec.label}" + (f", printschaal X {sx:.4f}, Y {sy:.4f}" if spec.is_scaled else ""))
 
     dbg = out / "debug"
     if opts.debug_images:
@@ -134,11 +149,6 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         else:
             dets.append(d)
     log(f"mat gevonden in {len(dets)} van {len(images)} foto's")
-    if len(dets) < 6:
-        _check_other_mats(images, spec)
-    if not 0.9 < opts.mat_scale < 1.1:
-        raise ScanError(f"Meetlijn {100 * opts.mat_scale:.1f} mm wijkt te veel af van 100 mm: print de mat "
-                        "opnieuw op 100% (werkelijke grootte)")
     try:
         cal = calib.calibrate(dets, spec)
     except ValueError as e:
@@ -170,6 +180,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append(f"{name}: niet gebruikt ({reason})")
     log(f"camera gekalibreerd: f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px, "
         f"{len(cal.poses)} poses")
+    # onscherpte per foto, gemeten aan de mat (preflight.py)
+    blur = {d.name: preflight.measure_blur(lookup[d.name], d, spec) for d in dets if d.name in cal.poses}
+    blurry = sorted(n for n, b in blur.items() if b is not None and b > preflight.BLUR_WARN)
+    if blurry:
+        warnings.append(f"{len(blurry)} foto('s) onscherp (σ > {preflight.BLUR_WARN:.1f} px): "
+                        + ", ".join(blurry[:6]) + (" ..." if len(blurry) > 6 else ""))
 
     # 3. objectmaskers
     raster = rasterize_board(spec, 10.0, 3.0)
@@ -186,7 +202,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if not opts.debug_images:
             return
         diag.update(extra or {})
-        diag["fotos"] = debug.view_table(views, {d.name: d for d in dets}, {p.name for p, _ in top_views})
+        diag["fotos"] = debug.view_table(views, {d.name: d for d in dets}, {p.name for p, _ in top_views}, blur)
         debug.write_json(dbg / "diagnose.json", diag)
 
     def write_overlays() -> None:
@@ -198,14 +214,15 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                         debug.mask_overlay(calib.undistort(lookup[pose.name], cam), m))
 
     # 4. grove visual hull: waar staat het object ongeveer? (alleen lokaliseren en een bovengrens)
-    board_bounds = (0.0, spec.board_w_mm, 0.0, spec.board_h_mm)
+    board_bounds = (0.0, spec.size_mm[0], 0.0, spec.size_mm[1])
     try:
         coarse = hull.reconstruct(views, cam.K, board_bounds, fine=False)
     except ValueError as e:
         top_views = initial.select_top_views(views)
+        cov = preflight.coverage(cal.poses, [board_bounds[1] / 2, board_bounds[3] / 2, 0.0])
         write_overlays()
-        write_debug()
-        raise ScanError(f"{e}. " + NO_CONTOUR_HELP.format(debug=dbg)) from e
+        write_debug({"dekking": cov})
+        raise ScanError(f"{e}. " + NO_CONTOUR_HELP.format(debug=dbg) + _advice(cov)) from e
     ijk = np.argwhere(coarse.occ)
     lo = coarse.origin + ijk.min(axis=0) * coarse.voxel
     hi = coarse.origin + ijk.max(axis=0) * coarse.voxel
@@ -213,6 +230,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     target = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, 0.0])
     top_views = initial.select_top_views(views, target)
     n_top = sum(initial.tilt_deg(p, target) <= 25.0 for p, _ in views)
+    cov = preflight.coverage(cal.poses, target)  # welke foto's ontbreken er rond het object?
+    diag["dekking"] = cov
     write_overlays()
     log(f"object gelokaliseerd: {hi[0] - lo[0]:.0f} x {hi[1] - lo[1]:.0f} mm, hoogte ≤ {z_top:.0f} mm")
     if opts.debug_images:
@@ -224,7 +243,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         write_debug()
         tilts = sorted(initial.tilt_deg(p, target) for p, _ in views)
         raise ScanError("Geen bovenaanzichten gevonden: maak ook 4-6 foto's recht boven het object "
-                        f"(de steilste foto kijkt nu onder {tilts[0]:.0f}° naar het object; nodig is ≤ 25°)")
+                        f"(de steilste foto kijkt nu onder {tilts[0]:.0f}° naar het object; nodig is ≤ 25°)."
+                        + _advice(cov))
     log(f"bovenaanzichten: {len(top_views)} gebruikt (kijkhoek "
         + ", ".join(f"{initial.tilt_deg(p, target):.0f}°" for p, _ in top_views) + ")")
     try:
@@ -236,7 +256,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             cv2.imwrite(str(dbg / "bovenaanzicht.png"), debug.footprint_image(fp))
         write_debug({"startmodel": {"fout": str(e), "pogingen": e.details}})
         raise ScanError("Geen objectcontour gevonden in de foto's recht van boven. "
-                        + NO_CONTOUR_HELP.format(debug=dbg)) from e
+                        + NO_CONTOUR_HELP.format(debug=dbg) + _advice(cov)) from e
     warnings += init.notes
     sweep = init.sweep
     if sweep is not None and sweep.best is not None:
@@ -287,12 +307,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if issues:
         log("LET OP, resultaat onbetrouwbaar: " + "; ".join(issues))
         warnings[:0] = [f"onbetrouwbaar: {i}" for i in issues]
+    if not cov["compleet"]:
+        warnings.append("fotoset onvolledig: " + " ".join(cov["advies"]))
 
-    # 7. onzekerheid, werkassenstelsel, printschaal, snappen
-    unc = cadmodel.estimate_uncertainty(mm_per_px * opts.mat_scale, len(vd), n_top)
+    # 7. onzekerheid, werkassenstelsel, snappen (de printschaal zit al in de poses)
+    unc = cadmodel.estimate_uncertainty(mm_per_px, len(vd), n_top)
     part_pf, angle, shift = cadmodel.to_part_frame(part)
-    if opts.mat_scale != 1.0:  # mat niet op precies 100% geprint: alles schaalt mee (gelijkvormig)
-        part_pf = part_pf.scaled(opts.mat_scale)
     snapped, snaps = cadmodel.snap_part(part_pf, unc, threshold=opts.snap_threshold, imperial=opts.imperial)
     if snapped.outer.kind == "polygon" and not snapped.outer.is_valid():
         warnings.append("gesnapte contour was ongeldig; ongesnapte maten gebruikt")
@@ -300,7 +320,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                                    for s in snaps]
     # controle: past het gesnapte model nog bij de foto's?
     c, s_ = math.cos(-angle), math.sin(-angle)
-    back = snapped.scaled(1.0 / opts.mat_scale).transformed(-angle, -(np.array([[c, -s_], [s_, c]]) @ shift))
+    back = snapped.transformed(-angle, -(np.array([[c, -s_], [s_, c]]) @ shift))
     stats_snap = silhouette.view_stats(back, cam.K, vd)
     if stats_snap["iou_median"] < stats_fit["iou_median"] - 0.01:
         warnings.append("het gesnapte model wijkt merkbaar af van de silhouetten; controleer de gesnapte maten")
@@ -322,10 +342,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "foto's gebruikt": f"{len(cal.poses)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
         "camera": f"f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px",
         "betrouwbaarheid": "laag: " + "; ".join(issues) if issues else "normaal",
-        "resolutie op het object": f"{mm_per_px * opts.mat_scale:.3f} mm/pixel",
-        "schaalbron": f"kalibratiemat {spec.mat_id}" + (
-            f", printschaal gecorrigeerd (meetlijn {100 * opts.mat_scale:.2f} mm)" if opts.mat_scale != 1.0
-            else " (meetlijn niet opgegeven: aangenomen 100,0 mm)"),
+        "resolutie op het object": f"{mm_per_px:.3f} mm/pixel",
+        "schaalbron": f"kalibratiemat {spec.label} ({spec.mat_id})" + (
+            f", printschaal gecorrigeerd (meetlijn X {100 * sx:.2f} mm, Y {100 * sy:.2f} mm)" if spec.is_scaled
+            else " (meetlijnen niet opgegeven: aangenomen 100,0 mm)"),
         "silhouet-IoU (gefit)": f"mediaan {stats_fit['iou_median']:.4f}, minimum {stats_fit['iou_min']:.4f}",
         "silhouet-IoU (gesnapt)": f"mediaan {stats_snap['iou_median']:.4f}",
         "geldige solid": "ja" if model.val().isValid() else "nee",
@@ -337,11 +357,15 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "camtocad": __version__,
         "summary": summary,
         "dimensions": [s.to_dict() for s in snaps],
+        "geometry": {"gefit": part_pf.to_dict(), "gesnapt": snapped.to_dict(),
+                     "assenstelsel": "werkassenstelsel (datum linksonder), mm"},
         "uncertainty_model": unc.to_dict(),
         "warnings": warnings,
         "files": {"step": "model.step", "stl": "model.stl", "script": "model.py", "json": "report.json"},
-        "frame": {"angle_rad": angle, "shift_mm": shift.tolist(), "mat_scale": opts.mat_scale,
-                  "beschrijving": "werkcoördinaten = mat_scale · (R(angle) · mat-XY + shift)"},
+        "frame": {"angle_rad": angle, "shift_mm": shift.tolist(), "printschaal": [sx, sy],
+                  "beschrijving": "werkcoördinaten = R(angle) · mat-XY + shift; mat-XY in werkelijke mm "
+                                  "(printschaal al verwerkt)"},
+        "mat": {"naam": spec.name, "versie": spec.version, "mat_id": spec.mat_id},
         "quality": {"status": "onbetrouwbaar" if issues else "normaal", "issues": issues},
         "camera": cam.to_dict(),
         "poses": {n: p.to_dict() for n, p in cal.poses.items()},
@@ -373,6 +397,9 @@ def run_demo(out_dir: str | Path, log=print, seed: int = 5) -> dict:
     for v in views:
         cv2.imwrite(str(photos / f"{v.name}.png"), v.image)
     result = run_scan(photos, out / "resultaat", ScanOptions(mat="A4"), log=log, scan_name="demo")
-    truth = {"hoogte": 12.0, "x-maat": 80.0, "y-maat": 40.0, "gat Ø": 6.6, "afronding R": 3.0}
-    (out / "waarheid.json").write_text(json.dumps(truth, indent=2), encoding="utf-8")
+    # de werkelijke maten in het formaat van `camtocad valideer` (validate.py)
+    truth = {"naam": "demo: beugel 80 x 40 x 12", "mat": "A4",
+             "maten": {"lengte": 80.0, "breedte": 40.0, "hoogte": 12.0, "gaten": [6.6, 6.6],
+                       "hartafstanden": [60.0], "afrondingen": [3.0, 3.0, 3.0, 3.0]}}
+    (out / "maten.json").write_text(json.dumps(truth, indent=2, ensure_ascii=False), encoding="utf-8")
     return result

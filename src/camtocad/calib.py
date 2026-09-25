@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from .mat import MatSpec, board_to_mat_transform, make_board
+from .mat import PRESETS, MatSpec, board_to_mat_transform, make_board
 
 
 @dataclass
@@ -25,6 +25,7 @@ class BoardDetection:
     corners: np.ndarray  # (N, 2) subpixel-hoeken van het schaakbord
     ids: np.ndarray  # (N,) hoek-ID's
     n_markers: int
+    marker_ids: np.ndarray | None = None  # ID's van de gevonden markers
 
 
 @dataclass
@@ -114,7 +115,44 @@ def detect(gray: np.ndarray, board, name: str = "", detector=None, bias=None) ->
         name=name, width=gray.shape[1], height=gray.shape[0],
         corners=corners, ids=ids.ravel().astype(np.int32),
         n_markers=0 if marker_ids is None else len(marker_ids),
+        marker_ids=None if marker_ids is None else np.asarray(marker_ids).ravel().astype(np.int32),
     )
+
+
+ALL_MARKERS = "DICT_5X5_1000"  # bevat DICT_5X5_250 (v1) als eerste 250 markers: één zoektocht voor alle matten
+
+
+def identify_mat(images, candidates=None, max_images: int = 8) -> tuple[MatSpec | None, dict[str, int]]:
+    """Welke mat staat op de foto's (formaat en versie)?
+
+    Zoekt markers met een woordenboek dat alle matten dekt en houdt de matten over waarvan
+    markers gezien zijn. v2-matten hebben elk een eigen ID-bereik, dus dat is meestal één mat.
+    De v1-matten A4 en A3 delen ID's: dan beslist het aantal schaakbordhoeken dat met de indeling
+    van elke mat klopt. `images`: beelden of (naam, beeld)-paren. Geeft (mat of None, {mat: score}).
+    """
+    candidates = list(candidates or PRESETS.values())
+    sample = images[:: max(1, len(images) // max_images)][:max_images]
+    sample = [im[1] if isinstance(im, tuple) else im for im in sample]
+    sample = [cv2.cvtColor(im, cv2.COLOR_BGR2GRAY) if im.ndim == 3 else im for im in sample]
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, ALL_MARKERS))
+    finder = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
+    seen: set[int] = set()
+    for im in sample:
+        _, ids, _ = finder.detectMarkers(im)
+        if ids is not None:
+            seen.update(int(i) for i in ids.ravel())
+    hits = {s.name: len(seen & set(s.marker_ids.tolist())) for s in candidates}
+    plausible = [s for s in candidates if hits[s.name] >= 2]
+    if len(plausible) <= 1:
+        return (plausible[0] if plausible else None), {s.name: hits[s.name] for s in plausible}
+    corners = {}
+    for s in plausible:
+        board = make_board(s)
+        det = make_detector(board)
+        found = (detect(im, board, detector=det) for im in sample)
+        corners[s.name] = sum(len(d.ids) for d in found if d is not None)
+    best = max(plausible, key=lambda s: corners[s.name])
+    return (best if corners[best.name] > 0 else None), corners
 
 
 _BIAS: dict[tuple, np.ndarray] = {}
@@ -128,6 +166,7 @@ def detector_bias(spec: MatSpec) -> np.ndarray:
     voorspelde mat (masks.py) een halve pixel naast de foto en worden silhouetten en maten
     onzuiver. Gemeten op synthetische beelden van de mat met bekende geometrie, één keer per proces.
     """
+    spec = spec.nominal()  # een eigenschap van de detector, niet van de printschaal
     key = (spec, cv2.__version__)
     if key not in _BIAS:
         _BIAS[key] = _measure_bias(spec)
@@ -171,13 +210,17 @@ def _measure_bias(spec: MatSpec) -> np.ndarray:
     return bias if np.all(np.abs(bias) < 1.5) else np.zeros(2)
 
 
-def _object_image_points(det: BoardDetection, board) -> tuple[np.ndarray, np.ndarray]:
+def _object_image_points(det: BoardDetection, board, spec: MatSpec) -> tuple[np.ndarray, np.ndarray]:
+    """Hoeken als (werkelijke board-mm, pixels): de printschaal zit in de objectpunten, zodat
+    kalibratie en poses kloppen met de mat zoals die geprint is."""
     obj, img = board.matchImagePoints(det.corners.reshape(-1, 1, 2).astype(np.float32), det.ids.reshape(-1, 1))
+    obj = obj.reshape(-1, 3) * np.array([spec.scale_x, spec.scale_y, 1.0])
     return obj.reshape(-1, 1, 3).astype(np.float32), img.reshape(-1, 1, 2).astype(np.float32)
 
 
 def _to_mat_pose(name: str, rvec, tvec, spec: MatSpec, rms: float, n: int) -> Pose:
     A, a = board_to_mat_transform(spec)
+    A = A @ np.diag([1.0 / spec.scale_x, 1.0 / spec.scale_y, 1.0])  # objectpunten zijn al geschaald
     R_cb, _ = cv2.Rodrigues(np.asarray(rvec, float))
     t_cb = np.asarray(tvec, float).ravel()
     return Pose(name, R_cb @ A, t_cb - R_cb @ A @ a, rms, n)
@@ -209,7 +252,7 @@ def calibrate(
         elif board.checkCharucoCornersCollinear(d.ids.reshape(-1, 1)):
             rejected[d.name] = "mathoeken liggen op één lijn"
         else:
-            obj, img = _object_image_points(d, board)
+            obj, img = _object_image_points(d, board, spec)
             usable.append((d, obj, img))
 
     if camera is None:
@@ -253,7 +296,7 @@ def calibrate(
 def solve_pose(det: BoardDetection, spec: MatSpec, cam: CameraModel) -> Pose | None:
     """Pose van één foto bij een bekende camera (IPPE voor vlakke doelen + LM-verfijning)."""
     board = make_board(spec)
-    obj, img = _object_image_points(det, board)
+    obj, img = _object_image_points(det, board, spec)
     if len(obj) < 6:
         return None
     ok, rvec, tvec = cv2.solvePnP(obj, img, cam.K, cam.dist, flags=cv2.SOLVEPNP_IPPE)

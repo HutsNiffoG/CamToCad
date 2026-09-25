@@ -65,8 +65,9 @@ def footprint_image(fp: Footprint) -> np.ndarray:
     return col
 
 
-def view_table(views: list, dets: dict, top_names: set[str]) -> list[dict]:
+def view_table(views: list, dets: dict, top_names: set[str], blur: dict | None = None) -> list[dict]:
     rows = []
+    blur = blur or {}
     for pose, m in views:
         n_valid = int(m.valid.sum())
         d = dets.get(pose.name)
@@ -80,6 +81,7 @@ def view_table(views: list, dets: dict, top_names: set[str]) -> list[dict]:
             "mathoeken": int(len(d.ids)) if d is not None else 0,
             "reprojectiefout_px": round(float(pose.rms_px), 3),
             "camerahoogte_mm": round(float(pose.center[2]), 0),
+            "onscherpte_px": None if blur.get(pose.name) is None else round(float(blur[pose.name]), 2),
         })
     return rows
 

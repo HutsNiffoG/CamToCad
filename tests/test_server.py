@@ -100,16 +100,76 @@ def test_worker_survives_a_crashing_job(tmp_path):
     assert done == ["goed"]
 
 
-def test_measured_ruler_is_passed_as_mat_scale(tmp_path):
+def test_measured_rulers_are_passed_as_mat_scale(tmp_path):
     seen = {}
 
     def runner(photos, out, opts, log, scan_name=""):
-        seen["scale"] = opts.mat_scale
+        seen["scale"] = opts.scale_xy
         return fake_runner(photos, out, opts, log, scan_name)
 
     c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=runner))
     c.get("/?token=geheim")
     r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4", "meetlijn": "99.5"})
-    assert r.status_code == 200 and seen["scale"] == pytest.approx(0.995)
+    assert r.status_code == 200 and seen["scale"] == pytest.approx((0.995, 0.995))
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))],
+               data={"meetlijn": "100.2", "meetlijn_y": "99.6"})
+    assert r.status_code == 200 and seen["scale"] == pytest.approx((1.002, 0.996))
     bad = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4", "meetlijn": "90"})
     assert bad.status_code == 400
+    assert c.post("/api/scans", data={"mat": "B5"}).status_code == 400
+
+
+@pytest.fixture(scope="module")
+def mat_photos():
+    from camtocad import mat, render
+
+    views = render.render_scan(None, mat.PRESETS["A4"], render.default_camera(), rings=((45.0, 5),), top_views=2,
+                               seed=8)
+    return [cv2.imencode(".jpg", v.image, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes() for v in views]
+
+
+def test_photos_are_checked_one_by_one_and_processed_on_request(tmp_path, mat_photos):
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    job = c.post("/api/scans", data={"mat": "auto"}).json()["id"]
+    r = c.post(f"/api/scans/{job}/fotos", files=[("fotos", ("IMG_1.jpg", mat_photos[0], "image/jpeg"))])
+    assert r.status_code == 200
+    first = r.json()["nieuw"][0]
+    assert first["verdict"] == "goed" and first["mat"] == "A4" and first["blur_px"] < 1.5
+    assert "points" not in first  # detectiegegevens blijven op de server
+    blank = c.post(f"/api/scans/{job}/fotos", files=[("fotos", ("leeg.jpg", jpg(), "image/jpeg"))]).json()
+    assert blank["nieuw"][0]["verdict"] == "onbruikbaar"
+    assert any("niet gevonden" in a for a in blank["overzicht"]["advies"])
+    assert c.post(f"/api/scans/{job}/start").status_code == 400  # nog geen 6 foto's
+
+    removed = c.delete(f"/api/scans/{job}/fotos/{blank['nieuw'][0]['name']}").json()
+    assert [p["verdict"] for p in removed["fotos"]] == ["goed"]
+    for i, data in enumerate(mat_photos[1:], start=2):
+        r = c.post(f"/api/scans/{job}/fotos", files=[("fotos", (f"IMG_{i}.jpg", data, "image/jpeg"))])
+    overview = r.json()["overzicht"]
+    assert overview["bruikbaar"] == len(mat_photos) and overview["mat"] == "A4"
+    assert any("recht boven" in a or "rondom" in a for a in overview["advies"])  # 7 foto's is geen complete scan
+
+    r = c.post(f"/api/scans/{job}/start", data={"meetlijn": "100.4", "meetlijn_y": "99.8"})
+    assert r.status_code == 200
+    status = c.get(f"/api/scans/{job}").json()
+    assert status["state"] == "klaar" and status["photos"] == len(mat_photos) and status["meetlijn"] == [100.4, 99.8]
+    # nog een foto toevoegen aan een verwerkte scan: terug naar 'foto's verzamelen'
+    c.post(f"/api/scans/{job}/fotos", files=[("fotos", ("IMG_9.jpg", mat_photos[0], "image/jpeg"))])
+    assert c.get(f"/api/scans/{job}").json()["state"] == "upload"
+
+
+def test_debug_images_are_served_but_nothing_else(tmp_path):
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    job = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))]).json()["id"]
+    dbg = tmp_path / job / "resultaat" / "debug"
+    dbg.mkdir(parents=True)
+    (dbg / "masker_foto_0000.jpg").write_bytes(jpg())
+    (dbg / "geheim.txt").write_text("nee")
+    assert c.get(f"/api/scans/{job}").json()["debug"] == ["masker_foto_0000.jpg"]
+    assert c.get(f"/scans/{job}/debug/masker_foto_0000.jpg").status_code == 200
+    assert c.get(f"/scans/{job}/debug/geheim.txt").status_code == 404
+    assert c.get(f"/scans/{job}/debug/..%2Fstatus.json").status_code == 404
+    assert c.delete(f"/api/scans/{job}").status_code == 200
+    assert c.get("/api/scans").json() == []
