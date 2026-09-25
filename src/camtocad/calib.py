@@ -179,7 +179,7 @@ def calibrate(
     else:
         cam = camera
         poses = {}
-        for d, obj, img in usable:
+        for d, _, _ in usable:
             pose = solve_pose(d, spec, cam)
             if pose is None:
                 rejected[d.name] = "pose niet te bepalen"

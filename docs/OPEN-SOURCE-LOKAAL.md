@@ -166,6 +166,8 @@ De grenzen liggen bij geheugen, warmte (throttling), batterij en de lagere resol
 3. **Fase 2.** Lerende componenten trainen op een eigen GPU en de gewichten open publiceren (Apache-2.0).
 4. **Later, optioneel.** Een gehoste dienst met dezelfde containers. De cloud wordt dan een keuze, geen voorwaarde.
 
+**Stand van de uitvoering:** van profiel A bestaat een eerste werkende versie (v0.1) voor platte 2,5D-onderdelen: mat-tracking en zelfkalibratie, silhouet-fit van een parametrisch model, snappen, STEP en een CadQuery-script. Foto's gaan in deze versie via de browser van de telefoon naar de pc, want de native app volgt nog. Zie [ROUTE-A.md](ROUTE-A.md).
+
 ## Bronnen (selectie)
 
 - OpenSplat — AGPL-3.0; NVIDIA-, AMD- en Apple-GPU's en CPU: <https://github.com/pierotofy/OpenSplat>

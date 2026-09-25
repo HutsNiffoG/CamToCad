@@ -1,0 +1,321 @@
+"""Model-gebaseerde verfijning: het 2,5D-model direct fitten op de silhouetten in alle foto's.
+
+Analysis-by-synthesis (ARCHITECTURE.md §6.8): voor een kandidaatmodel rendert dit module per
+foto het verwachte silhouet en telt de pixels die niet kloppen met de maskers:
+
+    E = |model ∩ zekere mat| + w · |model ∩ onbekend| + |niet-model ∩ object|
+
+Over tientallen foto's en duizenden randpixels levert dat maten met subpixel-nauwkeurigheid,
+zonder dat het object textuur nodig heeft. Een visual hull dient alleen als startpunt.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import cv2
+import numpy as np
+
+from .calib import Pose, project
+from .masks import ViewMasks
+from .profile import Hole, Part2p5D
+
+SHIFT = 4  # subpixel-coördinaten voor cv2.fillPoly (1/16 pixel)
+
+
+@dataclass
+class ViewData:
+    pose: Pose
+    fg: np.ndarray  # uitsnede (ROI) van het objectmasker
+    bg: np.ndarray  # zekere mat
+    unk: np.ndarray  # onbekend (op de mat, maar zonder textuur)
+    x0: int
+    y0: int
+
+
+def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, margin_mm: float = 8.0,
+            z_max: float | None = None, margin_px: int = 12) -> list[ViewData]:
+    """Snijdt per foto een ROI uit rond het (verwachte) object."""
+    outline = part.outer.outline()
+    lo, hi = outline.min(axis=0) - margin_mm, outline.max(axis=0) + margin_mm
+    z_top = z_max if z_max is not None else part.height * 1.5 + margin_mm
+    box = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (0.0, z_top)])
+    out = []
+    for pose, m in views:
+        uv, z = project(box, pose, K)
+        if np.any(z <= 0):
+            continue
+        h, w = m.fg.shape
+        x0 = int(max(np.floor(uv[:, 0].min()) - margin_px, 0))
+        y0 = int(max(np.floor(uv[:, 1].min()) - margin_px, 0))
+        x1 = int(min(np.ceil(uv[:, 0].max()) + margin_px, w))
+        y1 = int(min(np.ceil(uv[:, 1].max()) + margin_px, h))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        sl = (slice(y0, y1), slice(x0, x1))
+        bg = (m.edge_bg if m.edge_bg is not None else m.bg)[sl]
+        fg = m.fg[sl]
+        out.append(ViewData(pose, fg, bg, m.valid[sl] & ~fg & ~bg, x0, y0))
+    return out
+
+
+def _to_fixed(uv: np.ndarray, x0: int, y0: int) -> np.ndarray:
+    return np.round((uv - [x0, y0]) * (1 << SHIFT)).astype(np.int32)
+
+
+def _shrink(uv: np.ndarray, delta: float = 0.5) -> np.ndarray | None:
+    """Verkleint een gesloten polygoon (beeldcoördinaten) met `delta` pixel (miter-offset).
+
+    cv2.fillPoly vult ook de pixels waar de rand doorheen loopt: het resultaat is aan elke kant
+    0,5 px groter dan 'pixelmidden binnen de polygoon'. Zonder deze correctie zou de optimizer het
+    model 0,5 px te klein fitten. Geeft None voor (bijna) gedegenereerde polygonen.
+    """
+    x, y = uv[:, 0], uv[:, 1]
+    area = 0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    if abs(area) < 1.0:
+        return None
+    d = np.roll(uv, -1, axis=0) - uv
+    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
+    s = 1.0 if area > 0 else -1.0
+    n = s * np.column_stack([-d[:, 1], d[:, 0]])  # naar binnen gerichte normaal van rand i (van i naar i+1)
+    n_prev = np.roll(n, 1, axis=0)
+    denom = np.maximum(1.0 + np.sum(n * n_prev, axis=1), 0.25)  # miterlengte begrenzen
+    return uv + delta * (n + n_prev) / denom[:, None]
+
+
+def _shrink_quads(q: np.ndarray, delta: float = 0.5) -> np.ndarray:
+    """Gevectoriseerde _shrink voor een stapel vierhoeken (Q, 4, 2); gedegenereerde vallen weg."""
+    x, y = q[..., 0], q[..., 1]
+    area = 0.5 * (np.sum(x * np.roll(y, -1, axis=1), axis=1) - np.sum(y * np.roll(x, -1, axis=1), axis=1))
+    keep = np.abs(area) >= 1.0
+    q, area = q[keep], area[keep]
+    d = np.roll(q, -1, axis=1) - q
+    d /= np.linalg.norm(d, axis=2, keepdims=True) + 1e-12
+    s = np.where(area > 0, 1.0, -1.0)[:, None]
+    n = np.stack([-d[..., 1] * s, d[..., 0] * s], axis=2)
+    n_prev = np.roll(n, 1, axis=1)
+    denom = np.maximum(1.0 + np.sum(n * n_prev, axis=2), 0.25)
+    return q + delta * (n + n_prev) / denom[..., None]
+
+
+def render(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray | None = None) -> np.ndarray:
+    """Silhouet (uint8 0/1) van het model binnen de ROI van een foto."""
+    h, w = v.fg.shape
+    mask = np.zeros((h, w), np.uint8)
+    ring = part.outer.outline(12.0) if ring is None else ring
+    n = len(ring)
+    both = np.vstack([np.column_stack([ring, np.zeros(n)]), np.column_stack([ring, np.full(n, part.height)])])
+    uv, _ = project(both, v.pose, K)
+    ub, ut = uv[:n], uv[n:]
+
+    def fill(poly, target, convex=False):
+        shrunk = _shrink(poly)
+        if shrunk is None:
+            return
+        pts = _to_fixed(shrunk, v.x0, v.y0)
+        if convex:
+            cv2.fillConvexPoly(target, pts, 1, cv2.LINE_8, SHIFT)
+        else:
+            cv2.fillPoly(target, [pts], 1, cv2.LINE_8, SHIFT)
+
+    fill(ub, mask)
+    fill(ut, mask)
+    quads = np.stack([ub, np.roll(ub, -1, axis=0), np.roll(ut, -1, axis=0), ut], axis=1)
+    for q in _shrink_quads(quads):
+        cv2.fillConvexPoly(mask, _to_fixed(q, v.x0, v.y0), 1, cv2.LINE_8, SHIFT)
+    # doorkijk door gaten: binnen de projectie van zowel de boven- als de onderrand
+    tmp_t = np.zeros_like(mask)
+    tmp_b = np.zeros_like(mask)
+    rings = [np.column_stack([hl.x + hl.d / 2 * np.cos(a), hl.y + hl.d / 2 * np.sin(a)])
+             for hl in part.holes for a in [np.linspace(0, 2 * np.pi, 48, endpoint=False)]]
+    rings += list(part.cutouts)
+    for r2 in rings:
+        m2 = len(r2)
+        uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, part.height)]),
+                                    np.column_stack([r2, np.zeros(m2)])]), v.pose, K)
+        tmp_t[:] = 0
+        tmp_b[:] = 0
+        fill(uv2[:m2], tmp_t)
+        fill(uv2[m2:], tmp_b)
+        mask[(tmp_t & tmp_b) > 0] = 0
+    return mask
+
+
+def energy(part: Part2p5D, K: np.ndarray, views: list[ViewData], w_unknown: float = 0.25) -> float:
+    total = 0.0
+    ring = part.outer.outline(12.0)
+    for v in views:
+        P = render(part, K, v, ring).astype(bool)
+        total += np.count_nonzero(P & v.bg) + w_unknown * np.count_nonzero(P & v.unk) + np.count_nonzero(~P & v.fg)
+    return total
+
+
+# ----------------------------------------------------------------------------- initialisatie
+
+def is_top_view(pose: Pose, max_tilt_deg: float = 25.0) -> bool:
+    """Kijkt de camera (bijna) loodrecht omlaag? De optische as in mat-coördinaten is R[2]."""
+    return float(pose.R[2, 2]) < -math.cos(math.radians(max_tilt_deg))
+
+
+def footprint_from_top_views(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, height: float,
+                             bounds: tuple[float, float, float, float], px: float = 0.25):
+    """Projecteert de objectmaskers van bovenaanzichten terug op het vlak z = height.
+
+    Van bovenaf valt het silhouet van een prisma samen met de projectie van de bovenrand;
+    teruggeprojecteerd op z = hoogte geeft dat de contour. Geeft (bool-raster, oorsprong) of None.
+    """
+    x0, x1, y0, y1 = bounds
+    w, h = int(np.ceil((x1 - x0) / px)), int(np.ceil((y1 - y0) / px))
+    T = np.array([[px, 0, x0], [0, px, y0], [0, 0, 1.0]])
+    acc = np.zeros((h, w), np.float32)
+    count = 0
+    # liefst echt loodrechte opnamen: bij schuin kijken verdwijnt de doorkijk door gaten (parallax)
+    steep = [(p, m) for p, m in views if is_top_view(p, 8.0)]
+    selected = steep if len(steep) >= 2 else [(p, m) for p, m in views if is_top_view(p)]
+    for pose, m in selected:
+        Hm = K @ np.column_stack([pose.R[:, 0], pose.R[:, 1], pose.R[:, 2] * height + pose.t]) @ T
+        warped = cv2.warpPerspective(m.fg.astype(np.float32), Hm, (w, h),
+                                     flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0)
+        acc += warped
+        count += 1
+    if count == 0:
+        return None
+    fp = acc / count > 0.5
+    fp = cv2.morphologyEx(fp.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0
+    return fp, np.array([x0, y0])
+
+
+# ----------------------------------------------------------------------------- parameters
+
+@dataclass
+class Param:
+    name: str
+    step: float  # beginstap
+    min_step: float
+    lower: float = -math.inf
+
+
+def _params(part: Part2p5D) -> list[Param]:
+    ps = [Param("h", 0.5, 0.01, 0.5)]
+    if part.outer.kind == "circle":
+        ps += [Param("cx", 0.3, 0.01), Param("cy", 0.3, 0.01), Param("R", 0.3, 0.01, 0.5)]
+    else:
+        ps.append(Param("rot", math.radians(0.5), math.radians(0.01)))
+        ps += [Param(f"off{k}", 0.4, 0.01) for k in range(part.outer.n)]
+        ps += [Param(f"fil{k}", 0.4, 0.02, 0.0) for k in range(part.outer.n)]
+    for i in range(len(part.holes)):
+        ps += [Param(f"hx{i}", 0.3, 0.01), Param(f"hy{i}", 0.3, 0.01), Param(f"hd{i}", 0.3, 0.01, 0.3)]
+    return ps
+
+
+def _get(part: Part2p5D, base_angles: np.ndarray, name: str) -> float:
+    o = part.outer
+    if name == "h":
+        return part.height
+    if name == "cx":
+        return float(o.center[0])
+    if name == "cy":
+        return float(o.center[1])
+    if name == "R":
+        return o.radius
+    if name == "rot":
+        return float(o.angles[0] - base_angles[0]) if o.n else 0.0
+    if name.startswith("off"):
+        return float(o.offsets[int(name[3:])])
+    if name.startswith("fil"):
+        return float(o.fillets[int(name[3:])])
+    i = int(name[2:])
+    return {"hx": part.holes[i].x, "hy": part.holes[i].y, "hd": part.holes[i].d}[name[:2]]
+
+
+def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Part2p5D:
+    p = part.copy()
+    o = p.outer
+    if name == "h":
+        p.height = value
+    elif name == "cx":
+        o.center[0] = value
+    elif name == "cy":
+        o.center[1] = value
+    elif name == "R":
+        o.radius = value
+    elif name == "rot":
+        o.angles = base_angles + value
+    elif name.startswith("off"):
+        o.offsets[int(name[3:])] = value
+    elif name.startswith("fil"):
+        o.fillets[int(name[3:])] = value
+    else:
+        i = int(name[2:])
+        h = p.holes[i]
+        p.holes[i] = Hole(value if name[:2] == "hx" else h.x, value if name[:2] == "hy" else h.y,
+                          value if name[:2] == "hd" else h.d)
+    return p
+
+
+def fit_height(part: Part2p5D, K: np.ndarray, views: list[ViewData], h_max: float,
+               step: float = 1.0) -> Part2p5D:
+    """1D-zoektocht naar de hoogte (het bovenvlak is uit een visual hull niet te halen)."""
+    hs = np.arange(step, max(h_max, 2 * step) + step, step)
+    es = [energy(_set(part, part.outer.angles, "h", float(h)), K, views) for h in hs]
+    k = int(np.argmin(es))
+    best = float(hs[k])
+    if 0 < k < len(hs) - 1:  # parabool door de drie laagste punten
+        e0, e1, e2 = es[k - 1], es[k], es[k + 1]
+        denom = e0 - 2 * e1 + e2
+        if denom > 0:
+            best += 0.5 * step * (e0 - e2) / denom
+    return _set(part, part.outer.angles, "h", best)
+
+
+def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int = 1500,
+           log=None) -> tuple[Part2p5D, float, int]:
+    """Kompaszoektocht per parameter met halverende stappen; ongeldige geometrie wordt overgeslagen."""
+    base = part.outer.angles.copy()
+    params = _params(part)
+    steps = {p.name: p.step for p in params}
+    best, e_best = part, energy(part, K, views)
+    evals = 1
+    while evals < max_evals:
+        moved_any = False
+        for p in params:
+            if steps[p.name] < p.min_step:
+                continue
+            x = _get(best, base, p.name)
+            moved = False
+            for sign in (1.0, -1.0):
+                val = x + sign * steps[p.name]
+                if val < p.lower:
+                    continue
+                cand = _set(best, base, p.name, val)
+                if cand.outer.kind == "polygon" and not cand.outer.is_valid():
+                    continue
+                e = energy(cand, K, views)
+                evals += 1
+                if e < e_best:
+                    best, e_best, moved = cand, e, True
+                    break
+            if moved:
+                moved_any = True
+            else:
+                steps[p.name] *= 0.5
+        if not moved_any and all(steps[p.name] < p.min_step for p in params):
+            break
+    if log:
+        log(f"verfijning: {evals} evaluaties, E = {e_best:.0f}")
+    return best, e_best, evals
+
+
+def view_stats(part: Part2p5D, K: np.ndarray, views: list[ViewData]) -> dict:
+    """IoU van model-silhouet en objectmasker per foto (alleen pixels met zekere klasse)."""
+    ious = []
+    for v in views:
+        P = render(part, K, v).astype(bool)
+        known = v.fg | v.bg
+        inter = np.count_nonzero(P & v.fg)
+        union = np.count_nonzero((P & known) | v.fg)
+        if union:
+            ious.append(inter / union)
+    return {"views": len(ious), "iou_median": float(np.median(ious)) if ious else float("nan"),
+            "iou_min": float(np.min(ious)) if ious else float("nan")}

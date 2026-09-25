@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cam-to-CAD lokaal</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d232b; --muted:#5b6673; --line:#dde2e8; --accent:#2b5d9b; --ok:#2e7d4f; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1a1f25; --fg:#e6e9ed; --muted:#9aa4af; --line:#2c333b; --accent:#8fb8ea; --ok:#7cc79a; --err:#f2a39c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:16px 16px 48px; }
+  h1 { font-size:1.4rem; margin:8px 0 4px; } h2 { font-size:1.05rem; margin:0 0 8px; }
+  .muted { color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin:14px 0; }
+  ol { padding-left:1.2rem; margin:0; } li { margin:4px 0; }
+  a { color:var(--accent); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  label.btn, button { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:0 16px;
+    border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  input[type=file] { display:none; }
+  select { min-height:44px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg); font:inherit; padding:0 8px; }
+  progress { width:100%; height:10px; }
+  .scan { border-top:1px solid var(--line); padding:10px 0; }
+  .scan:first-child { border-top:0; }
+  .state { font-weight:600; }
+  .klaar { color:var(--ok); } .fout { color:var(--err); }
+  code { font-size:.9em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Cam-to-CAD <span class="muted">(lokaal)</span></h1>
+  <p class="muted">Foto's gaan via je eigen wifi naar deze pc. Er is geen cloud nodig.</p>
+
+  <section class="card">
+    <h2>Zo scan je</h2>
+    <ol>
+      <li>Print de kalibratiemat op 100%: <a href="mat/A4.pdf">A4</a> of <a href="mat/A3.pdf">A3</a>. Meet de 100 mm-lijnen na.</li>
+      <li>Leg het onderdeel plat in het midden van de mat, bij diffuus licht (geen felle zon of spot).</li>
+      <li>Maak 30–60 foto's: rondom op twee à drie hoogtes, plus <b>4–6 recht van boven</b>. Zorg dat de mat grotendeels in beeld is, en zoom niet in.</li>
+      <li>Kies of maak de foto's hieronder en upload ze.</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>Nieuwe scan</h2>
+    <div class="row">
+      <label class="btn" for="kies">Foto's kiezen</label>
+      <input id="kies" type="file" accept="image/*" multiple>
+      <label class="btn" for="maak">Foto maken</label>
+      <input id="maak" type="file" accept="image/*" capture="environment">
+      <select id="mat" aria-label="Formaat kalibratiemat"><option>A4</option><option>A3</option></select>
+    </div>
+    <p id="teller" class="muted">Nog geen foto's geselecteerd.</p>
+    <div class="row">
+      <button id="upload" class="primary" disabled>Uploaden en verwerken</button>
+      <button id="wis" disabled>Selectie wissen</button>
+    </div>
+    <progress id="voortgang" value="0" max="1" hidden></progress>
+    <p id="melding" class="muted"></p>
+  </section>
+
+  <section class="card">
+    <h2>Scans</h2>
+    <div id="scans" class="muted">Laden…</div>
+  </section>
+</main>
+<script>
+const files = [];
+const $ = (id) => document.getElementById(id);
+function refreshCount() {
+  $("teller").textContent = files.length ? `${files.length} foto('s) geselecteerd.` : "Nog geen foto's geselecteerd.";
+  $("upload").disabled = files.length === 0;
+  $("wis").disabled = files.length === 0;
+}
+for (const id of ["kies", "maak"]) {
+  $(id).addEventListener("change", (e) => { files.push(...e.target.files); e.target.value = ""; refreshCount(); });
+}
+$("wis").addEventListener("click", () => { files.length = 0; refreshCount(); });
+$("upload").addEventListener("click", () => {
+  const form = new FormData();
+  files.forEach((f) => form.append("fotos", f, f.name));
+  form.append("mat", $("mat").value);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "api/scans");
+  $("voortgang").hidden = false; $("upload").disabled = true;
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) { $("voortgang").max = e.total; $("voortgang").value = e.loaded; } };
+  xhr.onload = () => {
+    $("voortgang").hidden = true;
+    if (xhr.status === 200) { files.length = 0; refreshCount(); $("melding").textContent = "Geüpload: de verwerking loopt op de pc."; load(); }
+    else { $("melding").textContent = "Upload mislukt: " + (JSON.parse(xhr.responseText || "{}").detail || xhr.status); $("upload").disabled = false; }
+  };
+  xhr.onerror = () => { $("voortgang").hidden = true; $("melding").textContent = "Upload mislukt (netwerk)."; $("upload").disabled = false; };
+  xhr.send(form);
+});
+const label = { upload: "uploaden", wachtrij: "in de wachtrij", bezig: "bezig", klaar: "klaar", fout: "fout" };
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+async function load() {
+  try {
+    const r = await fetch("api/scans");
+    if (!r.ok) { $("scans").textContent = r.status === 401 ? "Geen toegang: open de link met ?token=… uit de terminal." : "Fout " + r.status; return; }
+    const scans = await r.json();
+    if (!scans.length) { $("scans").textContent = "Nog geen scans."; return; }
+    $("scans").innerHTML = scans.map((s) => {
+      const when = new Date(s.created * 1000).toLocaleString("nl-NL");
+      let body = "";
+      if (s.state === "klaar") {
+        body = ["report.html:rapport", "model.step:STEP", "model.stl:STL", "model.py:CadQuery-script"]
+          .map((x) => { const [f, t] = x.split(":"); return `<a href="scans/${s.id}/${f}">${t}</a>`; }).join(" · ");
+      } else if (s.state === "fout") {
+        body = `<span class="fout">${esc(s.error || "onbekende fout")}</span>`;
+      } else if (s.log && s.log.length) {
+        body = `<span class="muted">${esc(s.log[s.log.length - 1])}</span>`;
+      }
+      return `<div class="scan"><div><span class="state ${s.state}">${label[s.state] || s.state}</span> · ${esc(when)} · ${s.photos || 0} foto's · mat ${esc(s.mat)}</div><div>${body}</div></div>`;
+    }).join("");
+  } catch (e) { $("scans").textContent = "Server niet bereikbaar."; }
+}
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>

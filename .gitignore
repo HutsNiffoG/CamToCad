@@ -7,3 +7,5 @@ dist/
 # lokale scans en resultaten
 data/
 out/
+camtocad-demo/
+*_cad/
