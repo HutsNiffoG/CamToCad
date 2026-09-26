@@ -56,6 +56,7 @@ def write(out_dir: Path, data: dict, part: Part2p5D) -> dict[str, Path]:
             f"<td><b>{s['value']:.3f}</b></td><td>{status}</td><td>{html.escape(s['reason'])}</td></tr>"
         )
     info = data.get("summary", {})
+    method = str(data.get("uncertainty_model", {}).get("methode", "indicatief (resolutie en aantal foto's)"))
     info_rows = "".join(f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
                         for k, v in info.items())
     warnings = "".join(f"<li>{html.escape(w)}</li>" for w in data.get("warnings", [])) or "<li>geen</li>"
@@ -92,7 +93,7 @@ svg .datum {{ fill:#d9534f; }}
 <div class="wrap"><table>{info_rows}</table></div>
 <h2>Waarschuwingen</h2><ul>{warnings}</ul>
 <h2>Bestanden</h2><ul>{files}</ul>
-<p class="muted">U95 is een indicatieve onzekerheid (95%), afgeleid van beeldresolutie en aantal foto's; valideer
+<p class="muted">U95 = onzekerheid met 95% dekking; {html.escape(method)}. Getoetst op gerenderde scans; valideer
 kritieke maten met een schuifmaat.</p>
 </main></body></html>"""
     hpath = out_dir / "report.html"

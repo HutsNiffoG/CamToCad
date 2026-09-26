@@ -123,7 +123,7 @@ def render_view(raster: BoardRaster, cam: CameraModel, R: np.ndarray, t: np.ndar
                 rng: np.random.Generator | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Rendert één view; geeft (grijswaardenbeeld uint8, objectmasker bool)."""
     rng = rng or np.random.default_rng()
-    s = 2  # supersampling
+    s = 3  # supersampling (oneven: een pixel is nooit precies half bedekt, dus geen voorkeur bij gelijkspel)
     Ks = cam.K.copy()
     Ks[:2, :2] *= s
     Ks[0, 2] = s * cam.K[0, 2] + 0.5 * (s - 1)

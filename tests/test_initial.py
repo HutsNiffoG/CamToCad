@@ -59,19 +59,29 @@ def test_height_sweep_finds_top_face(top_scan):
     assert HEIGHT - 2.0 < sweep.best < HEIGHT + 0.5
 
 
+def _real_corners(prof, min_turn_deg: float = 20.0) -> int:
+    """Hoekpunten waar de contour echt draait. Een knikje in een afgeronde hoek (een korte rand van een
+    paar graden) telt niet mee: dat haalt pipeline._simplify_outline weg als het model zonder even goed past."""
+    n = prof.normals()
+    turns = np.degrees(np.arccos(np.clip(np.sum(n * np.roll(n, 1, axis=0), axis=1), -1, 1)))
+    return int(np.sum(turns > min_turn_deg))
+
+
 def test_locate_with_far_too_tall_hull(top_scan):
     cam, views, coarse, board = top_scan
     res = initial.locate(views, cam.K, coarse, board)
     part = res.part
     assert HEIGHT - 2.0 < part.height < HEIGHT + 0.5  # startwaarde; fit_height (alle foto's) verfijnt
     expected = 30 * 20 - (4 - np.pi) * 2 ** 2
-    assert part.outer.n == 4
+    assert _real_corners(part.outer) == 4 and part.outer.n <= 5
     assert abs(part.outer.area() - expected) < 0.04 * expected
     assert len(part.holes) == 1 and abs(part.holes[0].d - 4.5) < 0.6
     # dezelfde foto's en instellingen op de (door fit_height gevonden) echte hoogte
     again = res.at_height(cam.K, coarse, HEIGHT)
-    assert again.outer.n == 4
-    assert abs(again.outer.area() - expected) < 0.015 * expected
+    assert _real_corners(again.outer) == 4 and again.outer.n <= 5
+    # de startcontour is ~2% te groot (afrondingen te klein geschat, soms een knikje); de fit verfijnt hem.
+    # Tot v0.4.1 viel dat binnen 1,5%, maar toen tekende de renderer de maskers 0,14 px te klein.
+    assert abs(again.outer.area() - expected) < 0.025 * expected
     assert len(again.holes) == 1 and abs(again.holes[0].d - 4.5) < 0.25
 
 

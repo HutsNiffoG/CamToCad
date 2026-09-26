@@ -255,7 +255,7 @@ def fit_height(part: Part2p5D, K: np.ndarray, views: list[ViewData], h_max: floa
 
 
 def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int = 1500,
-           log=None, abort_iou: float = 0.8) -> tuple[Part2p5D, float, int]:
+           log=None, abort_iou: float = 0.8, only: set[str] | None = None) -> tuple[Part2p5D, float, int]:
     """Kompaszoektocht per parameter met halverende stappen; ongeldige geometrie wordt overgeslagen.
 
     Twee aanvullingen tegen te vroeg stoppen in een smalle vallei (bijv. hoogte en randen die
@@ -268,7 +268,7 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
     laatste 200 evaluaties samen minder dan 0,1% op, dan is de fit klaar.
     """
     base = part.outer.angles.copy()
-    params = _params(part)
+    params = [p for p in _params(part) if only is None or p.name in only]  # `only`: alleen deze parameters
     steps = {p.name: p.step for p in params}
     best, e_best = part, energy(part, K, views)
     evals = 1

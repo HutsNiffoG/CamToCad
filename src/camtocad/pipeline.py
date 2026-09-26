@@ -21,8 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import (__version__, cadmodel, calib, debug, hull, initial, masks, placement, preflight, profile, report,
-               silhouette)
+from . import (__version__, cadmodel, calib, debug, edgefit, holes, hull, initial, masks, placement, preflight,
+               profile, report, silhouette, uncertainty)
 from .imgio import imwrite, read_gray
 from .mat import MatSpec, get_spec, rasterize_board
 
@@ -192,6 +192,51 @@ def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg
         if not changed:
             break
     return part, energy, removed
+
+
+def _effective_uncertainty(unc, snaps: list, scale_rel: float):
+    """Samenvatting per soort maat (voor report.json en `camtocad valideer`) uit de σ per maat: het
+    grootste toevallige deel per soort, zonder printschaal (die staat apart in scale_rel)."""
+    def rel(s) -> float:
+        return math.sqrt(max(s.sigma ** 2 - (scale_rel * abs(s.measured)) ** 2, 0.0))
+
+    def worst(pred, default):
+        vals = [rel(s) for s in snaps if pred(s.name)]
+        return max(vals) if vals else default
+
+    def is_position(n: str) -> bool:
+        return n.startswith("steekcirkel") or (n.startswith("gat ") and n.endswith((" x", " y")))
+
+    return cadmodel.Uncertainty(
+        edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")), unc.edge * math.sqrt(2)) / math.sqrt(2),
+        height=worst(lambda n: n == "hoogte", unc.height),
+        hole_d=worst(lambda n: n.startswith("gat Ø"), unc.hole_d),
+        hole_xy=worst(is_position, unc.hole_xy),
+        fillet=worst(lambda n: n.startswith("afronding"), unc.fillet), scale_rel=scale_rel)
+
+
+def _add_missed_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
+    """V4: ronde uitsparingen worden gaten, en een gat dat de startcontour miste wordt toegevoegd waar de
+    bovenaanzichten door het bovenvlak heen mat zien (holes.py). Alleen als het model er duidelijk beter
+    door past: eerst wordt alleen het nieuwe gat op maat gebracht, daarna kort alles."""
+    part2, n_round = holes.round_cutouts(part)
+    if n_round:
+        part2, e2, _ = silhouette.refine(part2, K, vd, max_evals=200)
+        if e2 <= energy * 1.01:
+            log(f"{n_round} ronde uitsparing(en) verder als gat")
+            part, energy = part2, e2
+    for cand in holes.candidates(part, K, vd):
+        trial = part.copy()
+        trial.holes.append(cand)
+        i = len(trial.holes) - 1
+        trial, _, _ = silhouette.refine(trial, K, vd, max_evals=150, only={f"hx{i}", f"hy{i}", f"hd{i}"})
+        trial, e_trial, _ = silhouette.refine(trial, K, vd, max_evals=150)
+        if e_trial < energy - (0.002 * energy + 20):
+            h = trial.holes[i]
+            log(f"gat toegevoegd: Ø {h.d:.1f} mm op ({h.x:.1f}, {h.y:.1f}); in de bovenaanzichten is daar mat te "
+                f"zien (energie {energy:.0f} → {e_trial:.0f})")
+            part, energy = trial, e_trial
+    return part, energy
 
 
 def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25) -> list[str]:
@@ -442,12 +487,20 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         log(f"afrondingen opnieuw bepaald: energie {energy:.0f} → {e_probed:.0f}")
         part, energy = probed, e_probed
     part, energy, _ = _simplify_outline(part, cam.K, vd, energy, log=log)
+    part, energy = _add_missed_holes(part, cam.K, vd, energy, log=log)
+    # randfit (V2): subpixel-verfijning op de randafstanden, met de covariantie voor de U95 (V3)
+    t_fit = time.time()
+    ef = edgefit.fit(part, cam.K, vd, log=lambda m: log(f"{m} ({time.time() - t_fit:.0f} s)"))
+    if ef.accepted:
+        part = ef.part
+        energy = silhouette.energy(part, cam.K, vd)
     oc = part.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, part.height / 2])
     mm_per_px = _object_distance(cal.poses.values(), center) / cam.K[0, 0]
-    # Onscherpte in de foto's rondt ook scherpe hoeken een fractie af (ARCHITECTURE.md §7.3):
-    # afrondingen onder ~3 pixels zijn niet te onderscheiden van scherp en worden scherp.
-    r_min = max(0.8, 3.0 * mm_per_px)
+    # Onscherpte in de foto's en het masker ronden ook scherpe hoeken af (ARCHITECTURE.md §7.3): op
+    # gerenderde scans komt een scherpe hoek uit de randfit als een afronding van 3,5-4 pixels
+    # (ROUTE-A-VERBETERPUNTEN §3e). Afrondingen onder 4,5 pixels zijn dus niet te onderscheiden van scherp.
+    r_min = max(0.8, 4.5 * mm_per_px)
     if part.outer.kind == "polygon" and np.any((part.outer.fillets > 0) & (part.outer.fillets < r_min)):
         part.outer.fillets[part.outer.fillets < r_min] = 0.0
         warnings.append(f"afrondingen kleiner dan {r_min:.1f} mm zijn bij deze resolutie niet te "
@@ -472,8 +525,27 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
 
     # 7. onzekerheid, werkassenstelsel, snappen (de printschaal zit al in de poses)
     unc = cadmodel.estimate_uncertainty(mm_per_px, len(vd), n_top)
+    # printschaal: zonder gemeten meetlijnen is de schaal van de print niet bekend (printers wijken 0,1-1% af;
+    # wie precies 100,0 mm meet, valt hier ook onder en krijgt een voorzichtige U95)
+    unc.scale_rel = uncertainty.SCALE_REL_MEASURED if spec.is_scaled else uncertainty.SCALE_REL_ASSUMED
+    scale_note = ("printschaal gecorrigeerd met de meetlijnen (0,05%)" if spec.is_scaled else
+                  "printschaal niet gecorrigeerd, meetlijnen niet opgegeven (0,3%)")
     part_pf, angle, shift = cadmodel.to_part_frame(part)
-    snapped, snaps = cadmodel.snap_part(part_pf, unc, threshold=opts.snap_threshold, imperial=opts.imperial)
+    budget, unc_method = None, "indicatief (resolutie en aantal foto's), " + scale_note
+    if ef.accepted:  # V3: σ per maat uit de jackknife van de randfit, plus systematiek en printschaal
+        t_jk = time.time()
+        C = edgefit.jackknife(ef)
+        log(f"onzekerheid per maat: jackknife over groepen foto's ({time.time() - t_jk:.0f} s)" if C is not None
+            else "onzekerheid per maat: jackknife mislukt, indicatieve U95")
+        if C is not None:
+            prob = ef.extra["problem"]
+            budget = uncertainty.Budget(uncertainty.Sensitivity(prob.build, ef.x, C, angle, shift), mm_per_px,
+                                        unc.scale_rel)
+            unc_method = "per maat: jackknife over groepen foto's (randfit), systematiek, " + scale_note
+    snapped, snaps = cadmodel.snap_part(part_pf, unc, threshold=opts.snap_threshold, imperial=opts.imperial,
+                                        budget=budget)
+    if budget is not None:
+        unc = _effective_uncertainty(unc, snaps, budget.scale_rel)
     if snapped.outer.kind == "polygon" and not snapped.outer.is_valid():
         warnings.append("gesnapte contour was ongeldig; ongesnapte maten gebruikt")
         snapped, snaps = part_pf, [s.__class__(**{**s.__dict__, "value": s.measured, "snapped": False})
@@ -519,7 +591,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "dimensions": [s.to_dict() for s in snaps],
         "geometry": {"gefit": part_pf.to_dict(), "gesnapt": snapped.to_dict(),
                      "assenstelsel": "werkassenstelsel (datum linksonder), mm"},
-        "uncertainty_model": unc.to_dict(),
+        "uncertainty_model": {**unc.to_dict(), "methode": unc_method},
         "warnings": warnings,
         "files": {"step": "model.step", "stl": "model.stl", "script": "model.py", "json": "report.json"},
         "frame": {"angle_rad": angle, "shift_mm": shift.tolist(), "printschaal": [sx, sy],

@@ -20,6 +20,7 @@ import numpy as np
 from . import __version__, cadhelpers
 from .profile import Hole, Part2p5D, Profile, dominant_angle
 from .snapping import Snap, hole_candidates, length_candidates, radius_candidates, snap
+from .uncertainty import Budget, edge_position
 
 
 @dataclass
@@ -147,23 +148,45 @@ def _groups(values: list[float], tol: float) -> list[list[int]]:
 
 
 def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
-              imperial: bool = False) -> tuple[Part2p5D, list[Snap]]:
-    """Snapt hoogte, randposities, diameters, straal en gatposities (in het werkassenstelsel)."""
+              imperial: bool = False, budget: Budget | None = None) -> tuple[Part2p5D, list[Snap]]:
+    """Snapt hoogte, randposities, diameters, straal en gatposities (in het werkassenstelsel).
+
+    Met een `budget` (uncertainty.py) krijgt elke maat zijn eigen σ uit de covariantie van de randfit
+    plus systematiek; zonder budget de indicatieve σ per soort maat uit `unc`. Snappen gebeurt zonder
+    de printschaal (een schaalfout verschuift alle maten samen; een ontwerp in hele mm blijft dan het
+    aannemelijkst), het rapport (U95) telt hem wel mee.
+    """
     out = part.copy()
     snaps: list[Snap] = []
-    s = snap("hoogte", part.height, unc.total(unc.height, part.height),
-             length_candidates(part.height, imperial), threshold=threshold)
+    scale_rel = budget.scale_rel if budget is not None else unc.scale_rel
+
+    def do_snap(name, value, base, candidates, fn=None, kind="lengte"):
+        """`base`: indicatieve σ zonder printschaal; `fn`: de maat als functie van het model (budget)."""
+        rel = budget.rel(fn, kind) if (budget is not None and fn is not None) else None
+        sigma = base if rel is None else rel
+        s = snap(name, value, sigma, candidates, threshold=threshold)
+        s.sigma = math.hypot(sigma, scale_rel * abs(value))
+        return s
+
+    s = do_snap("hoogte", part.height, unc.height, length_candidates(part.height, imperial),
+                lambda p: p.height, "hoogte")
     out.height = s.value
     snaps.append(s)
 
     o = out.outer
+    datum: dict[str, int] = {}
     if o.kind == "circle":
         d = 2 * o.radius
-        s = snap("diameter", d, unc.total(unc.edge * math.sqrt(2), d), length_candidates(d, imperial),
-                 threshold=threshold)
+        s = do_snap("diameter", d, unc.edge * math.sqrt(2), length_candidates(d, imperial),
+                    lambda p: 2 * p.outer.radius, "lengte")
         o.radius = s.value / 2
         snaps.append(s)
     else:
+        axes0 = edge_axes(o)
+        for axis in ("x", "y"):
+            cand = [(abs(pos), k) for k, (a, pos) in enumerate(axes0) if a == axis]
+            if cand:
+                datum[axis] = min(cand)[1]
         for axis in ("x", "y"):
             axes = edge_axes(o)
             idx = [k for k, (a, _) in enumerate(axes) if a == axis]
@@ -171,8 +194,10 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                 pos = axes[k][1]
                 if abs(pos) < 1e-9:
                     continue  # de datumrand zelf
-                s = snap(f"{axis}-maat rand {k + 1}", pos, unc.total(unc.edge * math.sqrt(2), pos),
-                         length_candidates(pos, imperial), threshold=threshold)
+                fn = (lambda p, k=k, axis=axis: edge_position(p, k, axis) - edge_position(p, datum[axis], axis)) \
+                    if axis in datum else None
+                s = do_snap(f"{axis}-maat rand {k + 1}", pos, unc.edge * math.sqrt(2),
+                            length_candidates(pos, imperial), fn, "lengte")
                 _set_edge_position(o, k, axis, s.value)
                 snaps.append(s)
         radii = [float(r) for r in o.fillets]
@@ -181,8 +206,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             members = [nz[j] for j in g]
             r = float(np.mean([radii[i] for i in members]))
             label = f"{len(members)}x" if len(members) > 1 else f"hoek {members[0] + 1}"  # geen twee dezelfde namen
-            s = snap(f"afronding R ({label})", r, unc.fillet / math.sqrt(len(members)) + 0.03,
-                     radius_candidates(r), threshold=threshold)
+            s = do_snap(f"afronding R ({label})", r, unc.fillet / math.sqrt(len(members)) + 0.03,
+                        radius_candidates(r), lambda p, m=members: float(np.mean(p.outer.fillets[m])), "afronding")
             for i in members:
                 o.fillets[i] = s.value
             snaps.append(s)
@@ -192,11 +217,16 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     for g in _groups(diam, 3.0 * unc.hole_d):
         d = float(np.mean([diam[i] for i in g]))
         label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
-        s = snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
-                 threshold=threshold)
+        s = do_snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
+                    lambda p, g=g: float(np.mean([p.holes[i].d for i in g])), "gat")
         for i in g:
             out.holes[i] = Hole(out.holes[i].x, out.holes[i].y, s.value)
         snaps.append(s)
+
+    def origin(p: Part2p5D, axis: str) -> float:
+        if p.outer.kind == "circle":
+            return float(p.outer.center[0 if axis == "x" else 1])
+        return edge_position(p, datum[axis], axis) if axis in datum else 0.0
 
     # gatenpatroon op een steekcirkel (ronde delen): steekcirkeldiameter snappen, gaten exact verdelen
     patterned: set[int] = set()
@@ -204,8 +234,13 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         pattern = bolt_circle(out.holes, (0.0, 0.0))
         if pattern:
             r, start, n = pattern
-            s = snap(f"steekcirkel Ø ({n}x)", 2 * r, unc.total(unc.hole_xy, 2 * r) / math.sqrt(n) + 0.02,
-                     length_candidates(2 * r, imperial), threshold=threshold)
+
+            def fn(p: Part2p5D) -> float:
+                c = p.outer.center
+                return 2 * float(np.mean([math.hypot(h.x - c[0], h.y - c[1]) for h in p.holes]))
+
+            s = do_snap(f"steekcirkel Ø ({n}x)", 2 * r, unc.hole_xy / math.sqrt(n) + 0.02,
+                        length_candidates(2 * r, imperial), fn, "positie")
             snaps.append(s)
             ang0 = 0.0 if abs(start) < math.radians(1.5) else start
             half = math.pi / n  # een gat op 359,8° hoort vooraan, bij 0°
@@ -217,10 +252,10 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     for i, h in enumerate(out.holes):
         if i in patterned:
             continue
-        sx = snap(f"gat {i + 1} x", h.x, unc.total(unc.hole_xy, h.x), length_candidates(h.x, imperial),
-                  threshold=threshold)
-        sy = snap(f"gat {i + 1} y", h.y, unc.total(unc.hole_xy, h.y), length_candidates(h.y, imperial),
-                  threshold=threshold)
+        sx = do_snap(f"gat {i + 1} x", h.x, unc.hole_xy, length_candidates(h.x, imperial),
+                     lambda p, i=i: p.holes[i].x - origin(p, "x"), "positie")
+        sy = do_snap(f"gat {i + 1} y", h.y, unc.hole_xy, length_candidates(h.y, imperial),
+                     lambda p, i=i: p.holes[i].y - origin(p, "y"), "positie")
         out.holes[i] = Hole(sx.value, sy.value, h.d)
         snaps += [sx, sy]
     return out, snaps
