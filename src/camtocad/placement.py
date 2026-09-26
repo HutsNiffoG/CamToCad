@@ -229,7 +229,8 @@ def moved_message(res: Placements, order: list[str]) -> str:
         shown = "; ".join(_names(g, order) for g in top)
         if len(res.groups) > 3:
             rest = sum(len(g) for g in res.groups[3:])
-            shown += f"; en nog {len(res.groups) - 3} kleinere groepen met samen {rest} foto's"
+            shown += (f"; en nog 1 kleinere groep van {rest} foto's" if len(res.groups) == 4 else
+                      f"; en nog {len(res.groups) - 3} kleinere groepen met samen {rest} foto's")
         return ("Het onderdeel ligt niet in alle foto's op dezelfde plek. De foto's vallen uiteen in "
                 f"{len(res.groups)} groepen die elk onderling kloppen (" + shown + ")" + (f", en {odd}" if n_odd else "")
                 + ". Waarschijnlijk is het tussendoor verschoven, gedraaid of op een andere kant gelegd. " + advice)
