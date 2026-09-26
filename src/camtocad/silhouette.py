@@ -56,7 +56,14 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
         sl = (slice(y0, y1), slice(x0, x1))
         bg = (m.edge_bg if m.edge_bg is not None else m.bg)[sl]
         fg = m.fg[sl]
-        out.append(ViewData(pose, fg, bg, m.valid[sl] & ~fg & ~bg, x0, y0))
+        unk = m.valid[sl] & ~fg & ~bg
+        if m.amb is not None:
+            # Waar het object dezelfde grijswaarde heeft als de mat (zwart op zwart), telt een pixel
+            # nergens mee, ook niet als het masker hem voor de startcontour heeft opgevuld: zo trekt hij
+            # een gat niet groter of een buitenrand niet naar binnen, en bepaalt het bewijs eromheen de vorm.
+            amb = m.amb[sl]
+            fg, unk = fg & ~amb, unk & ~amb
+        out.append(ViewData(pose, fg, bg, unk, x0, y0))
     return out
 
 
@@ -330,6 +337,33 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
     if log:
         log(f"verfijning: {evals} evaluaties, E = {e_best:.0f}")
     return best, e_best, evals
+
+
+def probe_fillets(part: Part2p5D, K: np.ndarray, views: list[ViewData], e_part: float | None = None,
+                  radii=(0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0)) -> tuple[Part2p5D, float, bool]:
+    """Probeert per hoek grote stappen in de afrondingsstraal; geeft (model, energie, veranderd).
+
+    Vanuit een scherpe hoek levert een kleine afronding bijna niets op (het weggesneden stukje groeit
+    met R²). De kompaszoektocht vindt een afronding van 3 mm dan niet, en de fit stopt omdat er te
+    weinig verbetert, ook al past die afronding veel beter.
+    """
+    e_best = energy(part, K, views) if e_part is None else e_part
+    if part.outer.kind != "polygon":
+        return part, e_best, False
+    changed = False
+    for k in range(part.outer.n):
+        current = float(part.outer.fillets[k])
+        for r in radii:
+            if abs(r - current) < 0.25:
+                continue
+            cand = part.copy()
+            cand.outer.fillets[k] = r
+            if not cand.outer.is_valid():
+                continue
+            e = energy(cand, K, views)
+            if e < e_best:
+                part, e_best, changed = cand, e, True
+    return part, e_best, changed
 
 
 def view_stats(part: Part2p5D, K: np.ndarray, views: list[ViewData]) -> dict:

@@ -5,4 +5,4 @@ linkeronderhoek van het schaakbord (zoals geprint), X naar rechts, Y omhoog over
 papier en Z loodrecht omhoog uit de mat.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

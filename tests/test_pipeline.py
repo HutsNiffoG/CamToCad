@@ -114,3 +114,56 @@ def test_holes_without_visible_mat_are_suspect():
         bg[v - 8:v + 9, u - 8:u + 9] = True
         views.append((pose, ViewMasks(np.zeros_like(bg), bg, np.ones_like(bg))))
     assert pipeline.unseen_holes(part, K, views) == [1]
+
+
+def test_a_kink_without_evidence_is_removed_but_a_real_one_stays():
+    """Een knik of afschuining zonder bewijs verdwijnt; een echte (het model past zonder slechter) blijft."""
+    from camtocad import silhouette
+    from camtocad.calib import Pose
+    from camtocad.profile import Part2p5D, Profile
+    from camtocad.render import look_at
+
+    def from_vertices(V):
+        V = np.asarray(V, float)
+        d = np.roll(V, -1, axis=0) - V
+        n = np.column_stack([d[:, 1], -d[:, 0]]) / np.linalg.norm(d, axis=1, keepdims=True)
+        c = V.mean(axis=0)
+        return Profile("polygon", c, np.arctan2(n[:, 1], n[:, 0]), np.einsum("ij,ij->i", n, V - c), np.zeros(len(V)))
+
+    K = np.array([[650.0, 0.0, 399.5], [0.0, 650.0, 299.5], [0.0, 0.0, 1.0]])
+
+    def views_of(part):
+        out = []
+        for k in range(4):
+            az = 2 * np.pi * k / 4 + 0.3
+            R, t = look_at([120 + 200 * np.cos(az), 80 + 200 * np.sin(az), 250.0], [120.0, 80.0, 0.0])
+            v = silhouette.ViewData(Pose(f"v{k}", R, t), np.zeros((600, 800), bool), np.ones((600, 800), bool),
+                                    np.zeros((600, 800), bool), 0, 0)
+            v.fg = silhouette.render(part, K, v).astype(bool)
+            v.bg = ~v.fg
+            out.append(v)
+        return out
+
+    straight = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 100), (90, 100)]))
+    kinked = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 100), (120, 101.05), (90, 100)]))  # 4°
+    views = views_of(straight)  # het onderdeel is recht: de knik in het model heeft geen bewijs
+    e = silhouette.energy(kinked, K, views)
+    part, _, removed = pipeline._simplify_outline(kinked, K, views, e, log=lambda m: None)
+    assert removed == 1 and part.outer.n == 4
+    real = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 100), (120, 102.4), (90, 100)]))  # knik van 9°
+    views = views_of(real)
+    e = silhouette.energy(real, K, views)
+    part, _, removed = pipeline._simplify_outline(real, K, views, e, log=lambda m: None)
+    assert removed == 0 and part.outer.n == 5
+    # een korte schuine rand op een hoek (afschuining van 3 mm): weg als het onderdeel een gewone hoek heeft
+    bevel = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 97), (147, 100), (90, 100)]))
+    views = views_of(straight)
+    part, _, removed = pipeline._simplify_outline(bevel, K, views, silhouette.energy(bevel, K, views),
+                                                  log=lambda m: None)
+    assert removed == 1 and part.outer.n == 4
+    V = part.outer.vertices()
+    assert np.allclose(V.max(axis=0), [150, 100], atol=0.1)
+    views = views_of(bevel)  # een echte afschuining blijft
+    part, _, removed = pipeline._simplify_outline(bevel, K, views, silhouette.energy(bevel, K, views),
+                                                  log=lambda m: None)
+    assert removed == 0 and part.outer.n == 5

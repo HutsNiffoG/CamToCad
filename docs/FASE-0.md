@@ -9,7 +9,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 - **De mat v2.** Maak hem met `camtocad mat --formaat A4` (of `A3`, `Letter`).
   - Print op 100% (werkelijke grootte), op mat papier, en leg hem vlak op een stijve plaat.
   - Meet beide meetlijnen van 100,0 mm na met een schuifmaat: **X** onder de mat en **Y** links. Noteer ze; ze komen in `maten.json`.
-  - Een mat v1 (zonder stippenraster) wordt nog herkend, maar donkere onderdelen zijn daarop slechter te zien.
+  - Een mat v1 (zonder stippenraster) wordt nog herkend, maar een zwart onderdeel lukt daarop niet. Op mat v2 wel.
 - **Een digitale schuifmaat** (0,01 mm). Radiusmallen voor afrondingen zijn handig maar niet nodig.
 - **10–20 onderdelen**, zo gevarieerd mogelijk:
   - materiaal: aluminium en staal (mat en blank), zwart, wit en gekleurd kunststof;

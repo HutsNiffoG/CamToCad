@@ -1,14 +1,17 @@
 """Objectmaskers via de bekende mat-achtergrond.
 
 Met de camerapose is precies te voorspellen hoe de mat er in elke foto uitziet. Pixels die
-daarvan afwijken horen bij het object. Drie klassen per pixel:
+daarvan afwijken horen bij het object. Klassen per pixel:
 
 * `fg`    – objectpixel (wijkt af van de voorspelde mat);
 * `bg`    – *zeker* mat: klopt met de voorspelling én de voorspelling heeft daar textuur;
-* overig  – onbekend (bijv. egale zwarte vakken, of buiten de mat).
+* `amb`   – dubbelzinnig: het object heeft hier dezelfde grijswaarde als de mat (zwart op een
+            zwart stuk zonder stippen, wit op wit), dus de foto zegt hier niets. Binnen het object
+            is zo'n stuk voor de startcontour opgevuld (ook `fg`); de fit negeert het;
+* overig  – onbekend (bijv. egale stukken mat, of buiten de mat).
 
 Alleen zekere mat-pixels mogen voxels wegsnijden (hull.py). Zo veroorzaakt een donker
-object op een zwart vak geen gat in het model: daar is het simpelweg 'onbekend'.
+object op een zwart vak geen gat in het model: daar is het niet 'mat'.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ class ViewMasks:
     valid: np.ndarray  # pixel valt op de mat
     edge_bg: np.ndarray | None = None  # zekere mat zonder marge (voor de modelverfijning)
     sigma: float = 0.0  # ruisniveau van het residu (grijswaarden)
+    amb: np.ndarray | None = None  # object zou hier onzichtbaar zijn (zelfde grijs als de mat): geen bewijs
 
 
 def predict_background(raster: BoardRaster, K: np.ndarray, pose: Pose, size: tuple[int, int]):
@@ -99,6 +103,113 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
     return out
 
 
+def _drop_small(mask: np.ndarray, min_area: float) -> np.ndarray:
+    """Alleen samenhangende stukken van minstens `min_area` pixels."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    keep = np.zeros(n, bool)
+    keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
+    return keep[labels]
+
+
+def _object_level(fg: np.ndarray, o: np.ndarray, radius_px: float) -> np.ndarray | None:
+    """Lokale grijswaarde van het object (gemiddelde over het binnenste van het masker in de buurt)."""
+    inner = cv2.erode(fg.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    if np.count_nonzero(inner) < 50:
+        return None
+    return _normconv(o, inner.astype(np.float32), max(4.0, radius_px), float(np.median(o[inner])))
+
+
+def _closure(fg: np.ndarray, radius_px: float) -> np.ndarray:
+    """Morfologische sluiting met een schijf: overbrugt stroken en inhammen tot 2 x `radius_px` breed,
+    maar groeit niet over een rechte of bolle rand heen."""
+    r = max(int(round(radius_px)), 1)
+    disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    return cv2.morphologyEx(fg.astype(np.uint8), cv2.MORPH_CLOSE, disk, borderType=cv2.BORDER_CONSTANT,
+                            borderValue=0) > 0
+
+
+def _fill_ambiguous(fg: np.ndarray, ambiguous: np.ndarray, evidence: np.ndarray, domain: np.ndarray,
+                    o: np.ndarray, bgv: np.ndarray, level: np.ndarray,
+                    min_contrast: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+    """Vult dubbelzinnige stukken binnen het object op.
+
+    Een zwart onderdeel op een zwart stuk mat zonder textuur (de stipvrije stroken van mat v2, de
+    zwarte vlakken van een marker), of een wit onderdeel op een wit stuk, is daar per pixel
+    onzichtbaar (`ambiguous`). Zonder opvulling krijgt het masker gaten die aan de mat vastzitten
+    (z = 0), dus in elk bovenaanzicht op dezelfde plek: nepgaten in de startcontour en een te lage
+    hoogte.
+
+    Opgevuld wordt een samenhangend dubbelzinnig stuk als het binnen `domain` ligt (de sluiting van
+    het object: die overbrugt een strook, maar groeit niet over een rechte buitenrand heen),
+    daarbinnen nergens grenst aan bewijs voor mat (`evidence`), en als geheel niet duidelijk op de mat
+    lijkt. Dat laatste is een toets op het gemiddelde van het stuk: per pixel is een slagschaduw op wit
+    (door de schaduwcorrectie verwacht op ~45%) vaak binnen de ruis even grijs als een grijs object,
+    maar over honderden pixels is het verschil duidelijk. Alleen als object en mat daar samen minstens
+    `min_contrast` grijswaarden verschillen: zwart op zwart (~5) is ook als geheel niet te scheiden van
+    een flauw belichtingsverloop, en wordt dus opgevuld. De mat net buiten een rechte rand zegt niets
+    over een inham in die rand. Een echt gat laat stippen, randen of wit zien en blijft dus open; een
+    gat boven een egaal stuk in precies de kleur van het object is in die foto onzichtbaar, en daar
+    beslissen de andere foto's.
+
+    Geeft (opgevuld masker, stukken die als geheel op de mat lijken).
+    """
+    none = np.zeros_like(fg)
+    cand = (ambiguous & domain).astype(np.uint8)
+    n, labels = cv2.connectedComponents(cand, connectivity=8)
+    if n <= 1:
+        return fg, none
+    idx = labels.ravel()
+    count = np.maximum(np.bincount(idx, minlength=n), 1)
+    m_o, m_b, m_l = (np.bincount(idx, weights=x.ravel(), minlength=n) / count for x in (o, bgv, level))
+    mat_like = (np.abs(m_l - m_b) > min_contrast) & (np.abs(m_o - m_b) < 0.5 * np.abs(m_o - m_l))
+    mat_like[0] = False
+    touched = cv2.dilate((evidence & domain).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    blocked = mat_like.copy()
+    blocked[np.unique(labels[touched & (cand > 0)])] = True
+    blocked[0] = True
+    return fg | ~blocked[labels], mat_like[labels]
+
+
+def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, radius: float, window: int,
+                       min_area: float):
+    """Zwart op zwart, wit op wit: geeft (objectmasker, dubbelzinnig, zekere-mat-toegestaan), of None.
+
+    Waar de mat dezelfde grijswaarde heeft als het object ernaast, is een pixel zelf geen bewijs, en ook
+    het textuurvenster niet vlak bij de rand. Een venster tot een halve vensterbreedte binnen het object
+    ziet de stippen van de mat ernaast nog ('mat gezien'), en een venster tot een halve vensterbreedte
+    buiten het object mist ze al ('textuur ontbreekt'). Daar telt alleen de kern van zo'n gebied: de rand
+    ligt ertussen, en de fit bepaalt hem uit het bewijs rondom. De rest is dubbelzinnig: de fit negeert
+    het, en binnen het object wordt het voor de startcontour opgevuld (_fill_ambiguous).
+    """
+    level = _object_level(fg, o, radius)
+    if level is None:
+        return None
+    domain = _closure(fg, radius)
+    # losse vlekjes object binnen de sluiting horen erbij (een witte stip onder een zwart onderdeel; vlak
+    # naast een gat vaak het enige bewijs waar het object ophoudt); daarbuiten zijn ze ruis
+    support = fg | (specks & domain)
+    diff = np.abs(level - bgv)
+    same = valid & (diff < 2.0 * tau)
+    kw = np.ones((window, window), np.uint8)
+    mat_ok = mat_seen & (~same | (cv2.erode(mat_seen.astype(np.uint8), kw) > 0))
+    leak = support & same & (res <= tau) & (cv2.dilate((valid & ~support).astype(np.uint8), kw) > 0)
+    free = valid & ~support
+    sure = free & mat_ok & (res <= tau)
+    unseen = free & same & ~sure
+    evidence = sure | (free & ~same & (np.abs(o - bgv) < 0.3 * diff))
+    filled, mat_like = _fill_ambiguous(support, unseen, evidence, domain, o, bgv, level)
+    unseen &= ~mat_like  # als geheel duidelijk mat (schaduw, doorkijk): gewoon 'onbekend', geen opvulling
+    # Wat binnen de sluiting nog open is, grenst aan matbewijs (bijv. een zwart vlak naast een echt gat):
+    # elke pixel gaat naar het dichtstbijzijnde bewijs, object of mat, zodat de grens halverwege komt en
+    # een gat rond blijft in plaats van de vorm van het zwarte vlak te krijgen.
+    rest = unseen & domain & ~filled
+    if rest.any():
+        d_obj = cv2.distanceTransform((~(support & ~leak)).astype(np.uint8), cv2.DIST_L2, 3)
+        d_mat = cv2.distanceTransform((~evidence).astype(np.uint8), cv2.DIST_L2, 3)
+        filled = filled | (rest & (d_obj < d_mat))
+    return _drop_small(filled, min_area) | (specks & domain), unseen | leak, mat_ok
+
+
 def _local_stats(o: np.ndarray, p: np.ndarray, k: int):
     """Gemiddelden, varianties en covariantie van o en p in vensters van k x k pixels."""
     box = lambda x: cv2.boxFilter(x, cv2.CV_32F, (k, k))  # noqa: E731
@@ -125,7 +236,7 @@ def _normconv(values: np.ndarray, weight: np.ndarray, sigma: float, fallback: fl
 def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sigma: float = 6.0,
              tau_min: float = 14.0, texture_min: float = 10.0, min_area_frac: float = 2e-4,
              misreg_px: float = 0.4, ncc_mat: float = 0.75, window: int = 7, use_gain: bool = True,
-             use_texture_missing: bool = True) -> ViewMasks:
+             use_texture_missing: bool = True, px_per_mm: float = 4.0, fill_mm: float = 3.5) -> ViewMasks:
     """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend.
 
     Twee soorten bewijs:
@@ -183,11 +294,9 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         tau = max(k_sigma * sig, tau_min)
         fg = (valid & ((res > tau) | texture_missing)).astype(np.uint8)
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3)
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
-        keep = np.zeros(n, bool)
-        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= min_area
-        return keep[labels], bgv, res, tau, sig
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3) > 0
+        large = _drop_small(fg, min_area)
+        return large, fg & ~large, bgv, res, tau, sig
 
     # lokale versterking (schaduw, glans): verhouding van lokale sommen van foto en voorspelling,
     # alleen over pixels waarvan het venster het matpatroon herhaalt (objectpixels tellen dus niet
@@ -215,8 +324,20 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
             src = (gain_src & fit).astype(np.float32)
         dev = gain - 1.0
         gain = (1.0 + np.sign(dev) * np.maximum(np.abs(dev) - 0.03, 0.0)).astype(np.float32)
-    fg, bgv, res, tau, sigma = foreground(gain)
+    fg, specks, bgv, res, tau, sigma = foreground(gain)
     fg = _refine_boundary(fg, o, bgv, valid, tau)
+    mat_ok, amb = mat_seen, None
+    radius = fill_mm * px_per_mm
+    if fill_mm > 0 and fg.any():
+        # alleen rond het object: daarbuiten verandert niets, en zo kost het weinig rekentijd
+        x, y, w, h = cv2.boundingRect(fg.astype(np.uint8))
+        m = int(radius) + window + 2
+        sl = (slice(max(y - m, 0), y + h + m), slice(max(x - m, 0), x + w + m))
+        out = _resolve_ambiguity(fg[sl], specks[sl], o[sl], bgv[sl], valid[sl], res[sl], mat_seen[sl], tau,
+                                 radius, window, min_area)
+        if out is not None:
+            fg, amb, mat_ok = np.zeros_like(fg), np.zeros_like(fg), mat_seen.copy()
+            fg[sl], amb[sl], mat_ok[sl] = out
 
     # Zekere mat voor het uitsnijden (hull): het eigen venster herhaalt het matpatroon. Voor de fit
     # ook de pixels tot aan de objectrand: hun venster overlapt het object, maar een venster er vlak
@@ -235,5 +356,7 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     obj = cv2.boxFilter(o * inner, -1, (11, 11), normalize=False) / np.maximum(obj_den, 1e-6)
     clearly_mat = (obj_den <= 0) | (np.abs(o - bgv) < 0.3 * np.abs(obj - bgv))
     edge_bg = match & near_seen & (texture15 > 1.8 * texture_min) & clearly_mat
+    if amb is not None:  # waar het object onzichtbaar zou zijn, zegt 'lijkt op de mat' niets
+        edge_bg &= ~amb
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
-    return ViewMasks(fg=fg, bg=match & mat_seen & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma)
+    return ViewMasks(fg=fg, bg=match & mat_ok & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma, amb=amb)

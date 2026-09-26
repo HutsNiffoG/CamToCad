@@ -178,3 +178,42 @@ def test_slightly_slanted_edge_does_not_bias_the_frame():
     assert p.is_valid()
     rot = Part2p5D(5.0, p).transformed(math.radians(-25.0), np.array([100.0, 50.0])).outer
     assert abs(math.degrees(profile.dominant_angle(rot)) + 25.0) < 1e-6
+
+
+def _from_vertices(V, fillets=None):
+    V = np.asarray(V, float)
+    d = np.roll(V, -1, axis=0) - V
+    n = np.column_stack([d[:, 1], -d[:, 0]]) / np.linalg.norm(d, axis=1, keepdims=True)  # buitennormaal (CCW)
+    c = V.mean(axis=0)
+    f = np.zeros(len(V)) if fillets is None else np.asarray(fillets, float)
+    return Profile("polygon", c, np.arctan2(n[:, 1], n[:, 0]), np.einsum("ij,ij->i", n, V - c), f)
+
+
+def test_merge_at_vertex_straightens_a_kink():
+    """Twee randen met een knik van 4° worden één rechte rand; de andere hoeken en afrondingen blijven."""
+    p = _from_vertices([(0, 0), (60, 0), (60, 40), (30, 41.05), (0, 40)], fillets=[1.0, 2.0, 3.0, 0.5, 4.0])
+    q = profile.merge_at_vertex(p, 3)
+    assert q is not None and q.n == 4 and q.is_valid()
+    V = q.vertices()
+    assert np.allclose(V[[0, 1]], [(0, 0), (60, 0)], atol=1e-6)
+    assert np.allclose(V[2:, 1], 40.525, atol=0.01)  # gemiddelde hoogte van de twee delen, horizontaal
+    assert np.allclose(q.fillets, [1.0, 2.0, 3.0, 4.0])
+
+
+def test_hole_next_to_an_invisible_area_is_fitted_on_its_visible_rim():
+    """Een rond gat naast een vlak dat in de bovenaanzichten niets zegt (zwart op zwart): de opening loopt
+    door tot in dat vlak, maar de cirkel volgt alleen de zichtbare rand."""
+    px = 0.25
+    rows, cols = np.mgrid[0:240, 0:320]
+    img = np.zeros((240, 320), np.uint8)
+    img[20:220, 20:300] = 1
+    hole = (cols * px - 30.0) ** 2 + (rows * px - 30.0) ** 2 < 3.3 ** 2  # gat Ø 6,6
+    # zwart vlak rechts tegen het gat aan: bedekt ~45% van de rand
+    square = (cols * px > 30.5) & (cols * px < 36.5) & (rows * px > 26.0) & (rows * px < 34.0)
+    unknown = square & ~hole
+    img[hole | square] = 0
+    _, holes, cutouts = profile.from_footprint(img > 0, (0.0, 0.0), px, lenient_holes=True)
+    assert cutouts or abs(holes[0].d - 6.6) > 0.5  # zonder die kennis: uitsparing of een veel te groot gat
+    _, holes, cutouts = profile.from_footprint(img > 0, (0.0, 0.0), px, lenient_holes=True, unknown=unknown)
+    assert not cutouts and len(holes) == 1
+    assert abs(holes[0].d - 6.6) < 0.3 and abs(holes[0].x - 30.0) < 0.2 and abs(holes[0].y - 30.0) < 0.2

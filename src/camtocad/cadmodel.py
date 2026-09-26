@@ -180,7 +180,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         for g in _groups([radii[i] for i in nz], 2.5 * unc.fillet):
             members = [nz[j] for j in g]
             r = float(np.mean([radii[i] for i in members]))
-            s = snap(f"afronding R ({len(members)}x)", r, unc.fillet / math.sqrt(len(members)) + 0.03,
+            label = f"{len(members)}x" if len(members) > 1 else f"hoek {members[0] + 1}"  # geen twee dezelfde namen
+            s = snap(f"afronding R ({label})", r, unc.fillet / math.sqrt(len(members)) + 0.03,
                      radius_candidates(r), threshold=threshold)
             for i in members:
                 o.fillets[i] = s.value
@@ -190,7 +191,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     # 3σ: het verschil tussen een gat en het groepsgemiddelde is zelf ook onzeker (~1,15σ)
     for g in _groups(diam, 3.0 * unc.hole_d):
         d = float(np.mean([diam[i] for i in g]))
-        s = snap(f"gat Ø ({len(g)}x)", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
+        label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
+        s = snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
                  threshold=threshold)
         for i in g:
             out.holes[i] = Hole(out.holes[i].x, out.holes[i].y, s.value)

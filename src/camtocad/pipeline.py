@@ -21,7 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import __version__, cadmodel, calib, debug, hull, initial, masks, preflight, report, silhouette
+from . import __version__, cadmodel, calib, debug, hull, initial, masks, preflight, profile, report, silhouette
 from .imgio import imwrite, read_gray
 from .mat import MatSpec, get_spec, rasterize_board
 
@@ -138,6 +138,61 @@ def unseen_holes(part, K: np.ndarray, top_views: list, min_px: int = 20) -> list
     return out
 
 
+def _turns_deg(outer) -> np.ndarray:
+    """Richtingsverandering (graden) bij elk hoekpunt k, tussen rand k-1 en rand k."""
+    return np.degrees(np.abs((outer.angles - np.roll(outer.angles, 1) + np.pi) % (2 * np.pi) - np.pi))
+
+
+def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg: float = 10.0,
+                      max_edge_mm: float = 5.0, max_tries: int = 8, log=print):
+    """Haalt hoekpunten weg die het model niet nodig heeft: een knik van een paar graden in een rechte
+    rand, of een korte rand (bijv. een afschuining) op een hoek.
+
+    De fit kan geen hoekpunten weghalen. Zo'n hoekpunt in de startcontour komt vaak van een stuk rand
+    zonder bewijs (zwart op zwart bij een hoek) en is dan geen kenmerk van het onderdeel. Per kandidaat
+    volgt een korte fit zonder dat hoekpunt; past het model dan even goed (de energie stijgt minder dan
+    0,5% of één pixel per foto), dan blijft het weg. Een echt kenmerk, of een schaduw die het masker
+    verkeerd laat lopen, heeft bewijs in de foto's: dan blijft het staan (en markeert de
+    kwaliteitspoort een schaduw). Geeft (model, energie, aantal weggehaalde hoekpunten).
+    """
+    removed, tries = 0, 0
+    while part.outer.kind == "polygon" and part.outer.n > 3 and tries < max_tries:
+        o = part.outer
+        turn = _turns_deg(o)
+        V = o.vertices()
+        lengths = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand k: hoekpunt k -> k+1
+        tol = max(0.005 * energy, float(len(vd)))
+        options = [("knik", k, profile.merge_at_vertex(o, k)) for k in range(o.n) if turn[k] < max_turn_deg]
+        options += [("korte rand", k, profile.drop_edge(o, k)) for k in range(o.n) if lengths[k] < max_edge_mm]
+        cands = []
+        for what, k, outer in options:
+            if outer is None:
+                continue
+            outer, _ = profile.regularize_angles(outer)  # weer haaks op de andere randen, zoals de startcontour
+            if not outer.is_valid():
+                continue
+            cand = part.copy()
+            cand.outer = outer
+            cands.append((silhouette.energy(cand, K, vd), what, k, cand))
+        changed = False
+        for e_raw, what, k, cand in sorted(cands, key=lambda c: c[0]):
+            # Zonder bijstellen past een samengevoegde rand nog niet (hij ligt op het gemiddelde); kansloos
+            # is een kandidaat pas als hij veel slechter past: dan is er bewijs voor dit hoekpunt.
+            if e_raw > energy + max(20 * tol, 0.5 * energy) or tries >= max_tries:
+                break
+            tries += 1
+            cand, e_cand, _ = silhouette.refine(cand, K, vd, max_evals=200)
+            if e_cand <= energy + tol:
+                detail = f"knik van {turn[k]:.1f}°" if what == "knik" else f"korte rand van {lengths[k]:.1f} mm"
+                log(f"{detail} uit de contour gehaald: het model past zonder even goed (energie {energy:.0f} → "
+                    f"{e_cand:.0f})")
+                part, energy, removed, changed = cand, e_cand, removed + 1, True
+                break
+        if not changed:
+            break
+    return part, energy, removed
+
+
 def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25) -> list[str]:
     """Signalen dat het model niet klopt, ook al is er een model uitgekomen."""
     issues = []
@@ -152,7 +207,7 @@ def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: fl
         # een knik van een paar graden in een rechte rand (schaduw langs die rand), vaak met een enorme
         # 'afronding' die de knik gladstrijkt
         o = part.outer
-        turn = np.degrees(np.abs((o.angles - np.roll(o.angles, 1) + np.pi) % (2 * np.pi) - np.pi))
+        turn = _turns_deg(o)
         if np.any(turn < 10.0):
             issues.append(f"een rand heeft een knik van {float(turn.min()):.1f}°: waarschijnlijk een schaduw of een "
                           "rommelig masker langs die rand")
@@ -256,7 +311,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     def view_masks(pose):
         img = calib.undistort(lookup[pose.name], cam)
         pred, valid = masks.predict_background(raster, cam.K, pose, (cam.width, cam.height))
-        return pose, masks.classify(img, pred, valid)
+        depth = float((pose.R @ np.array([spec.size_mm[0] / 2, spec.size_mm[1] / 2, 0.0]) + pose.t)[2])
+        return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:  # grote beeldbewerkingen: OpenCV en numpy geven de GIL vrij
         views = list(pool.map(view_masks, cal.poses.values()))
@@ -357,6 +413,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         max_evals = min(max_evals, 300)
         log(f"rommelige startcontour ({n_features} randen, gaten en uitsparingen): korte verfijning")
     part, energy, evals = silhouette.refine(part, cam.K, vd, max_evals=max_evals, log=log)
+    probed, e_probed, changed = silhouette.probe_fillets(part, cam.K, vd, energy)
+    if changed:  # een afronding die de kompaszoektocht vanuit een (bijna) scherpe hoek niet vond
+        probed, e_probed, _ = silhouette.refine(probed, cam.K, vd, max_evals=200)
+        log(f"afrondingen opnieuw bepaald: energie {energy:.0f} → {e_probed:.0f}")
+        part, energy = probed, e_probed
+    part, energy, _ = _simplify_outline(part, cam.K, vd, energy, log=log)
     oc = part.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, part.height / 2])
     mm_per_px = _object_distance(cal.poses.values(), center) / cam.K[0, 0]

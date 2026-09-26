@@ -2,7 +2,8 @@
 
 Staat in `<uitvoer>/debug/`, ook als de verwerking halverwege stopt:
 
-* `masker_<foto>.jpg`   – objectmasker over de foto (oranje = object, blauw = zekere mat);
+* `masker_<foto>.jpg`   – objectmasker over de foto (oranje = object, blauw = zekere mat, paars =
+                          object en mat daar even donker of licht: geen bewijs);
 * `lokalisatie.png`     – grove visual hull van boven over de mat (lichter = hoger), met zoekgebied;
 * `bovenaanzicht.png`   – stemmen van de bovenaanzichten op de gekozen hoogte (geel = allemaal
                           object), met de startcontour in cyaan;
@@ -26,6 +27,8 @@ def mask_overlay(img: np.ndarray, m: ViewMasks) -> np.ndarray:
     base = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR).astype(np.float32) * 0.6
     base[m.bg] = base[m.bg] * 0.7 + np.array([255, 120, 0]) * 0.3  # zekere mat: blauw
     base[m.fg] = base[m.fg] * 0.5 + np.array([0, 140, 255]) * 0.5  # object: oranje
+    if m.amb is not None:
+        base[m.amb] = base[m.amb] * 0.5 + np.array([200, 50, 160]) * 0.5  # niet te onderscheiden: paars
     return np.clip(base, 0, 255).astype(np.uint8)
 
 

@@ -1,10 +1,10 @@
-# Route A — lokaal en open source (v0.3)
+# Route A — lokaal en open source (v0.4)
 
 Dit is de uitvoering van profiel A uit [OPEN-SOURCE-LOKAAL.md](OPEN-SOURCE-LOKAAL.md): foto's van een onderdeel op een geprinte kalibratiemat gaan naar je eigen pc, die er een CAD-model van maakt. Er is geen cloud nodig en er zijn geen licentiekosten; alle afhankelijkheden hebben een permissieve open-sourcelicentie.
 
 | | |
 |---|---|
-| **Status** | v0.3 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, donkere en witte onderdelen, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
+| **Status** | v0.4 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw in v0.4: zwarte en witte onderdelen op mat v2, afrondingen en overbodige hoekpunten in de fit. Sinds v0.3: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
 | **Objectklasse** | 2,5D-onderdelen die plat op de mat liggen: extrusie van een contour (rechte randen met scherpe of afgeronde hoeken, of een cirkel) met doorgaande gaten |
 | **Uitvoer** | `model.step`, `model.stl`, parametrisch CadQuery-script `model.py`, meetrapport `report.html` / `report.json` |
 | **Platform** | Windows, macOS en Linux met Python 3.10–3.12; geen GPU nodig |
@@ -59,7 +59,7 @@ Elke scan schrijft diagnosebeelden naar `<uitvoer>/debug/`, ook als de verwerkin
 
 | Bestand | Wat je ziet |
 |---|---|
-| `masker_<foto>.jpg` | Het objectmasker over de foto: **oranje** = object, **blauw** = zekere mat. Alle gebruikte bovenaanzichten en een paar schuine foto's |
+| `masker_<foto>.jpg` | Het objectmasker over de foto: **oranje** = object, **blauw** = zekere mat, **paars** = object en mat zijn daar even donker of licht, dus de foto zegt daar niets (binnen het object opgevuld voor de startcontour; de fit negeert het). Alle gebruikte bovenaanzichten en een paar schuine foto's |
 | `lokalisatie.png` | De grove visual hull van boven over de mat (lichter = hoger), met het zoekgebied |
 | `bovenaanzicht.png` | Hoe vaak de bovenaanzichten "object" zeggen op de gekozen hoogte (geel = allemaal), met de startcontour in cyaan |
 | `diagnose.json` | Per foto: kijkhoek, onscherpte, objectaandeel, ruis en mathoeken; de dekking rond het object; de hoogtezoektocht; de terugvalopties die zijn geprobeerd |
@@ -68,7 +68,7 @@ Meest voorkomende meldingen:
 
 - **"Geen objectcontour gevonden in de foto's recht van boven"**
   - Kijk in `masker_top*.jpg` of het onderdeel oranje is.
-  - Is het grotendeels grijs, dan steekt het te weinig af tegen de mat. Dat gebeurt bij een donker onderdeel op de zwarte vakken of een wit onderdeel op wit.
+  - Is het grotendeels grijs, dan steekt het te weinig af tegen de mat. Paars is geen probleem: daar is het onderdeel even donker (of licht) als de mat, en dat wordt opgevangen. Grote paarse stukken ontstaan bij een zwart onderdeel op een mat v1: print dan mat v2.
   - Oplossing: diffuus licht, het onderdeel midden op de mat, en 4–6 foto's recht boven het onderdeel met de hele mat in beeld.
   - Achter de melding staat welke foto's er rond het object nog ontbreken.
 - **"gekozen mat A4, maar de foto's tonen mat A3"**: de mat op de foto's is gebruikt. Controleer of dat de mat is die je bedoelde.
@@ -83,10 +83,10 @@ Meest voorkomende meldingen:
 | Mat | `mat.py`, `pdf.py` | ChArUco-mat als vector-PDF op exacte schaal, met meetlijnen X en Y en een stippenraster in de zwarte vakken. Eigen marker-ID's per formaat: de mat wordt herkend | §4.5 |
 | Fotocontrole | `preflight.py` | Per foto: mat, onscherpte (gemeten aan de matranden), belichting, kijkhoek. Per scan: waar ligt het object, dekking per richting en hoogte, aanwijzingen | — |
 | Camera | `calib.py` | Mat herkennen, camera zelf kalibreren (Zhang), per foto een metrische pose: de mat is de tracker. De printschaal (X en Y) zit in de matgeometrie. De hoekverschuiving van de geïnstalleerde OpenCV-versie wordt gemeten en gecorrigeerd; staand opgeslagen foto's worden teruggedraaid | §4.5, OPEN-SOURCE-LOKAAL §2.1 |
-| Maskers | `masks.py` | Voorspel per foto hoe de mat eruitziet; afwijkingen zijn object. "Zekere mat" alleen waar het lokale patroon de mat herhaalt (correlatie), zodat donkere en witte onderdelen niet wegvallen en schaduwen mat blijven. Randpixels volgens de 50%-regel | §5.3 [R3c] |
+| Maskers | `masks.py` | Voorspel per foto hoe de mat eruitziet; afwijkingen zijn object. "Zekere mat" alleen waar het lokale patroon de mat herhaalt (correlatie), zodat donkere en witte onderdelen niet wegvallen en schaduwen mat blijven. Randpixels volgens de 50%-regel. Waar object en mat even donker of licht zijn (zwart op zwart), is een pixel geen bewijs: binnen het object wordt zo'n stuk opgevuld, de fit negeert het | §5.3 [R3c] |
 | Lokaliseren | `hull.py` | Grove visual hull (2 mm): waar ligt het object, en een bovengrens voor de hoogte | §5.3 [R3c] |
 | Startmodel | `initial.py`, `profile.py` | Hoogte zoeken waarop de bovenaanzichten samenvallen, terugprojecteren → contour → randen, afrondingen, gaten; met terugvalopties en een uitgelegde fout | §6.3–6.5 |
-| Model fitten | `silhouette.py` | Analysis-by-synthesis: model-silhouet renderen in élke foto, pixelverschil minimaliseren (hoogte, randen, afrondingen, gaten) | §6.8, §7.3 |
+| Model fitten | `silhouette.py`, `pipeline.py` | Analysis-by-synthesis: model-silhouet renderen in élke foto, pixelverschil minimaliseren (hoogte, randen, afrondingen, gaten). Daarna per hoek grote stappen in de afronding proberen, en hoekpunten weghalen waar het model zonder even goed past (een knik of een korte schuine rand zonder bewijs) | §6.8, §7.3 |
 | Ontwerpintentie | `snapping.py`, `cadmodel.py` | Werkassenstelsel met datum, randen exact haaks, Bayesiaans snappen (hele mm, ISO 273, tapboormaten, standaardstralen), steekcirkels | §6.6 |
 | CAD | `cadmodel.py`, `cadhelpers.py` | OpenCascade-solid via CadQuery, STEP/STL-export, leesbaar script met benoemde maten | §6.9 |
 | Kwaliteit | `pipeline.py`, `debug.py` | Kwaliteitspoort (past het model bij de foto's?) en diagnosebeelden in `debug/` | §4.6 |
@@ -101,30 +101,36 @@ Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het objec
 
 | Onderdeel | Maat | Waarheid | Gefit | Na snappen |
 |---|---|---|---|---|
-| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,92 × 39,94 × 12,08 | 80 × 40 × 12 |
-| | afrondingen (4x) | R3 | R2,93–R3,15 | R3 |
-| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,59 en Ø 6,51 op (9,92, 19,92) en (69,95, 19,96) | Ø 6,55 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact |
-| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,97 / 29,96 / 24,91 / 49,95, hoogte 8,04 | exact |
-| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,27, 1 × R0,9, 1 × scherp | R2,27 en R0,9 (niet gesnapt, binnen U95) |
-| | gat | Ø 5,5 op (15, 12) | Ø 5,47 op (14,98, 11,95) | Ø 5,5 (ISO 273 M5) op (15, 12) |
-| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,94 × 10,03 | Ø 50 × 10 |
-| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,41 op Ø 35,01 | 4 × Ø 4,41 (niet gesnapt) op Ø 35, parametrisch patroon |
+| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,95 × 39,95 × 12,05 | 80 × 40 × 12 |
+| | afrondingen (4x) | R3 | R2,85–R3,17 | R3 |
+| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,63 en Ø 6,61 op (9,93, 19,94) en (69,98, 20,00) | Ø 6,62 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact |
+| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,95 / 29,96 / 24,91 / 49,95, hoogte 8,07 | exact |
+| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,24, 2 × scherp | R2,24 (niet gesnapt, binnen U95) |
+| | gat | Ø 5,5 op (15, 12) | Ø 5,43 op (14,98, 11,96) | Ø 5,43 (niet gesnapt: 5,3 en 5,5 beide plausibel) op (15, 12) |
+| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,96 × 10,02 | Ø 50 × 10 |
+| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,43 op Ø 35,01 | 4 × Ø 4,5 (ISO 273 M4) op Ø 35, parametrisch patroon |
 
-De gefitte buitenmaten en hoogtes liggen binnen ±0,1 mm van de waarheid, de gaten 0,01–0,1 mm te klein en de afrondingen tot +0,3 mm te groot. Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.3 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
+Over alle stresstests die geen waarschuwing geven (ook een zwart en een wit onderdeel, zie [ROUTE-A-VERBETERPUNTEN.md §2b](ROUTE-A-VERBETERPUNTEN.md#2b-stresstests-v04)):
 
-## Beperkingen van v0.3
+- buitenmaten binnen ±0,08 mm van de waarheid, hoogtes 0 tot +0,09 mm;
+- gaten tot 0,07 mm te klein; bij het zwarte onderdeel één gat 0,2 mm;
+- afrondingen −0,1 tot +0,4 mm.
+
+Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.4 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
+
+## Beperkingen van v0.4
 
 - **Objectklasse:** alleen 2,5D-onderdelen plat op de mat, met doorgaande gaten. Geen blinde gaten, kamers, treden in de hoogte, afschuiningen op de bovenrand, schroefdraad of vrije vormen. Afschuiningen op verticale hoeken worden als afronding benaderd; buitencontouren met bogen groter dan een hoekafronding (bijv. een sleufvorm) worden met rechte randen benaderd.
 - **Bovenaanzichten zijn verplicht**: zonder foto's recht van boven stopt de verwerking met een duidelijke melding.
 - **Belichting:**
   - Schaduwen op de gestructureerde delen van de mat worden herkend.
-  - Een harde schaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort meldt dat meestal.
+  - Een harde slagschaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort markeert het resultaat dan als onbetrouwbaar (in de stresstests: altijd).
   - Gebruik diffuus licht, en mat papier voor de mat.
-- **Donkere onderdelen:** op de zwarte vakken van mat v2 zijn ze zichtbaar doordat de stippen verdwijnen. Op een mat v1 blijven ze daar deels onzichtbaar. **Witte onderdelen** zijn op de smalle witte marges rond de markers nog slecht te zien; de markers zelf helpen daar.
+- **Zwarte en witte onderdelen:** op mat v2 lukken ze in de stresstests. Waar het onderdeel even donker (of licht) is als de mat, telt de foto niet mee; binnen het onderdeel wordt zo'n stuk opgevuld, en de fit gebruikt alleen echt bewijs. Het zwakste punt is een gat boven een groot zwart vlak van een marker: de rand is daar in de bovenaanzichten niet te zien, en in de stresstest kwam zo'n gat 0,2 mm te klein uit. Op een mat v1 (zonder stippen) mislukt een zwart onderdeel nog; het resultaat wordt dan gemarkeerd. Print mat v2.
 - **Onzekerheid (U95)** is een indicatie op basis van resolutie en aantal foto's, nog niet gekalibreerd op echte metingen. Meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)).
-- **Afrondingen** zijn het minst nauwkeurig (±0,3 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
+- **Afrondingen** zijn het minst nauwkeurig (−0,1 tot +0,4 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
 - **Afrondingen kleiner dan ~3 pixels** (bij de demo ~0,8 mm) zijn niet te onderscheiden van scherpe hoeken en worden als scherp gemodelleerd; het rapport meldt dat.
-- **Rekentijd:** ~70 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen; foto's worden standaard teruggeschaald naar 2000 pixels. De fotocontrole kost ~0,1–0,3 s per foto.
+- **Rekentijd:** ~55 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen; foto's worden standaard teruggeschaald naar 2000 pixels. Tot ~2,5 minuten als er overbodige hoekpunten uit de contour moeten (zwart onderdeel, schaduw). De fotocontrole kost ~0,1–0,3 s per foto.
 - **Nog geen native app:** de telefoon gebruikt de browser. De geleide AR-opname uit het architectuurdocument volgt met de Android-app.
 
 ## Licenties

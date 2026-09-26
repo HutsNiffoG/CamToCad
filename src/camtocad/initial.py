@@ -51,26 +51,33 @@ def select_top_views(views: Views, point=None, steep_deg: float = 8.0, max_deg: 
     return steep if len(steep) >= 2 else [v for v in views if tilt_deg(v[0], point) <= max_deg]
 
 
-def vote_map(views: Views, K: np.ndarray, height: float, bounds: Bounds, px: float) -> tuple[np.ndarray, np.ndarray]:
+def vote_map(views: Views, K: np.ndarray, height: float, bounds: Bounds, px: float, unknown: bool = False):
     """Aandeel foto's waarin een punt op het vlak z = height op het object valt.
 
     Geeft (fractie, oorsprong); NaN waar het punt in minder dan de helft van de foto's op de mat
     valt (buiten de mat is een object niet te zien). Rastercel (rij v, kolom u) ligt op mat-XY
-    (x0 + px·u, y0 + px·v).
+    (x0 + px·u, y0 + px·v). Met `unknown` ook een masker van cellen die in de meeste foto's
+    dubbelzinnig zijn (object en mat even donker of licht, en niet opgevuld): daar zegt de fractie
+    niets.
     """
     x0, x1, y0, y1 = bounds
     w, h = max(int(np.ceil((x1 - x0) / px)), 1), max(int(np.ceil((y1 - y0) / px)), 1)
     T = np.array([[px, 0, x0], [0, px, y0], [0, 0, 1.0]])
     votes = np.zeros((h, w), np.float32)
     cover = np.zeros((h, w), np.float32)
+    amb = np.zeros((h, w), np.float32)
     flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
     for pose, m in views:
         Hm = K @ np.column_stack([pose.R[:, 0], pose.R[:, 1], pose.R[:, 2] * height + pose.t]) @ T
         votes += cv2.warpPerspective(m.fg.astype(np.float32), Hm, (w, h), flags=flags, borderValue=0)
         cover += cv2.warpPerspective((m.valid | m.fg).astype(np.float32), Hm, (w, h), flags=flags, borderValue=0)
+        if unknown and m.amb is not None:
+            amb += cv2.warpPerspective((m.amb & ~m.fg).astype(np.float32), Hm, (w, h), flags=flags, borderValue=0)
     frac = np.full((h, w), np.nan, np.float32)
     ok = cover >= max(0.999, 0.5 * len(views))
     frac[ok] = votes[ok] / cover[ok]
+    if unknown:
+        return frac, np.array([x0, y0], float), ok & (amb >= 0.5 * np.maximum(cover, 1e-6))
     return frac, np.array([x0, y0], float)
 
 
@@ -149,6 +156,7 @@ class Footprint:
     method: str
     n_views: int
     threshold: float = 0.5
+    unknown: np.ndarray | None = None  # dubbelzinnig in de meeste foto's (zie vote_map)
 
 
 def _threshold_mask(frac: np.ndarray, threshold: float) -> np.ndarray:
@@ -165,9 +173,10 @@ def footprint(top: Views, K: np.ndarray, height: float, bounds: Bounds, px: floa
     zijn volle maat, terwijl de buitenrand bij 0,5 het rechtst blijft (bij 0,7 wordt bijvoorbeeld een
     binnenhoek rafelig). Zijn de maskers te rommelig voor 0,7, dan alles bij 0,5.
     """
-    frac, origin = vote_map(top, K, height, bounds, px)
+    frac, origin, unknown = vote_map(top, K, height, bounds, px, unknown=True)
     if roi is not None:
         frac = np.where(roi, frac, np.nan)
+        unknown &= roi
     if threshold is None:
         loose, strict = _threshold_mask(frac, 0.5), _threshold_mask(frac, 0.7)
         fp = loose
@@ -177,7 +186,7 @@ def footprint(top: Views, K: np.ndarray, height: float, bounds: Bounds, px: floa
         threshold = 0.5
     else:
         fp = _threshold_mask(frac, threshold)
-    return Footprint(fp, origin, px, frac, height, "", len(top), threshold)
+    return Footprint(fp, origin, px, frac, height, "", len(top), threshold, unknown)
 
 
 def _usable(fp: Footprint) -> bool:
@@ -207,7 +216,7 @@ def to_part(fp: Footprint, height: float) -> Part2p5D:
     # juist meer schaduw meeneemt.
     for r in (0, 3, 6):
         mask = fp.mask if r == 0 else _smooth(fp.mask, r)
-        outer, holes, cutouts = from_footprint(mask, fp.origin, fp.px, lenient_holes=True)
+        outer, holes, cutouts = from_footprint(mask, fp.origin, fp.px, lenient_holes=True, unknown=fp.unknown)
         outer, _ = regularize_angles(outer)
         outer = remove_short_edges(outer, 3 * fp.px)
         if outer.is_valid():

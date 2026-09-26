@@ -51,3 +51,16 @@ def test_refine_gives_up_when_nothing_fits():
     _, _, evals = silhouette.refine(plate(), K, views, max_evals=1500, log=messages.append)
     assert 300 <= evals < 700
     assert any("afgebroken" in m for m in messages)
+
+
+def test_fillet_probe_finds_a_large_fillet_from_a_sharp_corner():
+    """Vanuit een scherpe hoek levert een kleine afronding bijna niets op; de proef vindt 4 mm wel."""
+    truth = plate()
+    truth.outer.fillets[:] = 4.0
+    views = views_of(truth, n=4)
+    start = truth.copy()
+    start.outer.fillets[:] = 0.0
+    e0 = silhouette.energy(start, K, views)
+    found, e, changed = silhouette.probe_fillets(start, K, views, e0)
+    assert changed and e < 0.2 * e0
+    assert np.allclose(found.outer.fillets, 4.0)

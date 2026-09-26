@@ -230,6 +230,35 @@ def regularize_angles(profile: Profile, tol_deg: float = 3.0) -> tuple[Profile, 
     return out, theta0
 
 
+def drop_edge(profile: Profile, k: int) -> Profile | None:
+    """Laat rand k weg: de buren lopen door tot hun snijpunt, of worden één rand als ze evenwijdig zijn.
+
+    De afronding van het nieuwe hoekpunt is de grootste van de twee hoekpunten van rand k. Geeft None
+    als dat geen geldige contour oplevert.
+    """
+    n = profile.n
+    if profile.kind != "polygon" or n <= 3:
+        return None
+    try:
+        V = profile.vertices()
+    except np.linalg.LinAlgError:
+        return None
+    lengths = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand m: V[m] -> V[m+1]
+    # draaien zodat rand k index 1 heeft (buren 0 en 2); hoekpunt i ligt tussen rand i-1 en i
+    shift = 1 - k
+    a, off, fil = (np.roll(x, shift).astype(float) for x in (profile.angles, profile.offsets, profile.fillets))
+    L = np.roll(lengths, shift)
+    out = profile.copy()
+    if math.cos(a[2] - a[0]) > math.cos(math.radians(0.5)):  # evenwijdige buren: samenvoegen
+        off[0] = (L[0] * off[0] + L[2] * off[2]) / max(L[0] + L[2], 1e-9)
+        drop = [1, 2]
+        out.angles, out.offsets, out.fillets = np.delete(a, drop), np.delete(off, drop), np.delete(fil, drop)
+    else:
+        fil[2] = max(fil[1], fil[2])
+        out.angles, out.offsets, out.fillets = np.delete(a, 1), np.delete(off, 1), np.delete(fil, 1)
+    return out if out.n >= 3 and out.is_valid() else None
+
+
 def remove_short_edges(profile: Profile, min_len: float) -> Profile:
     """Randen korter dan min_len (ruis van de contour, bijv. een trapje van 0,01 mm in een hoek)
     weglaten: de buren snijden elkaar, of worden één rand als ze evenwijdig zijn."""
@@ -243,22 +272,39 @@ def remove_short_edges(profile: Profile, min_len: float) -> Profile:
         k = int(np.argmin(lengths))
         if lengths[k] >= min_len:
             break
-        # draaien zodat de korte rand index 1 heeft (buren 0 en 2); hoekpunt i ligt tussen rand i-1 en i
-        shift = 1 - k
-        a, off, fil = (np.roll(x, shift) for x in (out.angles, out.offsets, out.fillets))
-        L = np.roll(lengths, shift)
-        cand = out.copy()
-        if math.cos(a[2] - a[0]) > math.cos(math.radians(0.5)):  # evenwijdige buren: samenvoegen
-            off[0] = (L[0] * off[0] + L[2] * off[2]) / max(L[0] + L[2], 1e-9)
-            drop = [1, 2]
-            cand.angles, cand.offsets, cand.fillets = np.delete(a, drop), np.delete(off, drop), np.delete(fil, drop)
-        else:
-            fil[2] = max(fil[1], fil[2])
-            cand.angles, cand.offsets, cand.fillets = np.delete(a, 1), np.delete(off, 1), np.delete(fil, 1)
-        if cand.n < 3 or not cand.is_valid():
+        cand = drop_edge(out, k)
+        if cand is None:
             break
         out = cand
     return out
+
+
+def merge_at_vertex(profile: Profile, k: int) -> Profile | None:
+    """Randen k-1 en k (aan weerszijden van hoekpunt k) worden één rechte rand, of None.
+
+    Richting en ligging zijn het naar lengte gewogen gemiddelde van beide randen; de afronding van
+    hoekpunt k vervalt, de andere blijven.
+    """
+    n = profile.n
+    if profile.kind != "polygon" or n <= 3:
+        return None
+    try:
+        V = profile.vertices()
+    except np.linalg.LinAlgError:
+        return None
+    i, j = (k - 1) % n, k % n
+    L = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand m: V[m] -> V[m+1]
+    wi, wj = L[i], L[j]
+    ai, aj = profile.angles[i], profile.angles[j]
+    a = math.atan2(wi * math.sin(ai) + wj * math.sin(aj), wi * math.cos(ai) + wj * math.cos(aj))
+    nv = np.array([math.cos(a), math.sin(a)])
+    mid_i = 0.5 * (V[i] + V[(i + 1) % n]) - profile.center
+    mid_j = 0.5 * (V[j] + V[(j + 1) % n]) - profile.center
+    out = profile.copy()
+    out.angles[i] = a
+    out.offsets[i] = float((wi * (nv @ mid_i) + wj * (nv @ mid_j)) / max(wi + wj, 1e-9))
+    out.angles, out.offsets, out.fillets = (np.delete(x, j) for x in (out.angles, out.offsets, out.fillets))
+    return out if out.is_valid() else None
 
 
 def _signed_area(P: np.ndarray) -> float:
@@ -440,12 +486,37 @@ def _circle_with_blemish(contour: np.ndarray, shape, origin, px: float) -> tuple
     return hx, hy, 2 * hr - px
 
 
+def _circle_on_visible_rim(contour: np.ndarray, unknown: np.ndarray, origin, px: float):
+    """Een gat waarvan de rand deels in dubbelzinnig gebied ligt: cirkel op alleen de zichtbare rand.
+
+    Waar een zwart onderdeel boven een zwart stuk mat ligt, is de rand van een gat in de
+    bovenaanzichten niet te zien: de opening loopt daar door tot waar het object weer zichtbaar is
+    (bijvoorbeeld een vierkant rond een rond gat). Alleen de randpunten die aan echte doorkijk
+    grenzen, bepalen dan de cirkel. Geeft (x, y, d) in mm, of None als dat niet lukt.
+    """
+    pts = contour.reshape(-1, 2)
+    near = cv2.dilate(unknown.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    unsure = near[pts[:, 1], pts[:, 0]]
+    if unsure.mean() < 0.1 or np.count_nonzero(~unsure) < 8:
+        return None
+    Q = _contour_mm(pts[~unsure].reshape(-1, 1, 2), origin, px)
+    hx, hy, hr, hrms = fit_circle(Q)
+    ang = np.arctan2(Q[:, 1] - hy, Q[:, 0] - hx)
+    coverage = len(np.unique(np.floor((ang + math.pi) / (2 * math.pi) * 36).astype(int))) / 36
+    if coverage < 0.4 or hrms > max(0.6 * px, 0.05 * hr):
+        return None
+    return hx, hy, 2 * hr - px
+
+
 def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5, min_fillet: float = 1.0,
-                   lenient_holes: bool = False) -> tuple[Profile, list[Hole], list[np.ndarray]]:
+                   lenient_holes: bool = False,
+                   unknown: np.ndarray | None = None) -> tuple[Profile, list[Hole], list[np.ndarray]]:
     """Bovenaanzicht (bool-raster, rijen = y) → buitencontour, ronde gaten en overige uitsparingen.
 
     `lenient_holes`: ook onregelmatig begrensde, ongeveer ronde openingen als gat behandelen. Nodig
     bij een footprint uit bovenaanzichten: de doorkijk door een gat is door parallax lensvormig.
+    `unknown`: cellen waar de bovenaanzichten niets zeggen (zie initial.vote_map); randpunten van
+    een opening die daaraan grenzen, tellen niet mee voor de cirkel.
     """
     img = fp.astype(np.uint8)
     contours, hier = cv2.findContours(img, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_NONE)
@@ -476,7 +547,9 @@ def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5
         hx, hy, hr, hrms = fit_circle(Q)
         q_area = abs(_signed_area(Q))
         roundish = abs(q_area - math.pi * hr * hr) < 0.25 * math.pi * hr * hr and hrms < max(2 * px, 0.12 * hr)
-        if hrms < max(0.6 * px, 0.03 * hr) or (lenient_holes and roundish):
+        if unknown is not None and (circ := _circle_on_visible_rim(contours[i], unknown, origin, px)) is not None:
+            holes.append(Hole(*circ))
+        elif hrms < max(0.6 * px, 0.03 * hr) or (lenient_holes and roundish):
             # de gatcontour loopt door de objectpixels rond het gat: een halve pixel buiten de rand
             holes.append(Hole(hx, hy, 2 * hr - px))
         elif lenient_holes and (circ := _circle_with_blemish(contours[i], img.shape, origin, px)) is not None:

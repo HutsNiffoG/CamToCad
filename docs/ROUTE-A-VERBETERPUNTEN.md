@@ -1,6 +1,6 @@
 # Route A — verbeterpunten (onderzoek, september 2026)
 
-Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3), het gereedschap voor Fase 0 in v0.3 (§3b); de rest staat hier als geprioriteerde lijst (§4).
+Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3), het gereedschap voor Fase 0 in v0.3 (§3b), en zwarte en witte onderdelen plus een betere fit in v0.4 (§3c); de rest staat hier als geprioriteerde lijst (§4).
 
 Het onderzoek bestond uit drie delen:
 
@@ -34,7 +34,7 @@ Aanleiding was de melding "Geen objectcontour gevonden" van de eerste gebruiker 
   - v0.2 heeft een kwaliteitspoort: twijfelgevallen krijgen "betrouwbaarheid: laag" met de reden, onzin wordt een foutmelding met uitleg.
 - **Grootste open punten:**
   - nauwkeurigheid en een eerlijke U95. De fit telt pixels, en afrondingen komen niet beter dan ±0,3 mm.
-  - donkere onderdelen op de zwarte vakken. Mat v2 (v0.3) helpt deels; de stipvrije stroken vragen nog om V8.
+  - zwarte en witte onderdelen. Sinds v0.4 lukken ze op mat v2 in de stresstests (§2b); echte foto's moeten dat bevestigen. Een harde slagschaduw wordt gemarkeerd, maar niet opgelost: diffuus licht blijft nodig.
   - de objectklasse: treden, verzinkingen, afschuiningen.
   - begeleiding tijdens het fotograferen. Sinds v0.3 volgt na elke foto een controle met aanwijzingen; live in de camera nog niet (V25).
 
@@ -84,6 +84,36 @@ Wat opvalt in v0.2:
 - **Systematische afwijking.** Lengtes en diameters komen systematisch ongeveer 0,1 mm te klein uit (0,05 mm per rand), hoogtes ongeveer 0,05 mm te groot. Dat is binnen het precisiedoel en zit nu in de U95.
 - **Oorzaak.** De maskerrand ligt ~0,09 px naar binnen; de rest komt uit de fit. Oplossen via V2 en V13.
 
+## 2b. Stresstests v0.4
+
+Dezelfde scenario's met mat v2 en de code van v0.4, plus een zwart en een wit onderdeel op mat v1. **Goed** betekent: geen waarschuwing. De maten zijn gefit, vóór het snappen.
+
+| Scenario | v0.4 | v0.3 |
+|---|---|---|
+| Basis | Goed: 79,94 × 39,94 × 12,08, R3,03–3,11, Ø 6,59 en 6,58 | Goed |
+| Realistisch | Goed: 79,97 × 39,94 × 12,01, R3,04–3,30, Ø 6,56 en 6,62 | Goed |
+| Harde schaduw | **Gemarkeerd als onbetrouwbaar**: uitsteeksels aan de schaduwkant (korte randen, een knik, een te grote afronding) | Gemarkeerd |
+| Donker onderdeel | **Goed**: 79,96 × 39,96 × 12,01, R3,02–3,28, Ø 6,49 en 6,39 | Rommelig model, gemarkeerd |
+| Wit onderdeel | **Goed**: 80,00 × 39,99 × 12,03, R3,00–3,41, Ø 6,56 en 6,54 | 12 spookgaatjes, gemarkeerd |
+| Handschaduw | Goed: 80,01 × 39,93 × 12,01, Ø 6,62 en 6,62 | Goed |
+| Verspreide bovenaanzichten | Goed: 79,94 × 39,96 × 12,06, Ø 6,60 en 6,59 | Goed |
+| Weinig lage foto's | Goed: 79,93 × 39,94 × 12,04, Ø 6,59 en 6,60 | Goed |
+| Klein onderdeel | Goed: 29,92 × 19,94 × 5,06, R1,94–2,17, Ø 4,48 | Goed |
+| Klein, weinig lage foto's | Goed: 29,95 × 19,94 × 5,04, R2,08–2,21, Ø 4,43 | Goed |
+| Ring | Goed: Ø 24,88 × 8,09, gat Ø 7,99 | Goed |
+| Zwaar | **Gemarkeerd als onbetrouwbaar**: een schaduwbult (twee korte randen); Ø 6,37 en 6,54 | Gemarkeerd |
+| OpenCV 4.12 | Goed: 79,95 × 39,97 × 12,07, Ø 6,61 en 6,61 | Goed |
+| Donker, mat v1 | **Gemarkeerd als onbetrouwbaar**: rommelig model (zonder stippen is het onderdeel op de zwarte vakken niet te zien) | — |
+| Wit, mat v1 | Goed: 79,97 × 39,95 × 12,07, Ø 6,58 en 6,55 | — |
+
+Wat opvalt in v0.4:
+
+- **Zwart en wit lukken op mat v2.** Het zwarte onderdeel was in v0.3 een rommelig model met 50 randen, het witte had 12 spookgaatjes.
+- **Geen stille fouten.** Elk scenario is goed of gemarkeerd. Tijdens de ontwikkeling gaf de harde schaduw nog een fout model zonder waarschuwing: schaduwvlekjes die bij het object werden getrokken. De toets per gebied en een sluiting van alleen het object zelf (§3c) hebben dat verholpen.
+- **Afrondingen:** de afrondingsproef vindt nu alle vier de hoeken (R3 gefit tussen 2,98 en 3,41). Daarvoor kwamen soms één of twee hoeken scherp uit.
+- **Gaten** komen tot 0,07 mm te klein uit (V13). Bij het zwarte onderdeel komt één gat 0,2 mm te klein uit: het ligt boven een groot zwart vlak van een marker (V5).
+- **Rekentijd:** 21–148 s per scan (twee scans tegelijk op 4 kernen). Het weghalen van overbodige hoekpunten kost tot ~80 s, alleen als er kandidaten zijn.
+
 ## 3. Opgelost in v0.2
 
 | Probleem | Oplossing | Waar |
@@ -121,11 +151,31 @@ Wat opvalt in v0.2:
 | — | Startcontour en kwaliteitspoort | Geeft een rafelige rand een ongeldige omtrek, dan eerst gladgestreken opnieuw proberen, in plaats van terug te vallen op een lagere stemdrempel die juist meer schaduw meeneemt. Nieuwe signalen voor "onbetrouwbaar": twee of meer zeer korte randen (< 2,5 mm; een uitstulping of inham die er niet is), een knik van minder dan 10° in een rand (vaak een schaduw langs die rand), een afronding die groter is dan de randen eromheen, en gaten waardoor in geen enkel bovenaanzicht zekere mat te zien is (spookgaten) | `initial.py`, `pipeline.py` |
 | V21 (deels) | Sneller | De maskers per foto lopen parallel in threads (OpenCV en numpy geven de GIL vrij bij grote beelden): 2,4× sneller op 4 kernen. De silhouetenergie heeft minder Python-overhead per foto: 81 in plaats van 229 ms per evaluatie. Threads maakten die juist trager. De fit stopt als de laatste 200 evaluaties samen < 0,1% opleveren, of na hooguit één extra blok als het model matig past (IoU < 0,95). Een rommelige startcontour (> 20 randen, gaten en uitsparingen) krijgt maar een korte verfijning. De demoscan (46 foto's van 1600 × 1200) kost daarmee ~70 s op 4 kernen; een mislukte scan kost geen tientallen minuten meer | `pipeline.py`, `silhouette.py` |
 
+## 3c. Opgelost in v0.4 (V8, eerste stap)
+
+Het zwarte onderdeel mislukte in v0.3 ook op mat v2 (§2). De analyse met de echte objectmaskers van de gerenderde scan liet drie oorzaken zien:
+
+- **12% van het object was "onbekend".** Dat zijn de zwarte stukken mat zonder stippen: de stroken langs de vakranden, de hoeken en de zwarte vlakken van de markers. Die gaten zitten aan de mat vast (z = 0), dus in elk bovenaanzicht op dezelfde plek. Gevolg: nepgaten in de startcontour, en een hoogtezoektocht die op 2 mm uitkwam in plaats van 12.
+- **"Zekere mat" lekte tot 4 pixels het object in.** Het textuurvenster (7 × 7) van een objectpixel vlak bij de rand ziet de stippen van de mat ernaast nog. Omgekeerd lekt "textuur ontbreekt" even ver het gat in. Samen duwden ze gaten groter of kleiner en de buitenrand naar binnen.
+- **De fit vond geen afrondingen vanuit een scherpe hoek.** Een kleine afronding levert bijna niets op (het weggesneden stukje groeit met R²), en de fit stopte eerder. De energie had wél een duidelijk minimum bij R3: samen bijna de helft van de totale energie.
+
+| Wat | Hoe | Waar |
+|---|---|---|
+| Dubbelzinnige pixels | Per foto de lokale grijswaarde van het object. Waar de voorspelde mat binnen 2τ gelijk is (zwart op zwart, wit op wit), is een pixel geen bewijs. Een nieuwe klasse `amb`: de fit negeert die pixels, ook als ze voor de startcontour zijn opgevuld | `masks.py`, `silhouette.py` |
+| Geen lek meer | In zulke zones telt alleen de kern van een geverifieerd matgebied als zekere mat, en de strook "textuur ontbreekt" langs de rand telt niet als object. De rand ligt ertussen; de fit bepaalt hem uit het bewijs rondom. Valse zekere mat in het object: van 20 370 naar ~700 pixels over 46 foto's | `masks.py` |
+| Opvullen (V8, stap 1) | Een dubbelzinnig stuk binnen de sluiting van het object (schijf van 3,5 mm) wordt object, tenzij het daarbinnen aan matbewijs grenst: zekere mat, of een pixel die duidelijk op de mat lijkt waar het object wél zichtbaar zou zijn. Afgedekte witte stippen tellen mee als object. "Onbekend" in het object: van 12% naar 0,2% | `masks.py` |
+| Toets per gebied | Per pixel is een slagschaduw op wit vaak even grijs als een grijs object; over het hele stuk is het verschil duidelijk. Een stuk dat als geheel op de mat lijkt, wordt niet opgevuld, als object en mat daar minstens 10 grijswaarden verschillen. Bij zwart op zwart (~5) kan dat niet, daar beslist de opvulling | `masks.py` |
+| Gaten naast een dubbelzinnig vlak | Grenst zo'n vlak aan een echt gat, dan gaat elke pixel naar het dichtstbijzijnde bewijs, object of mat. In de stemkaart komt een laag "weet niet", en de cirkel van een gat wordt gefit op alleen de zichtbare rand. Daardoor geen vierkante of gestaarte gaten meer | `masks.py`, `initial.py`, `profile.py` |
+| Afrondingsproef | Na de fit per hoek R = 0, 0,5, 1 … 10 mm proberen, daarna een korte verfijning. Energie van het zwarte onderdeel: 6360 → 3432 | `silhouette.py`, `pipeline.py` |
+| Hoekpunten weghalen (V4, deels) | De fit kan geen hoekpunten weghalen. Voor elke knik < 10° en elke rand < 5 mm volgt een korte fit zonder dat hoekpunt; past het model even goed (energie +0,5% of minder, of één pixel per foto), dan blijft het weg. Een echt kenmerk of een schaduw heeft bewijs in de foto's en blijft staan, en de kwaliteitspoort markeert een schaduw | `pipeline.py`, `profile.py` |
+| Debugbeelden | Dubbelzinnige pixels paars in `masker_*.jpg` | `debug.py` |
+| Rekentijd | De extra stappen alleen in een uitsnede rond het object: +~15% per foto. Het weghalen van hoekpunten kost alleen tijd als er kandidaten zijn (~15 s per poging) | `masks.py` |
+
 ## 4. Open verbeterpunten, op prioriteit
 
 Impact en moeite: **H**oog, **M**iddel, **L**aag. Moeite S/M/L staat voor dagen, een week, of meerdere weken.
 
-### 4.1 Eerst (Fase 0 en v0.4)
+### 4.1 Eerst (Fase 0 en v0.5)
 
 V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b). Hieronder staat per punt wat er nog open is.
 
@@ -134,8 +184,8 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | V1 | **Echte fotoset met schuifmaatmetingen** (gereedschap klaar in v0.3) | Alle drempels en U95 zijn nu op synthetische scans afgesteld | 10–20 onderdelen: metaal, zwart, wit, kunststof. Referentie met eindmaten en een ringkaliber, in de stijl van [ISO 10360-13 / VDI 2634](https://www.nist.gov/publications/vdivde-2634-2-and-iso-10360-13-performance-evaluation-tests-and-systematic-errors). Draaien als regressiesuite. **Open:** de set zelf maken volgens [FASE-0.md](FASE-0.md) en daarmee U95 en de drempels afstellen | H | M |
 | V2 | **Fit op randafstanden in plaats van pixeltelling** | Pixeltelling is een trapfunctie: traag, geen covariantie, en afrondingen dwalen ±0,3 mm. De rasterizer is alleen exact voor randen langs de assen (−0,09 px bij 30°) | Residuen tussen geprojecteerde modelranden en de afstandstransformatie van elk masker (subpixel), met `scipy.optimize.least_squares` (soft-L1). Eventueel subpixelranden met [Devernay (IPOL)](https://www.ipol.im/pub/art/2017/216/) | H | L |
 | V3 | **U95 die klopt** | U95 volgt nu alleen uit de resolutie | Covariantie uit V2, plus leave-one-out of bootstrap over de foto's. Termen voor printschaal (0,3 % · L als er geen meetlijn is opgegeven) en kalibratie-σ ([mrcal](https://mrcal.secretsauce.net/uncertainty.html)). Toetsen op 95 % dekking met V1 | H | M |
-| V4 | **Topologie bijwerken na de fit** | De fit kan geen gaten of randen toevoegen of weghalen: een gemist gat blijft gemist | Clusters "zekere mat" binnen het bovenvlak (in ≥ 2 bovenaanzichten) worden een gat. Korte randen weg als de energie nauwelijks stijgt (BIC). Ronde uitsparingen worden gaten | H | M |
-| V5 | ~~Mat v2~~ (gedaan in v0.3) | Een donker onderdeel op een zwart vak is onzichtbaar: in de stresstest werd maar ~50 % van het silhouet gezien | Gedaan: stippenraster in de zwarte vakken, eigen marker-ID's per formaat, Letter. **Open:** donkere stippen in de witte marges rond de markers (die zijn maar 2,5 mm breed en de markerdetectie heeft ze nodig), middengrijze vakken, en controleren of de stippen op gewone printers goed uitkomen (V1) | H | M |
+| V4 | **Topologie bijwerken na de fit** (hoekpunten weghalen: gedaan in v0.4) | De fit kan geen gaten of randen toevoegen: een gemist gat blijft gemist | Gedaan: knikken en korte randen weg als het model zonder even goed past (§3c). **Open:** clusters "zekere mat" binnen het bovenvlak (in ≥ 2 bovenaanzichten) worden een gat; ronde uitsparingen worden gaten | H | M |
+| V5 | ~~Mat v2~~ (gedaan in v0.3) | Een donker onderdeel op een zwart vak is onzichtbaar: in de stresstest werd maar ~50 % van het silhouet gezien | Gedaan: stippenraster in de zwarte vakken, eigen marker-ID's per formaat, Letter. **Open:** stippen in de zwarte vlakken van de markers en donkere stippen in de witte marges eromheen (de markerdetectie mag er niet onder lijden). Een gat van een zwart onderdeel boven een groot zwart markervlak is nu het zwakste punt: de rand is daar in de bovenaanzichten niet te zien. Verder middengrijze vakken, en controleren of de stippen op gewone printers goed uitkomen (V1) | H | M |
 | V6 | ~~Preflight bij het uploaden~~ (gedaan in v0.3) | Een slechte fotoset blijkt nu pas na de verwerking | Gedaan: zie §3b. **Open:** een live camerabeeld met dezelfde controle (V25) | H | M |
 
 ### 4.2 Robuustheid op echte foto's
@@ -143,7 +193,7 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | # | Verbetering | Aanpak | Impact | Moeite |
 |---|---|---|---|---|
 | V7 | ~~Anisotrope printschaal (sx ≠ sy)~~ (gedaan in v0.3) | Gedaan: meetlijnen X en Y, de schaal zit in de matgeometrie. De printschaalcontrole zit in `camtocad valideer` (alle lengtes procentueel te groot of te klein). **Open:** de meetlijnen zijn in de foto's zelf niet te meten, want ze schalen mee met de print; alleen een onafhankelijk object met bekende maat (eindmaat, bankpas 85,60 × 53,98 mm) kan de schaal controleren | H | S–M |
-| V8 | Segmentatiecascade (nu ook nodig voor zwarte onderdelen op mat v2) | Eerste stap: "onbekende" stroken binnen een zwart object opvullen waar geen zekere mat is (dat zijn de stipvrije stroken van mat v2; een echt gat laat de stippen zien). Daarna GrabCut met de bestaande driedeling object/mat/onbekend. Kleur (afstand tot de zwart-witte mat) als extra objectbewijs. [PyMatting](https://github.com/pymatting/pymatting) (MIT) voor een subpixel-alfarand. Schaduwdetectie op regioniveau voor egale vlakken ([overzicht](https://arxiv.org/abs/1304.1233)) | H | M |
+| V8 | Segmentatiecascade (eerste stap gedaan in v0.4) | Gedaan: dubbelzinnige stukken binnen het object opvullen, zonder lek van het textuurvenster, met een toets per gebied (§3c). **Open:** GrabCut met de driedeling object/mat/onbekend. Kleur (afstand tot de zwart-witte mat) als extra objectbewijs. [PyMatting](https://github.com/pymatting/pymatting) (MIT) voor een subpixel-alfarand. Schaduwdetectie op regioniveau: een harde slagschaduw wordt nu gemarkeerd, maar nog niet weggewerkt ([overzicht](https://arxiv.org/abs/1304.1233)) | H | M |
 | V9 | Optioneel een geleerd masker, alleen met Apache-2.0-code en -gewichten | [SAM 2.1](https://github.com/facebookresearch/sam2), [HQ-SAM 2](https://github.com/SysCV/sam-hq) of [EfficientViT-SAM](https://huggingface.co/mit-han-lab/efficientvit-sam) via ONNX Runtime op de CPU, geprompt met een kader en punten uit het matmasker. Altijd combineren met het matresidu en met meerdere foto's: SAM faalt op spiegelend metaal en lage contrasten. De CPU-snelheid is nog niet gemeten | M–H | M |
 | V10 | Foto's zoals telefoons ze maken | EXIF lezen: oriëntatie, lens, brandpunt, digitale zoom. HEIC via pillow-heif. Groeperen per camera of lens, en een cameramodel per toestel bewaren (voor kleine scans). Waarschuwen bij σ(f)/f > 0,3 % | H | M |
 | V11 | Mat niet vlak | Een residukaart per hoek over alle foto's toont krul. Eventueel een bundelaanpassing met een laag-orde matoppervlak | M | M |
@@ -190,10 +240,11 @@ Voor een project dat AGPL-3.0 wil worden, telt ook de licentie van de **gewichte
 
 ## 6. Voorgestelde volgorde
 
-1. **Fase 0 met echte foto's.** Het gereedschap is klaar in v0.3: V1-harnas, V5 (mat v2), V6 (fotocontrole), V7 (printschaal). Nu de meetset zelf maken en meten volgens [FASE-0.md](FASE-0.md): meten is weten.
-2. **v0.4:** V2 (fit op randen), V3 (U95) en V4 (topologie). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid, afgesteld op de Fase 0-metingen.
-3. **v0.5:** de objectklasse (V15–V19) en de segmentatiecascade (V8, V10).
-4. **v0.6 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
+1. **Fase 0 met echte foto's.** Het gereedschap is klaar in v0.3: V1-harnas, V5 (mat v2), V6 (fotocontrole), V7 (printschaal). Sinds v0.4 horen ook zwarte en witte onderdelen in de meetset. Nu de meetset zelf maken en meten volgens [FASE-0.md](FASE-0.md): meten is weten.
+2. **v0.4 (gedaan):** de eerste stap van V8 (zwart op zwart, wit op wit), hoekpunten weghalen uit V4, en de afrondingsproef in de fit (§3c).
+3. **v0.5:** V2 (fit op randen), V3 (U95) en de rest van V4 (gaten toevoegen). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid, afgesteld op de Fase 0-metingen.
+4. **v0.6:** de objectklasse (V15–V19) en de rest van de segmentatiecascade (V8: GrabCut, kleur, schaduw; V10).
+5. **v0.7 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
 
 ## 7. Verantwoording
 
