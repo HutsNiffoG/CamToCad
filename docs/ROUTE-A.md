@@ -76,7 +76,7 @@ Meest voorkomende meldingen:
   - De foto's spreken elkaar tegen: in de ene foto ligt het onderdeel ergens waar een andere foto gewoon mat ziet. Meestal is het tussendoor verschoven, gedraaid of op een andere kant gelegd. De melding noemt welke foto's bij elkaar horen.
   - Oplossing: maak de scan opnieuw zonder het onderdeel aan te raken, en scan elke ligging apart.
   - Passen maar een paar foto's niet (minder dan een kwart), dan gaat de verwerking door zonder die foto's. Het rapport noemt ze bij de waarschuwingen: "foto('s) niet gebruikt omdat ze niet bij de rest passen". Dat kan ook een hand of ander voorwerp in beeld zijn, of een mislukt masker.
-  - Een klein duwtje (een paar millimeter) valt hier niet op. Dat zie je aan "silhouetten passen matig" in het rapport.
+  - Een klein duwtje (een paar millimeter) valt hier niet op. Dat zie je aan "betrouwbaarheid: laag" in het rapport: het model past dan in een deel van de foto's slecht (in de test met 10 mm verschuiving: IoU 0,69 in de slechtste foto).
 - **"gekozen mat A4, maar de foto's tonen mat A3"**: de mat op de foto's is gebruikt. Controleer of dat de mat is die je bedoelde.
 - **"betrouwbaarheid: laag"** in het rapport. Het model is gemaakt, maar iets klopt niet; de reden staat erbij. Bijvoorbeeld een gat dat als niet-ronde uitsparing is herkend, of een model dat in sommige foto's slecht past. Controleer die maten.
 - **Foto's "niet gebruikt (afwijkend formaat)"**: andere lens, zoom of bijgesneden. Staand opgeslagen foto's worden automatisch teruggedraaid.
