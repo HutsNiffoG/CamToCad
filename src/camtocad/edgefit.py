@@ -45,6 +45,7 @@ BAND_MAX = 1.5  # px: breder telt als gebrek aan bewijs, niet als menging
 LOSS, F_SCALE = "cauchy", 0.5  # px
 DENSITY = 1.0  # punten per mm contour
 TRUST_MM, TRUST_DEG = 0.5, 0.3
+TRUST_SLOT_DEG = 2.0  # de as van een korte sleuf is in de pixelfit minder precies dan de hele contour
 FREEZE_PROBE_MM = 0.1
 
 
@@ -71,21 +72,57 @@ def _arc(t1, t2, c, r, m, n: int) -> np.ndarray:
     return np.column_stack([c[0] + r * np.cos(a), c[1] + r * np.sin(a)])
 
 
-def layout(part: Part2p5D, density: float = DENSITY) -> dict:
-    """Aantal punten per rand, boog en gat; vast tijdens een oplossing (vaste lengte van de residuen)."""
-    o = part.outer
-    holes = [max(16, int(math.pi * h.d * density)) for h in part.holes]
-    if o.kind == "circle":
-        return {"circle": max(48, int(2 * math.pi * o.radius * density)), "holes": holes}
-    hoeken = afgeronde_hoeken(o.corner_table())
+def _polygon_layout(table, density: float, min_edge: int) -> dict:
+    hoeken = afgeronde_hoeken(table)
     n = len(hoeken)
     edges, arcs = [], []
     for k in range(n):
         _, m, t2, _, r = hoeken[k]
         arcs.append(max(2, int(abs(r) * math.pi / 2 * density) + 1) if m is not None else 2)
         nxt = hoeken[(k + 1) % n][0]
-        edges.append(max(4, int(math.hypot(nxt[0] - t2[0], nxt[1] - t2[1]) * density)))
-    return {"edges": edges, "arcs": arcs, "holes": holes}
+        length = math.hypot(nxt[0] - t2[0], nxt[1] - t2[1])
+        # een rand van (bijna) nul lang, zoals de korte zijde van een sleuf, krijgt geen punten
+        edges.append(0 if (min_edge == 0 and length < 0.5) else max(min_edge, int(length * density)))
+    return {"edges": edges, "arcs": arcs}
+
+
+def layout(part: Part2p5D, density: float = DENSITY) -> dict:
+    """Aantal punten per rand, boog, gat en sleuf; vast tijdens een oplossing (vaste lengte van de residuen)."""
+    o = part.outer
+    out = {"holes": [max(16, int(math.pi * h.d * density)) for h in part.holes],
+           "slots": [_polygon_layout(s.corner_table(), density, 0) for s in part.slots]}
+    if o.kind == "circle":
+        out["circle"] = max(48, int(2 * math.pi * o.radius * density))
+    else:
+        out.update(_polygon_layout(o.corner_table(), density, 4))
+    return out
+
+
+def _polygon_points(table, normals: np.ndarray, lay: dict, sign: float, pts: list, nrm: list, use: list) -> None:
+    """Punten op een contour met afrondingen; `sign` -1 voor een uitsparing (het materiaal ligt erbuiten)."""
+    hoeken = afgeronde_hoeken(table)
+    n = len(hoeken)
+    for k in range(n):
+        t1, m, t2, c, r = hoeken[k]
+        na = lay["arcs"][k]
+        if m is None:
+            pts.append(np.repeat([t1], na, axis=0))
+            nrm.append(np.repeat([sign * normals[k]], na, axis=0))
+            use.append(np.zeros(na, bool))
+        else:
+            arc = _arc(t1, t2, c, r, m, na)
+            d = (arc - np.asarray(c)) / r
+            # bolle hoek: middelpunt in het materiaal, normaal ervan af; holle hoek: andersom
+            convex = float(np.dot(np.asarray(m) - np.asarray(c), normals[k - 1] + normals[k])) > 0
+            pts.append(arc)
+            nrm.append(sign * (d if convex else -d))
+            use.append(np.ones(na, bool))
+        nxt = np.asarray(hoeken[(k + 1) % n][0], float)
+        ne = lay["edges"][k]
+        s = (np.arange(ne) + 0.5) / max(ne, 1)
+        pts.append(np.asarray(t2, float) + s[:, None] * (nxt - np.asarray(t2, float)))
+        nrm.append(np.repeat([sign * normals[k]], ne, axis=0))
+        use.append(np.ones(ne, bool))
 
 
 def points2d(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -100,36 +137,16 @@ def points2d(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndar
         nrm.append(d)
         use.append(np.ones(len(a), bool))
     else:
-        hoeken = afgeronde_hoeken(o.corner_table())
-        normals = o.normals()
-        n = len(hoeken)
-        for k in range(n):
-            t1, m, t2, c, r = hoeken[k]
-            na = lay["arcs"][k]
-            if m is None:
-                pts.append(np.repeat([t1], na, axis=0))
-                nrm.append(np.repeat([normals[k]], na, axis=0))
-                use.append(np.zeros(na, bool))
-            else:
-                arc = _arc(t1, t2, c, r, m, na)
-                d = (arc - np.asarray(c)) / r
-                # bolle hoek: middelpunt in het materiaal, normaal ervan af; holle hoek: andersom
-                convex = float(np.dot(np.asarray(m) - np.asarray(c), normals[k - 1] + normals[k])) > 0
-                pts.append(arc)
-                nrm.append(d if convex else -d)
-                use.append(np.ones(na, bool))
-            nxt = np.asarray(hoeken[(k + 1) % n][0], float)
-            ne = lay["edges"][k]
-            s = (np.arange(ne) + 0.5) / ne
-            pts.append(np.asarray(t2, float) + s[:, None] * (nxt - np.asarray(t2, float)))
-            nrm.append(np.repeat([normals[k]], ne, axis=0))
-            use.append(np.ones(ne, bool))
+        _polygon_points(o.corner_table(), o.normals(), lay, 1.0, pts, nrm, use)
     for h, nh in zip(part.holes, lay["holes"]):
         a = (np.arange(nh) + 0.5) / nh * 2 * math.pi
         d = np.column_stack([np.cos(a), np.sin(a)])
         pts.append(np.array([h.x, h.y]) + h.d / 2 * d)
         nrm.append(-d)  # het materiaal ligt buiten het gat
         use.append(np.ones(nh, bool))
+    for s, ls in zip(part.slots, lay["slots"]):  # sleuven: het materiaal ligt buiten de uitsparing
+        prof = s.profile()
+        _polygon_points(prof.corner_table(), prof.normals(), ls, -1.0, pts, nrm, use)
     return np.vstack(pts), np.vstack(nrm), np.concatenate(use)
 
 
@@ -184,7 +201,7 @@ def _free_params(part: Part2p5D, base: np.ndarray) -> list[silhouette.Param]:
                 if v + step < p.lower:
                     continue
                 q = silhouette._set(part, base, p.name, v + step)
-                if q.outer.kind == "polygon" and not q.outer.is_valid():
+                if not q.is_valid():
                     ok = False
         if ok:
             free.append(p)
@@ -227,7 +244,7 @@ class _Problem:
         views = range(len(self.vd)) if views is None else views
         n_on = sum(int(self.status[i].sum()) for i in views)
         p = self.build(x)
-        if p.outer.kind == "polygon" and not p.outer.is_valid():
+        if not p.is_valid():
             return np.full(n_on, 20.0)
         P = points3d(p, self.lay)
         out = []
@@ -246,7 +263,8 @@ class _Problem:
     def bounds(self, x0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         lo, hi = [], []
         for p, v in zip(self.params, x0):
-            d = math.radians(TRUST_DEG) if p.name == "rot" else TRUST_MM
+            d = (math.radians(TRUST_DEG) if p.name == "rot" else math.radians(TRUST_SLOT_DEG) if p.name.startswith("sa")
+                 else TRUST_MM)
             lo.append(max(v - d, p.lower))
             hi.append(v + d)
         return np.array(lo), np.array(hi)

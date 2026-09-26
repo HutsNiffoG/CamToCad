@@ -8,7 +8,7 @@ randen blijven recht, hoeken zijn scherp of afgerond, en verfijning verschuift h
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
@@ -32,6 +32,49 @@ class Hole:
     x: float
     y: float
     d: float
+
+
+@dataclass
+class Slot:
+    """Doorgaande sleuf of rechthoekige uitsparing (V15): een rechthoek van `length` x `width` rond het
+    middelpunt (x, y), met de lengte langs de as onder `angle` (rad) en afgeronde hoeken. Bij een sleuf
+    (langgat) is de hoekafronding altijd de halve breedte; bij een rechthoek is ze vrij (`r`)."""
+
+    x: float
+    y: float
+    length: float  # buitenmaat langs de as (>= width)
+    width: float
+    angle: float
+    r: float = 0.0  # hoekafronding van een rechthoek (een sleuf gebruikt width / 2)
+    kind: str = "sleuf"  # "sleuf" of "rechthoek"
+
+    @property
+    def rad(self) -> float:
+        return self.width / 2 if self.kind == "sleuf" else self.r
+
+    def profile(self) -> "Profile":
+        """Dezelfde vorm als Profile (vier randen met afrondingen): omtrek, hoektabel en geldigheid."""
+        a = self.angle + np.array([-np.pi / 2, 0.0, np.pi / 2, np.pi])
+        off = np.array([self.width, self.length, self.width, self.length]) / 2
+        return Profile("polygon", np.array([self.x, self.y], float), a, off, np.full(4, self.rad))
+
+    def outline(self, max_step_deg: float = 7.5) -> np.ndarray:
+        return self.profile().outline(max_step_deg)
+
+    def corner_table(self) -> list[tuple[float, float, float]]:
+        return self.profile().corner_table()
+
+    def is_valid(self) -> bool:
+        return (self.width > 0.2 and self.length >= self.width - 1e-9
+                and -1e-9 <= self.rad <= self.width / 2 + 1e-9)
+
+    def scaled(self, factor: float) -> "Slot":
+        return Slot(self.x * factor, self.y * factor, self.length * factor, self.width * factor, self.angle,
+                    self.r * factor, self.kind)
+
+    def to_dict(self) -> dict:
+        return {"soort": self.kind, "x": float(self.x), "y": float(self.y), "lengte": float(self.length),
+                "breedte": float(self.width), "hoek_graden": math.degrees(self.angle), "hoekstraal": float(self.rad)}
 
 
 @dataclass
@@ -126,11 +169,15 @@ class Part2p5D:
     height: float
     outer: Profile
     holes: list[Hole] = field(default_factory=list)
-    cutouts: list[np.ndarray] = field(default_factory=list)  # niet-ronde doorgaande uitsparingen (polygonen)
+    cutouts: list[np.ndarray] = field(default_factory=list)  # overige doorgaande uitsparingen (polygonen)
+    slots: list[Slot] = field(default_factory=list)  # sleuven en rechthoekige uitsparingen
 
     def copy(self) -> "Part2p5D":
         return Part2p5D(self.height, self.outer.copy(), [Hole(h.x, h.y, h.d) for h in self.holes],
-                        [c.copy() for c in self.cutouts])
+                        [c.copy() for c in self.cutouts], [replace(s) for s in self.slots])
+
+    def is_valid(self) -> bool:
+        return (self.outer.kind != "polygon" or self.outer.is_valid()) and all(s.is_valid() for s in self.slots)
 
     def scaled(self, factor: float) -> "Part2p5D":
         """Alle maten x factor (om de oorsprong), bijv. voor een mat die niet op 100% is geprint."""
@@ -141,6 +188,7 @@ class Part2p5D:
             o.radius * factor
         out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor) for h in self.holes]
         out.cutouts = [c * factor for c in self.cutouts]
+        out.slots = [s.scaled(factor) for s in self.slots]
         return out
 
     def transformed(self, angle: float, shift) -> "Part2p5D":
@@ -153,6 +201,10 @@ class Part2p5D:
         out.outer.angles = self.outer.angles + angle
         out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d) for h in self.holes]
         out.cutouts = [(R @ cu.T).T + shift for cu in self.cutouts]
+        out.slots = []
+        for s in self.slots:
+            x, y = R @ [s.x, s.y] + shift
+            out.slots.append(replace(s, x=float(x), y=float(y), angle=s.angle + angle))
         return out
 
     def to_dict(self) -> dict:
@@ -165,6 +217,7 @@ class Part2p5D:
                        "toelichting": "per hoek (x, y, afrondingsstraal), tegen de klok in"}
         return {"hoogte": float(self.height), "contour": contour,
                 "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d)} for h in self.holes],
+                "sleuven": [s.to_dict() for s in self.slots],
                 "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts]}
 
 
@@ -508,6 +561,52 @@ def _circle_on_visible_rim(contour: np.ndarray, unknown: np.ndarray, origin, px:
     return hx, hy, 2 * hr - px
 
 
+def fit_opening(poly: np.ndarray, px: float = 0.25, inset: float = 0.0,
+                max_dev: float | None = None) -> tuple[Slot | None, float]:
+    """De best passende sleuf of rechthoek met afgeronde hoeken bij een opening (polygoon in mm).
+
+    De kleinste omsluitende rechthoek geeft lengte, breedte en richting; het oppervlak dat de hoeken
+    missen geeft de afronding ((4 - π) r²). Een sleuf (afronding = halve breedte) als die (bijna) even goed
+    past als een rechthoek met vrije afronding: de doorkijk in de bovenaanzichten rondt hoeken door
+    parallax wat af. Alleen als de opening op de vorm past (binnen 0,35 mm of 12% van de breedte).
+    Geef de volledige contour mee, geen vereenvoudigde: een grove polygoon snijdt de hoeken af. `inset`:
+    zoveel ligt de contour buiten de opening (door de objectpixels rond de opening: een halve pixel).
+    `max_dev`: een ruimere grens (mm), als een fit het resultaat nog toetst. Geeft (Slot, rms-afwijking in
+    mm), of (None, inf).
+    """
+    P = np.asarray(poly, float)
+    if len(P) < 4:
+        return None, math.inf
+    (cx, cy), (w, h), a = cv2.minAreaRect(P.astype(np.float32))
+    length, width = max(w, h), min(w, h)  # van de contour zelf; de opening is `inset` kleiner
+    if width - 2 * inset < 1.0:
+        return None, math.inf
+    angle = math.radians(a if w >= h else a + 90.0)
+    angle = (angle + math.pi / 2) % math.pi - math.pi / 2  # een sleuf is symmetrisch: as tussen -90° en 90°
+    deficit = max(length * width - abs(_signed_area(P)), 0.0)
+    r = min(math.sqrt(deficit / (4 - math.pi)), width / 2)
+    best, best_score, best_rms = None, math.inf, math.inf
+    for kind in ("rechthoek", "sleuf"):
+        grown = Slot(float(cx), float(cy), float(length), float(width), angle, r if kind == "rechthoek" else 0.0, kind)
+        ring = grown.outline().astype(np.float32).reshape(-1, 1, 2)
+        d = np.array([cv2.pointPolygonTest(ring, (float(x), float(y)), True) for x, y in P])
+        if np.abs(d).max() > (max_dev if max_dev is not None else max(0.35, 0.12 * width, 1.5 * px)):
+            continue
+        rms = float(np.sqrt(np.mean(d ** 2)))
+        score = rms * (0.87 if kind == "sleuf" else 1.0)  # bij (bijna) gelijke passing de eenvoudigste vorm
+        if score < best_score:
+            best, best_score, best_rms = grown, score, rms
+    if best is None or (best.kind == "sleuf" and length < 1.15 * width):  # bijna rond: een gat
+        return None, math.inf
+    return replace(best, length=best.length - 2 * inset, width=best.width - 2 * inset,
+                   r=max(best.r - inset, 0.0) if best.kind == "rechthoek" else 0.0), best_rms
+
+
+def slot_from_polygon(poly: np.ndarray, px: float = 0.25, inset: float = 0.0) -> Slot | None:
+    """Een uitsparing die een sleuf of een rechthoek met afgeronde hoeken is, als Slot (zie fit_opening)."""
+    return fit_opening(poly, px, inset)[0]
+
+
 def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5, min_fillet: float = 1.0,
                    lenient_holes: bool = False,
                    unknown: np.ndarray | None = None) -> tuple[Profile, list[Hole], list[np.ndarray]]:
@@ -547,17 +646,26 @@ def from_footprint(fp: np.ndarray, origin, px: float, *, min_hole_d: float = 1.5
         hx, hy, hr, hrms = fit_circle(Q)
         q_area = abs(_signed_area(Q))
         roundish = abs(q_area - math.pi * hr * hr) < 0.25 * math.pi * hr * hr and hrms < max(2 * px, 0.12 * hr)
+        approx = cv2.approxPolyDP(Q.astype(np.float32).reshape(-1, 1, 2), max(1.2 * px, 0.5), True)
+        poly = approx.reshape(-1, 2).astype(float)
+        if _signed_area(poly) < 0:
+            poly = poly[::-1]
+        # Een rechthoekige uitsparing of een sleuf is geen gat, ook al is ze 'ongeveer rond'. Zo'n uitsparing
+        # gaat verder als zijn eigen omtrek (V15).
+        # Alleen als die vorm duidelijk beter past dan een cirkel; een korte 'sleuf' die eigenlijk een gat is,
+        # zet de pipeline na de pixelfit terug (pipeline._add_missed_holes).
+        slot, slot_rms = fit_opening(Q, px, inset=0.5 * px)
+        shaped = slot is not None and slot_rms < 0.6 * hrms and (
+            slot.kind == "rechthoek" or slot.length >= 1.4 * slot.width)
+        if shaped:
+            poly = slot.outline()
         if unknown is not None and (circ := _circle_on_visible_rim(contours[i], unknown, origin, px)) is not None:
             holes.append(Hole(*circ))
-        elif hrms < max(0.6 * px, 0.03 * hr) or (lenient_holes and roundish):
+        elif hrms < max(0.6 * px, 0.03 * hr) or (lenient_holes and roundish and not shaped):
             # de gatcontour loopt door de objectpixels rond het gat: een halve pixel buiten de rand
             holes.append(Hole(hx, hy, 2 * hr - px))
-        elif lenient_holes and (circ := _circle_with_blemish(contours[i], img.shape, origin, px)) is not None:
+        elif lenient_holes and not shaped and (circ := _circle_with_blemish(contours[i], img.shape, origin, px)) is not None:
             holes.append(Hole(*circ))
         else:
-            approx = cv2.approxPolyDP(Q.astype(np.float32).reshape(-1, 1, 2), max(1.2 * px, 0.5), True)
-            poly = approx.reshape(-1, 2).astype(float)
-            if _signed_area(poly) < 0:
-                poly = poly[::-1]
             cutouts.append(poly)
     return outer, holes, cutouts

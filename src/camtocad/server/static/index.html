@@ -77,10 +77,10 @@
         <option value="A4-v1">A4 (oude mat, v1)</option><option value="A3-v1">A3 (oude mat, v1)</option>
       </select>
       <label for="meetlijn">Meetlijn X</label>
-      <span><input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"> mm</span>
+      <span><input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" placeholder="100,0"> mm</span>
       <label for="meetlijn_y">Meetlijn Y</label>
-      <span><input id="meetlijn_y" type="number" inputmode="decimal" step="0.05" min="95" max="105" value="100.0"> mm
-        <span class="muted">(100,0 als de print klopt)</span></span>
+      <span><input id="meetlijn_y" type="number" inputmode="decimal" step="0.05" min="95" max="105" placeholder="100,0"> mm
+        <span class="muted">(gemeten; leeg laten als je niet meet)</span></span>
     </div>
     <div class="row">
       <label class="btn" for="kies">Foto's kiezen</label>
@@ -116,8 +116,10 @@ const queue = [];
 function settings() {
   const fd = new FormData();
   fd.append("mat", $("mat").value);
-  fd.append("meetlijn", $("meetlijn").value.replace(",", ".") || "100");
-  fd.append("meetlijn_y", $("meetlijn_y").value.replace(",", ".") || "100");
+  // alleen gemeten meetlijnen meesturen: niets opgeven telt als 'printschaal onbekend' (ruimere U95)
+  const mx = $("meetlijn").value.replace(",", "."), my = $("meetlijn_y").value.replace(",", ".");
+  if (mx) fd.append("meetlijn", mx);
+  if (my) fd.append("meetlijn_y", my);
   return fd;
 }
 

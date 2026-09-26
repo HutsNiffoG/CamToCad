@@ -37,6 +37,20 @@ def afgeronde_hoeken(punten):
     return hoeken
 
 
+def sleuf_hoeken(x, y, lengte, breedte, hoek, r):
+    """Hoekpunten (x, y, r) van een sleuf of rechthoekige uitsparing, tegen de klok in.
+
+    lengte langs de as (onder `hoek` graden), breedte dwars erop, r de hoekafronding; r = breedte / 2
+    is een sleuf (langgat) met twee halve cirkels.
+    """
+    c, s = math.cos(math.radians(hoek)), math.sin(math.radians(hoek))
+    punten = []
+    for u, v in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        px, py = u * lengte / 2, v * breedte / 2
+        punten.append((x + c * px - s * py, y + s * px + c * py, r))
+    return punten
+
+
 def bouw_contour(cq, punten, vlak="XY"):
     """Bouwt een gesloten CadQuery-contour (lijnen en bogen) uit hoekpunten met afrondingsstralen."""
     hoeken = afgeronde_hoeken(punten)

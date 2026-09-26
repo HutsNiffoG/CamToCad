@@ -15,6 +15,7 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
     outline = part.outer.outline(3.0)
     pts = [outline] + [np.column_stack([h.x + h.d / 2 * np.cos(a), h.y + h.d / 2 * np.sin(a)])
                        for h in part.holes for a in [np.linspace(0, 2 * np.pi, 72)]]
+    pts += [s.outline(5.0) for s in part.slots] + [np.asarray(c, float) for c in part.cutouts]
     allp = np.vstack(pts)
     lo, hi = allp.min(axis=0), allp.max(axis=0)
     span = max(hi[0] - lo[0], hi[1] - lo[1], 1e-6)
@@ -37,6 +38,14 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
         x, y = tr(np.array([[h.x, h.y]]))
         body.append(f'<text x="{x[0]:.1f}" y="{y[0] - h.d / 2 * scale - 6:.1f}" class="lbl">'
                     f'Ø {h.d:.2f}</text>')
+    for s in part.slots:
+        body.append(f'<path d="{path(s.outline(5.0))}" class="hole"/>')
+        x, y = tr(np.array([[s.x, s.y]]))
+        label = (f"sleuf {s.width:.2f} × {s.length:.2f}" if s.kind == "sleuf"
+                 else f"{s.length:.2f} × {s.width:.2f}, R{s.r:.1f}")
+        body.append(f'<text x="{x[0]:.1f}" y="{y[0]:.1f}" class="lbl">{label}</text>')
+    for c in part.cutouts:
+        body.append(f'<path d="{path(np.asarray(c, float))}" class="hole"/>')
     ox, oy = tr(np.array([[0.0, 0.0]]))
     body.append(f'<circle cx="{ox[0]:.1f}" cy="{oy[0]:.1f}" r="4" class="datum"/>')
     return (f'<svg viewBox="0 0 {width} {h_px:.0f}" width="100%" role="img" '

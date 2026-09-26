@@ -31,9 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-zijde", type=int, default=2000, help="werkresolutie, langste zijde in pixels")
     p.add_argument("--snapdrempel", type=float, default=0.8, help="minimale kans om een maat te snappen (0-1)")
     p.add_argument("--inch", action="store_true", help="snappen naar inchmaten in plaats van mm")
-    p.add_argument("--meetlijn", type=float, nargs="+", metavar="MM", default=[100.0],
+    p.add_argument("--meetlijn", type=float, nargs="+", metavar="MM", default=None,
                    help="gemeten lengte (mm) van de 100 mm-meetlijnen op de geprinte mat: X (onder) en eventueel "
-                        "Y (links); één waarde geldt voor beide. Corrigeert de printschaal")
+                        "Y (links); één waarde geldt voor beide. Corrigeert de printschaal en verkleint de U95 "
+                        "(zonder meting telt 0,3%% printschaal mee)")
 
     p = sub.add_parser("controleer", help="fotoset snel controleren vóór het verwerken (mat, scherpte, dekking)")
     p.add_argument("fotos", help="map met foto's (JPG/PNG)")
@@ -107,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _ruler_scale(values: list[float]) -> tuple[float, float]:
+def _ruler_scale(values: list[float] | None) -> tuple[float, float] | None:
+    if values is None:
+        return None  # niet gemeten
     if len(values) > 2:
         raise ValueError("--meetlijn: geef één waarde (X en Y gelijk) of twee (X en Y)")
     x = values[0]

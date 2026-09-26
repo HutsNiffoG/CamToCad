@@ -12,7 +12,7 @@ zonder dat het object textuur nodig heeft. Een visual hull dient alleen als star
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -136,6 +136,7 @@ def render(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray | None =
     tmp_b = np.zeros_like(mask)
     rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
     rings += list(part.cutouts)
+    rings += [s.outline() for s in part.slots]
     for r2 in rings:
         m2 = len(r2)
         uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, part.height)]),
@@ -190,6 +191,11 @@ def _params(part: Part2p5D) -> list[Param]:
         ps += [Param(f"fil{k}", 0.4, 0.02, 0.0) for k in range(part.outer.n)]
     for i in range(len(part.holes)):
         ps += [Param(f"hx{i}", 0.3, 0.01), Param(f"hy{i}", 0.3, 0.01), Param(f"hd{i}", 0.3, 0.01, 0.3)]
+    for i, s in enumerate(part.slots):  # sleuven en rechthoekige uitsparingen (V15)
+        ps += [Param(f"sx{i}", 0.3, 0.01), Param(f"sy{i}", 0.3, 0.01), Param(f"sl{i}", 0.3, 0.01, 0.5),
+               Param(f"sw{i}", 0.3, 0.01, 0.5), Param(f"sa{i}", math.radians(1.0), math.radians(0.02))]
+        if s.kind == "rechthoek":
+            ps.append(Param(f"sr{i}", 0.3, 0.02, 0.0))
     return ps
 
 
@@ -209,6 +215,9 @@ def _get(part: Part2p5D, base_angles: np.ndarray, name: str) -> float:
         return float(o.offsets[int(name[3:])])
     if name.startswith("fil"):
         return float(o.fillets[int(name[3:])])
+    if name[0] == "s":
+        s = part.slots[int(name[2:])]
+        return {"sx": s.x, "sy": s.y, "sl": s.length, "sw": s.width, "sa": s.angle, "sr": s.r}[name[:2]]
     i = int(name[2:])
     return {"hx": part.holes[i].x, "hy": part.holes[i].y, "hd": part.holes[i].d}[name[:2]]
 
@@ -230,6 +239,10 @@ def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Pa
         o.offsets[int(name[3:])] = value
     elif name.startswith("fil"):
         o.fillets[int(name[3:])] = value
+    elif name[0] == "s":
+        i = int(name[2:])
+        field_name = {"sx": "x", "sy": "y", "sl": "length", "sw": "width", "sa": "angle", "sr": "r"}[name[:2]]
+        p.slots[i] = replace(p.slots[i], **{field_name: value})
     else:
         i = int(name[2:])
         h = p.holes[i]
@@ -274,7 +287,7 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
     evals = 1
 
     def valid(cand: Part2p5D) -> bool:
-        return cand.outer.kind != "polygon" or cand.outer.is_valid()
+        return cand.is_valid()
 
     restarts, e_restart = 0, e_best
     next_check = 300

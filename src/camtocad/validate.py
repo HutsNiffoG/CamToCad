@@ -237,8 +237,8 @@ def validate_part(part: Path, rerun: bool = False, log=print, run=None) -> ScanV
     stale = not report_path.exists() or any(
         p.stat().st_mtime > report_path.stat().st_mtime for p in photos.iterdir() if p.suffix.lower() in IMAGE_EXT)
     if rerun or stale:
-        rulers = ref["meetlijn"] or [100.0, 100.0]
-        opts = ScanOptions(mat=ref["mat"], mat_scale=(rulers[0] / 100.0, rulers[1] / 100.0))
+        rulers = ref["meetlijn"]  # None: niet gemeten
+        opts = ScanOptions(mat=ref["mat"], mat_scale=(rulers[0] / 100.0, rulers[1] / 100.0) if rulers else None)
         log(f"== {part.name}: scan verwerken ...")
         try:
             run(photos, result_dir, opts, log=lambda m: log(f"   {m}"), scan_name=part.name)

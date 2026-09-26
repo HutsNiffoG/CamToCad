@@ -1,0 +1,172 @@
+"""Is het onderdeel wel 2,5D? (V19)
+
+Het model is een prisma: één contour, één hoogte, loodrechte wanden. Een trede, een afschuining of
+afronding van de bovenrand, of een liggend draaideel past daar niet in. De fit zoekt dan een compromis:
+bij een beugel met rondom een afschuining van 2 mm kwam de hoogte op de onderkant van die afschuining
+uit (10,07 in plaats van 12 mm), terwijl het silhouet in elke foto goed paste (IoU 0,998). Zo'n stille
+fout moet een melding worden. Twee toetsen op de afstanden tussen modelrand en maskerrand na de randfit:
+
+* **Plaatselijk:** langs de buitencontour, per punt van de bovenrand, de mediaan over de foto's. Een
+  aaneengesloten stuk van ≥ 8 mm dat meer dan 0,3 mm afwijkt, is een trede of afschuining (het model
+  steekt uit: het onderdeel is daar lager) of een verhoging (het onderdeel steekt uit). Op gerenderde
+  prisma's blijft dit binnen 0,11 mm; bij een trede van 6 mm is het tot 2 mm over de hele trede.
+* **Kijkhoek:** per foto de mediaan over de bovenrand. Bij een prisma hangt die niet af van hoe schuin
+  de foto is; bij een afschuining of afronding rondom zien de lage foto's (< 45°) de bovenrand boven het
+  model uitsteken, de hoge niet. Op gerenderde prisma's is dat verschil 0,00 tot +0,04 mm (de lage
+  foto's net iets ruimer), bij de afschuining −0,06 mm en bij een liggende cilinder +0,40 mm. Een
+  afschuining van ~1 mm valt hierbinnen en wordt niet herkend. Zonder foto's onder 45° geen toets.
+
+Een punt telt mee waar er bewijs is: zekere mat vlakbij, of het punt ligt voorbij de strook zonder
+bewijs al in zekere mat (dan steekt het model zeker uit).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from . import edgefit
+from .calib import project
+
+LOCAL_MM = 0.3  # plaatselijke afwijking van de bovenrand
+MIN_RUN_MM = 8.0  # over minstens zoveel contour
+TREND_LOW_MM, TREND_HIGH_MM = -0.04, 0.10  # verschil tussen lage en hoge foto's (prisma's: 0,00 tot +0,04)
+LOW_DEG, HIGH_DEG = 45.0, 60.0
+MIN_VIEWS = 3
+
+
+@dataclass
+class PrismCheck:
+    issues: list[str] = field(default_factory=list)
+    details: dict = field(default_factory=dict)  # voor diagnose.json
+
+
+def _outer_count(lay: dict) -> int:
+    return lay["circle"] if "circle" in lay else sum(lay["arcs"]) + sum(lay["edges"])
+
+
+def _deviations(prob, x: np.ndarray):
+    """Per punt (index in points3d) en foto de afstand modelrand -> maskerrand in mm (+: het model steekt
+    buiten het object uit), en per foto de kijkhoek (graden boven de mat, vanuit het midden van het model)."""
+    p = prob.build(x)
+    P = edgefit.points3d(p, prob.lay)
+    oc = p.outer.outline()
+    center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, p.height / 2])
+    f = float(prob.K[0, 0])
+    per_point: list[list[float]] = [[] for _ in range(len(P))]
+    per_view: list[tuple[float, np.ndarray, np.ndarray]] = []
+    for i, v in enumerate(prob.vd):
+        C = v.pose.center
+        elev = math.degrees(math.atan2(C[2] - center[2], math.hypot(C[0] - center[0], C[1] - center[1])))
+        on = np.flatnonzero(prob.status[i])
+        if not len(on):
+            per_view.append((elev, on, np.zeros(0)))
+            continue
+        uv, z = project(P[on], v.pose, prob.K)
+        h, w = v.fg.shape
+        uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
+        sf, band = prob.fields[i]
+        r = edgefit._bilinear(sf, uv)
+        g = edgefit._bilinear(band, uv)
+        ok = (g < 4.0) | (r > g + 1.0)
+        mm = (r - edgefit.BETA * np.clip(g, 0.0, edgefit.BAND_MAX)) * z / f
+        for j, val in zip(on[ok], mm[ok]):
+            per_point[j].append(float(val))
+        per_view.append((elev, on[ok], mm[ok]))
+    return p, per_point, per_view
+
+
+def _smooth(a: np.ndarray, k: int = 5) -> np.ndarray:
+    """Gemiddelde over k opeenvolgende punten van een gesloten contour (NaN telt niet mee)."""
+    h = k // 2
+    vals, wts = np.where(np.isnan(a), 0.0, a), (~np.isnan(a)).astype(float)
+    num = np.convolve(np.r_[vals[-h:], vals, vals[:h]], np.ones(k), "valid")
+    den = np.convolve(np.r_[wts[-h:], wts, wts[:h]], np.ones(k), "valid")
+    return np.where(den >= 3, num / np.maximum(den, 1.0), np.nan)
+
+
+def _runs(mask: np.ndarray) -> list[np.ndarray]:
+    """Aaneengesloten stukken True in een gesloten rij, als indexlijsten in volgorde."""
+    n = len(mask)
+    if mask.all():
+        return [np.arange(n)]
+    start = int(np.flatnonzero(~mask)[0])  # begin na een False, zodat geen stuk over het einde loopt
+    order = (np.arange(n) + start) % n
+    out, cur = [], []
+    for j in order:
+        if mask[j]:
+            cur.append(j)
+        elif cur:
+            out.append(np.array(cur))
+            cur = []
+    if cur:
+        out.append(np.array(cur))
+    return out
+
+
+def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismCheck:
+    """Toetst of het gefitte prisma bij de foto's past (zie de moduletekst). `angle`, `shift`: het
+    werkassenstelsel (cadmodel.to_part_frame), voor de plaatsaanduiding in de melding."""
+    out = PrismCheck()
+    prob = ef.extra.get("problem")
+    if prob is None or not prob.status:
+        return out
+    x = ef.x if ef.accepted else prob.x_of(ef.part)
+    part, per_point, per_view = _deviations(prob, x)
+    n2 = len(per_point) // 2
+    no = _outer_count(prob.lay)
+    top = np.array([np.median(v) if len(v) >= MIN_VIEWS else np.nan for v in per_point[n2:n2 + no]])
+    p2 = edgefit.points2d(part, prob.lay)[0][:no]
+    c, s = math.cos(angle), math.sin(angle)
+    q = p2 @ np.array([[c, s], [-s, c]]) + np.asarray(shift, float)  # werkcoördinaten
+    step = np.linalg.norm(np.roll(p2, -1, axis=0) - p2, axis=1)
+    sm = _smooth(top)
+    runs = []
+    for sign, what in ((1.0, "lager"), (-1.0, "hoger")):
+        for run in _runs(np.nan_to_num(sign * sm, nan=-1.0) > LOCAL_MM):
+            length = float(step[run[:-1]].sum()) if len(run) > 1 else 0.0
+            if length < MIN_RUN_MM:
+                continue
+            dev = float(np.nanmax(sign * sm[run]))
+            a, b = q[run[0]], q[run[-1]]
+            runs.append({"soort": what, "van": a.round(1).tolist(), "tot": b.round(1).tolist(),
+                         "lengte_mm": round(length, 1), "afwijking_mm": round(dev, 2)})
+            if what == "lager":
+                out.issues.append(
+                    f"langs de rand van ({a[0]:.0f}, {a[1]:.0f}) tot ({b[0]:.0f}, {b[1]:.0f}) (over {length:.0f} mm) ligt "
+                    f"de bovenkant lager dan het model (afwijking in beeld tot {dev:.1f} mm): een trede, afschuining "
+                    "of ronding die niet in een 2,5D-model met één hoogte past")
+            else:
+                out.issues.append(
+                    f"langs de rand van ({a[0]:.0f}, {a[1]:.0f}) tot ({b[0]:.0f}, {b[1]:.0f}) (over {length:.0f} mm) "
+                    f"steekt het onderdeel boven het model uit (tot {dev:.1f} mm in beeld): het is daar hoger of heeft "
+                    "een ronde bovenkant")
+    # kijkhoek: per foto de mediaan over de bovenrand van de buitencontour
+    top_idx = set(range(n2, n2 + no))
+    rows = []
+    for elev, idx, mm in per_view:
+        sel = np.array([j in top_idx for j in idx], bool)
+        if sel.sum() >= 10:
+            rows.append((elev, float(np.median(mm[sel]))))
+    trend = None
+    if rows:
+        e = np.array([r[0] for r in rows])
+        m = np.array([r[1] for r in rows])
+        low, high = m[e < LOW_DEG], m[e >= HIGH_DEG]
+        if len(low) >= 4 and len(high) >= 4:
+            trend = float(np.median(low) - np.median(high))
+            same_side = np.mean(np.sign(low - np.median(high)) == np.sign(trend))
+            if (trend < TREND_LOW_MM or trend > TREND_HIGH_MM) and same_side >= 0.7 and not runs:
+                if trend < 0:
+                    out.issues.append(
+                        "in de lage foto's steekt de bovenrand rondom iets boven het model uit: de bovenrand is "
+                        f"waarschijnlijk afgeschuind of afgerond, en dan geldt de hoogte ({part.height:.2f} mm) voor de "
+                        "onderkant daarvan")
+                else:
+                    out.issues.append("in de lage foto's ligt de bovenrand rondom binnen het model: de wanden staan "
+                                      "mogelijk niet loodrecht op de mat (tapse wanden of een ronde vorm)")
+    out.details = {"stukken": runs, "kijkhoek_verschil_mm": None if trend is None else round(trend, 3),
+                   "bovenrand_mediaan_mm": None if np.isnan(sm).all() else round(float(np.nanmedian(sm)), 3)}
+    return out

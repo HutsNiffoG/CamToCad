@@ -15,16 +15,17 @@ import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from . import (__version__, cadmodel, calib, debug, edgefit, holes, hull, initial, masks, placement, preflight,
-               profile, report, silhouette, uncertainty)
+               prismcheck, profile, report, silhouette, uncertainty)
 from .imgio import imwrite, read_gray
 from .mat import MatSpec, get_spec, rasterize_board
+from .profile import Hole, Slot, dominant_angle
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
@@ -42,16 +43,23 @@ class ScanOptions:
     imperial: bool = False
     max_evals: int = 1500
     debug_images: bool = True
-    # printschaal: gemeten / nominale lengte van de meetlijnen; één getal (beide richtingen) of (X, Y)
-    mat_scale: float | tuple[float, float] = 1.0
+    # printschaal: gemeten / nominale lengte van de meetlijnen; één getal (beide richtingen) of (X, Y).
+    # None: niet gemeten (dan 1,0, maar met de onzekerheid van een onbekende printschaal in U95)
+    mat_scale: float | tuple[float, float] | None = None
 
     @property
     def scale_xy(self) -> tuple[float, float]:
         s = self.mat_scale
+        if s is None:
+            return 1.0, 1.0
         if isinstance(s, (int, float)):
             return float(s), float(s)
         sx, sy = s
         return float(sx), float(sy)
+
+    @property
+    def scale_measured(self) -> bool:
+        return self.mat_scale is not None
 
 
 def load_images(folder: str | Path, max_side: int = 2000, log=print) -> list[tuple[str, np.ndarray]]:
@@ -205,26 +213,89 @@ def _effective_uncertainty(unc, snaps: list, scale_rel: float):
         return max(vals) if vals else default
 
     def is_position(n: str) -> bool:
-        return n.startswith("steekcirkel") or (n.startswith("gat ") and n.endswith((" x", " y")))
+        return n.startswith("steekcirkel") or (n.startswith(("gat ", "sleuf ", "uitsparing ")) and n.endswith((" x", " y")))
+
+    def is_inner_size(n: str) -> bool:  # gaten, sleuven en uitsparingen: maat van een binnenvorm
+        return n.startswith("gat Ø") or (n.startswith(("sleuf ", "uitsparing "))
+                                         and n.endswith(("breedte", "hartafstand", "lengte")))
 
     return cadmodel.Uncertainty(
         edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")), unc.edge * math.sqrt(2)) / math.sqrt(2),
         height=worst(lambda n: n == "hoogte", unc.height),
-        hole_d=worst(lambda n: n.startswith("gat Ø"), unc.hole_d),
+        hole_d=worst(is_inner_size, unc.hole_d),
         hole_xy=worst(is_position, unc.hole_xy),
-        fillet=worst(lambda n: n.startswith("afronding"), unc.fillet), scale_rel=scale_rel)
+        fillet=worst(lambda n: n.startswith("afronding") or n.endswith("hoekstraal"), unc.fillet), scale_rel=scale_rel)
+
+
+def _slots_or_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
+    """Een korte sleuf die een gat even goed verklaart, wordt een gat. In schuine bovenaanzichten is de
+    doorkijk door een gat lensvormig, en dan lijkt hij in de startcontour op een korte sleuf; de pixelfit
+    rekent die parallax wel exact door."""
+    for i in reversed(range(len(part.slots))):
+        s = part.slots[i]
+        if s.kind != "sleuf" or s.length > 2.0 * s.width:
+            continue
+        trial = part.copy()
+        trial.slots.pop(i)
+        trial.holes.append(Hole(s.x, s.y, 0.5 * (s.width + s.length)))
+        j = len(trial.holes) - 1
+        trial, e_trial, _ = silhouette.refine(trial, K, vd, max_evals=150, only={f"hx{j}", f"hy{j}", f"hd{j}"})
+        if e_trial <= energy * 1.002 + 20:
+            log(f"korte sleuf ({s.length:.1f} x {s.width:.1f} mm) is een gat Ø {trial.holes[j].d:.1f}: het model past "
+                f"even goed (energie {energy:.0f} → {e_trial:.0f})")
+            part, energy = trial, e_trial
+    return part, energy
+
+
+def _holes_or_pockets(part, K: np.ndarray, vd: list, energy: float, log=print):
+    """Een gat dat eigenlijk een rechthoekige uitsparing of een sleuf is. In de bovenaanzichten ziet de
+    doorkijk er door parallax en onscherpte vaak ronder uit dan hij is, en dan wordt hij in de startcontour
+    een gat. Per gat een rechthoek met afgeronde hoeken proberen, gericht als de contour; alleen als die
+    duidelijk beter past. (Een ronde rechthoek met afronding = halve breedte is een cirkel: bij een echt gat
+    wordt hij niet beter.)"""
+    theta = dominant_angle(part.outer) if part.outer.kind == "polygon" else 0.0
+    for i in reversed(range(len(part.holes))):
+        h = part.holes[i]
+        if h.d < 3.0:
+            continue
+        trial = part.copy()
+        trial.holes.pop(i)
+        trial.slots.append(Slot(h.x, h.y, h.d, 0.9 * h.d, theta, 0.35 * h.d, "rechthoek"))
+        j = len(trial.slots) - 1
+        trial, e_trial, _ = silhouette.refine(trial, K, vd, max_evals=200,
+                                              only={f"sx{j}", f"sy{j}", f"sl{j}", f"sw{j}", f"sa{j}", f"sr{j}"})
+        if e_trial < energy - (0.002 * energy + 20):
+            s = trial.slots[j]
+            if s.r >= 0.45 * s.width:  # zo rond afgerond: een sleuf
+                trial.slots[j] = replace(s, kind="sleuf", r=0.0)
+            log(f"gat Ø {h.d:.1f} is een {'sleuf' if trial.slots[j].kind == 'sleuf' else 'uitsparing'} "
+                f"{s.length:.1f} x {s.width:.1f} mm: het model past duidelijk beter (energie {energy:.0f} → "
+                f"{e_trial:.0f})")
+            part, energy = trial, e_trial
+    return part, energy
 
 
 def _add_missed_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
     """V4: ronde uitsparingen worden gaten, en een gat dat de startcontour miste wordt toegevoegd waar de
     bovenaanzichten door het bovenvlak heen mat zien (holes.py). Alleen als het model er duidelijk beter
-    door past: eerst wordt alleen het nieuwe gat op maat gebracht, daarna kort alles."""
+    door past: eerst wordt alleen het nieuwe gat op maat gebracht, daarna kort alles. Ook de andere
+    features (V15): een gat dat een uitsparing is, een korte sleuf die een gat is, en een ruwe polygoon
+    die een sleuf of rechthoek is."""
+    part, energy = _holes_or_pockets(part, K, vd, energy, log)
+    part, energy = _slots_or_holes(part, K, vd, energy, log)
     part2, n_round = holes.round_cutouts(part)
     if n_round:
         part2, e2, _ = silhouette.refine(part2, K, vd, max_evals=200)
         if e2 <= energy * 1.01:
             log(f"{n_round} ronde uitsparing(en) verder als gat")
             part, energy = part2, e2
+    for loose in (False, True):
+        part2, n_slot = holes.slot_cutouts(part, loose=loose)
+        if n_slot:
+            part2, e2, _ = silhouette.refine(part2, K, vd, max_evals=300)
+            if e2 <= energy * 1.01:
+                log(f"{n_slot} uitsparing(en) verder als sleuf of rechthoek")
+                part, energy = part2, e2
     for cand in holes.candidates(part, K, vd):
         trial = part.copy()
         trial.holes.append(cand)
@@ -476,7 +547,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     }})
     vd = silhouette.prepare(views, cam.K, part, z_max=part.height * 1.4 + 4)
     max_evals = opts.max_evals
-    n_features = (part.outer.n if part.outer.kind == "polygon" else 1) + len(part.holes) + len(part.cutouts)
+    n_features = ((part.outer.n if part.outer.kind == "polygon" else 1) + len(part.holes) + len(part.cutouts)
+                  + len(part.slots))
     if n_features > 20:  # rommelige startcontour: het resultaat wordt toch 'onbetrouwbaar'; niet minutenlang fitten
         max_evals = min(max_evals, 300)
         log(f"rommelige startcontour ({n_features} randen, gaten en uitsparingen): korte verfijning")
@@ -501,14 +573,25 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     # gerenderde scans komt een scherpe hoek uit de randfit als een afronding van 3,5-4 pixels
     # (ROUTE-A-VERBETERPUNTEN §3e). Afrondingen onder 4,5 pixels zijn dus niet te onderscheiden van scherp.
     r_min = max(0.8, 4.5 * mm_per_px)
-    if part.outer.kind == "polygon" and np.any((part.outer.fillets > 0) & (part.outer.fillets < r_min)):
-        part.outer.fillets[part.outer.fillets < r_min] = 0.0
+    small_slot_r = [i for i, s in enumerate(part.slots) if s.kind == "rechthoek" and 0 < s.r < r_min]
+    if (part.outer.kind == "polygon" and np.any((part.outer.fillets > 0) & (part.outer.fillets < r_min))) \
+            or small_slot_r:
+        if part.outer.kind == "polygon":
+            part.outer.fillets[part.outer.fillets < r_min] = 0.0
+        for i in small_slot_r:
+            part.slots[i] = replace(part.slots[i], r=0.0)
         warnings.append(f"afrondingen kleiner dan {r_min:.1f} mm zijn bij deze resolutie niet te "
                         "onderscheiden van een scherpe hoek en als scherp gemodelleerd")
     stats_fit = silhouette.view_stats(part, cam.K, vd)
     log(f"model gefit: hoogte {part.height:.3f} mm, {len(part.holes)} gat(en), "
         f"silhouet-IoU mediaan {stats_fit['iou_median']:.4f}")
     issues = _quality_issues(part, stats_fit, evals, opts.max_evals, mm_per_px)
+    # V19: past een prisma wel? Een trede of afschuining geeft anders een stil compromis (vooral in de hoogte)
+    if ef.extra.get("problem") is not None:
+        _, angle0, shift0 = cadmodel.to_part_frame(part)
+        shape = prismcheck.check(ef, angle0, shift0)
+        diag["prisma"] = shape.details
+        issues += [f"geen 2,5D-vorm? {m}" for m in shape.issues]
     ghosts = unseen_holes(part, cam.K, top_views)
     if ghosts:
         issues.append(f"{len(ghosts)} gat(en) waardoor in geen bovenaanzicht mat te zien is: mogelijk spookgaten "
@@ -520,16 +603,16 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if issues:
         log("LET OP, resultaat onbetrouwbaar: " + "; ".join(issues))
         warnings[:0] = [f"onbetrouwbaar: {i}" for i in issues]
+    write_debug({"kwaliteit": issues})  # ook bij een gelukte scan: de vormtoets (prisma) en de redenen
     if not cov["compleet"]:
         warnings.append("fotoset onvolledig: " + " ".join(cov["advies"]))
 
     # 7. onzekerheid, werkassenstelsel, snappen (de printschaal zit al in de poses)
     unc = cadmodel.estimate_uncertainty(mm_per_px, len(vd), n_top)
-    # printschaal: zonder gemeten meetlijnen is de schaal van de print niet bekend (printers wijken 0,1-1% af;
-    # wie precies 100,0 mm meet, valt hier ook onder en krijgt een voorzichtige U95)
-    unc.scale_rel = uncertainty.SCALE_REL_MEASURED if spec.is_scaled else uncertainty.SCALE_REL_ASSUMED
-    scale_note = ("printschaal gecorrigeerd met de meetlijnen (0,05%)" if spec.is_scaled else
-                  "printschaal niet gecorrigeerd, meetlijnen niet opgegeven (0,3%)")
+    # printschaal: zonder gemeten meetlijnen is de schaal van de print niet bekend (printers wijken 0,1-1% af)
+    unc.scale_rel = uncertainty.SCALE_REL_MEASURED if opts.scale_measured else uncertainty.SCALE_REL_ASSUMED
+    scale_note = ("printschaal gemeten aan de meetlijnen (0,05%)" if opts.scale_measured else
+                  "printschaal niet gemeten, meetlijnen niet opgegeven (0,3%)")
     part_pf, angle, shift = cadmodel.to_part_frame(part)
     budget, unc_method = None, "indicatief (resolutie en aantal foto's), " + scale_note
     if ef.accepted:  # V3: σ per maat uit de jackknife van de randfit, plus systematiek en printschaal
@@ -576,7 +659,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "betrouwbaarheid": "laag: " + "; ".join(issues) if issues else "normaal",
         "resolutie op het object": f"{mm_per_px:.3f} mm/pixel",
         "schaalbron": f"kalibratiemat {spec.label} ({spec.mat_id})" + (
-            f", printschaal gecorrigeerd (meetlijn X {100 * sx:.2f} mm, Y {100 * sy:.2f} mm)" if spec.is_scaled
+            (f", printschaal gecorrigeerd (meetlijn X {100 * sx:.2f} mm, Y {100 * sy:.2f} mm)" if spec.is_scaled
+             else ", meetlijnen gemeten: 100,0 mm (geen correctie nodig)") if opts.scale_measured
             else " (meetlijnen niet opgegeven: aangenomen 100,0 mm)"),
         "silhouet-IoU (gefit)": f"mediaan {stats_fit['iou_median']:.4f}, minimum {stats_fit['iou_min']:.4f}",
         "silhouet-IoU (gesnapt)": f"mediaan {stats_snap['iou_median']:.4f}",

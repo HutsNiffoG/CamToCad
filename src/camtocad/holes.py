@@ -20,7 +20,7 @@ import numpy as np
 
 from .calib import project
 from .initial import tilt_deg
-from .profile import Hole, Part2p5D
+from .profile import Hole, Part2p5D, fit_opening
 
 CELL_MM = 0.25
 MIN_D_MM = 1.5
@@ -37,7 +37,7 @@ def _grid_mask(part: Part2p5D, cell: float, margin_mm: float = 1.0):
     for hl in part.holes:
         c = (np.array([hl.x, hl.y]) - lo) / cell - 0.5
         cv2.circle(mask, tuple(int(round(v)) for v in c), math.ceil((hl.d / 2 + margin_mm) / cell), 0, -1)
-    for cu in part.cutouts:
+    for cu in list(part.cutouts) + [s.outline() for s in part.slots]:
         cv2.fillPoly(mask, [np.round((cu - lo) / cell - 0.5).astype(np.int32)], 0)
     r = max(1, round(margin_mm / cell))
     mask = cv2.erode(mask, np.ones((2 * r + 1, 2 * r + 1), np.uint8), borderType=cv2.BORDER_CONSTANT, borderValue=0)
@@ -88,6 +88,28 @@ def candidates(part: Part2p5D, K: np.ndarray, vd: list, max_tilt_deg: float = 25
         cx, cy = lo + (cent[k] + 0.5) * cell
         out.append(Hole(float(cx), float(cy), float(d)))
     return out
+
+
+def slot_cutouts(part: Part2p5D, px: float = 0.25, loose: bool = False) -> tuple[Part2p5D, int]:
+    """Uitsparingen met de vorm van een sleuf of rechthoek worden een Slot (V15); geeft (model, aantal).
+    `loose`: ook als de polygoon er maar ruw op lijkt (tot 1 mm of 30% van de breedte); de pipeline houdt
+    het resultaat alleen als het model na een korte fit minstens even goed past."""
+    keep, slots = [], list(part.slots)
+    for cu in part.cutouts:
+        s = fit_opening(cu, px)[0] if not loose else None
+        if s is None and loose:
+            w = min(np.ptp(np.asarray(cu, float), axis=0))
+            s = fit_opening(cu, px, max_dev=max(1.0, 0.3 * w))[0]
+        if s is None:
+            keep.append(cu)
+        else:
+            slots.append(s)
+    n = len(slots) - len(part.slots)
+    if not n:
+        return part, 0
+    out = part.copy()
+    out.slots, out.cutouts = slots, keep
+    return out, n
 
 
 def round_cutouts(part: Part2p5D, max_dev: float = 0.12) -> tuple[Part2p5D, int]:

@@ -217,3 +217,66 @@ def test_hole_next_to_an_invisible_area_is_fitted_on_its_visible_rim():
     _, holes, cutouts = profile.from_footprint(img > 0, (0.0, 0.0), px, lenient_holes=True, unknown=unknown)
     assert not cutouts and len(holes) == 1
     assert abs(holes[0].d - 6.6) < 0.3 and abs(holes[0].x - 30.0) < 0.2 and abs(holes[0].y - 30.0) < 0.2
+
+
+# ----------------------------------------------------------------------------- sleuven en uitsparingen (V15)
+
+def test_slot_and_pocket_are_recognised_from_their_outline():
+    rng = np.random.default_rng(0)
+    slot = profile.Slot(50.0, 30.0, 20.0, 6.6, math.radians(15.0), 0.0, "sleuf")
+    noisy = slot.outline() + rng.normal(0, 0.05, (len(slot.outline()), 2))
+    found = profile.slot_from_polygon(noisy)  # een startwaarde: de fit verfijnt hem
+    assert found.kind == "sleuf"
+    assert (found.x, found.y, found.length, found.width) == pytest.approx((50.0, 30.0, 20.0, 6.6), abs=0.2)
+    assert math.degrees(found.angle) == pytest.approx(15.0, abs=0.5)
+    pocket = profile.Slot(20.0, 10.0, 12.0, 8.0, math.radians(-30.0), 1.5, "rechthoek")
+    found = profile.slot_from_polygon(pocket.outline())
+    assert found.kind == "rechthoek" and found.r == pytest.approx(1.5, abs=0.15)
+    assert (found.length, found.width) == pytest.approx((12.0, 8.0), abs=0.02)
+    a = np.linspace(0, 2 * np.pi, 30, endpoint=False)
+    assert profile.slot_from_polygon(np.column_stack([3 * np.cos(a), 3 * np.sin(a)])) is None  # een gat
+    ell = np.array([[0, 0], [10, 0], [10, 3], [3, 3], [3, 10], [0, 10.0]])
+    assert profile.slot_from_polygon(ell) is None
+
+
+def test_slots_move_and_scale_with_the_part():
+    part = Part2p5D(5.0, rect_profile(60, 40), slots=[profile.Slot(10.0, 0.0, 16.0, 6.0, 0.0, 0.0, "sleuf")])
+    rot = part.transformed(math.radians(90.0), np.array([100.0, 50.0])).slots[0]
+    assert (rot.x, rot.y) == pytest.approx((100.0, 60.0)) and math.degrees(rot.angle) == pytest.approx(90.0)
+    big = part.scaled(1.01).slots[0]
+    assert (big.length, big.width, big.rad) == pytest.approx((16.16, 6.06, 3.03))
+    assert part.is_valid()
+    part.slots[0].length = 5.0  # korter dan breed: geen sleuf
+    assert not part.is_valid()
+
+
+def test_part_with_slot_and_pocket_builds_and_script_matches():
+    part = Part2p5D(12.0, rect_profile(80, 40, 3.0, center=(40, 20)), [Hole(10, 20, 6.6)], [],
+                    [profile.Slot(48.0, 20.0, 22.6, 6.6, 0.0, 0.0, "sleuf"),
+                     profile.Slot(70.0, 20.0, 10.0, 8.0, math.pi / 2, 1.5, "rechthoek")])
+    model = cadmodel.build(part)
+    assert model.val().isValid()
+    slot_area = 16.0 * 6.6 + math.pi * 3.3 ** 2
+    pocket_area = 10 * 8 - (4 - math.pi) * 1.5 ** 2
+    expected = (80 * 40 - (4 - math.pi) * 9 - math.pi * 3.3 ** 2 - slot_area - pocket_area) * 12
+    assert model.val().Volume() == pytest.approx(expected, abs=1.0)
+    snaps = [snapping.Snap("hoogte", 12.03, 0.03, 12.0, True, "hele mm", 0.95)]
+    ns = {"__name__": "test"}
+    exec(compile(cadmodel.script(part, snaps), "model.py", "exec"), ns)
+    assert abs(ns["model"].val().Volume() - model.val().Volume()) < 1e-3
+
+
+def test_slot_is_dimensioned_like_a_designer_would():
+    """Een sleuf: breedte (doorgangsmaat) en hartafstand; een uitsparing: lengte, breedte en hoekstraal."""
+    part = Part2p5D(12.0, rect_profile(80, 40, center=(40, 20)), [], [],
+                    [profile.Slot(47.97, 20.02, 21.49, 5.52, math.radians(0.6), 0.0, "sleuf"),
+                     profile.Slot(70.02, 19.98, 10.03, 7.97, math.radians(89.5), 1.47, "rechthoek")])
+    snapped, snaps = cadmodel.snap_part(part, cadmodel.estimate_uncertainty(0.25, 40, 5))
+    by = {s.name: s for s in snaps}
+    assert by["sleuf 1 hartafstand"].value == 16.0
+    assert by["sleuf 1 breedte"].value == 5.5 and "M5" in by["sleuf 1 breedte"].reason
+    assert by["uitsparing 1 lengte"].value == 10.0 and by["uitsparing 1 breedte"].value == 8.0
+    s, p = snapped.slots
+    assert (s.x, s.y, s.length, s.width, s.angle) == pytest.approx((48.0, 20.0, 21.5, 5.5, 0.0))
+    assert (p.x, p.y, p.angle) == pytest.approx((70.0, 20.0, math.pi / 2))
+    assert p.r == by["uitsparing 1 hoekstraal"].value  # een afronding snapt pas als ze zeker is

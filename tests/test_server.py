@@ -104,13 +104,18 @@ def test_measured_rulers_are_passed_as_mat_scale(tmp_path):
     seen = {}
 
     def runner(photos, out, opts, log, scan_name=""):
-        seen["scale"] = opts.scale_xy
+        seen["scale"], seen["measured"] = opts.scale_xy, opts.scale_measured
         return fake_runner(photos, out, opts, log, scan_name)
 
     c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=runner))
     c.get("/?token=geheim")
     r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4", "meetlijn": "99.5"})
-    assert r.status_code == 200 and seen["scale"] == pytest.approx((0.995, 0.995))
+    assert r.status_code == 200 and seen["scale"] == pytest.approx((0.995, 0.995)) and seen["measured"]
+    # niet opgegeven is iets anders dan precies 100,0 gemeten: dat bepaalt de printschaalterm in U95
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4"})
+    assert r.status_code == 200 and seen["scale"] == (1.0, 1.0) and not seen["measured"]
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"meetlijn": "100.0"})
+    assert r.status_code == 200 and seen["scale"] == (1.0, 1.0) and seen["measured"]
     r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))],
                data={"meetlijn": "100.2", "meetlijn_y": "99.6"})
     assert r.status_code == 200 and seen["scale"] == pytest.approx((1.002, 0.996))

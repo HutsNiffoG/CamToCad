@@ -23,7 +23,7 @@ from scipy import ndimage
 from .calib import Pose
 from .hull import VoxelGrid
 from .masks import ViewMasks
-from .profile import Part2p5D, from_footprint, regularize_angles, remove_short_edges
+from .profile import Part2p5D, from_footprint, regularize_angles, remove_short_edges, slot_from_polygon
 
 Views = list[tuple[Pose, ViewMasks]]
 Bounds = tuple[float, float, float, float]
@@ -220,7 +220,10 @@ def to_part(fp: Footprint, height: float) -> Part2p5D:
         outer, _ = regularize_angles(outer)
         outer = remove_short_edges(outer, 3 * fp.px)
         if outer.is_valid():
-            return Part2p5D(height, outer, holes, cutouts)
+            # een uitsparing met de vorm van een sleuf of rechthoek wordt een parametrische feature (V15)
+            slots = [slot_from_polygon(c, fp.px) for c in cutouts]
+            return Part2p5D(height, outer, holes, [c for c, s in zip(cutouts, slots) if s is None],
+                            [s for s in slots if s is not None])
     raise ValueError("contour levert geen geldige omtrek op")
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import inspect
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 import cadquery as cq
@@ -147,6 +147,16 @@ def _groups(values: list[float], tol: float) -> list[list[int]]:
     return groups
 
 
+def slot_names(part: Part2p5D) -> list[tuple[str, str]]:
+    """(naam in het rapport, variabele in het script) per sleuf of uitsparing, per soort genummerd."""
+    out, count = [], {"sleuf": 0, "rechthoek": 0}
+    for s in part.slots:
+        count[s.kind] += 1
+        k = count[s.kind]
+        out.append((f"sleuf {k}", f"sleuf{k}") if s.kind == "sleuf" else (f"uitsparing {k}", f"uitsparing{k}"))
+    return out
+
+
 def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
               imperial: bool = False, budget: Budget | None = None) -> tuple[Part2p5D, list[Snap]]:
     """Snapt hoogte, randposities, diameters, straal en gatposities (in het werkassenstelsel).
@@ -259,6 +269,40 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                      lambda p, i=i: p.holes[i].y - origin(p, "y", p.holes[i].x), "positie")
         out.holes[i] = Hole(sx.value, sy.value, h.d)
         snaps += [sx, sy]
+
+    # sleuven en rechthoekige uitsparingen (V15), zoals een ontwerper ze maatvoert: een sleuf met breedte
+    # (vaak een doorgangsmaat) en hartafstand, een rechthoek met lengte, breedte en hoekstraal
+    for i, (sl, (name, _)) in enumerate(zip(out.slots, slot_names(out))):
+        a90 = round(sl.angle / (math.pi / 2)) * (math.pi / 2)
+        angle = a90 if abs(sl.angle - a90) < math.radians(2.0) else sl.angle  # haaks op de datum als het bijna zo is
+        base = unc.hole_d + 0.02
+        r = sl.r
+        if sl.kind == "sleuf":
+            sw = do_snap(f"{name} breedte", sl.width, base, hole_candidates(sl.width),
+                         lambda p, i=i: p.slots[i].width, "gat")
+            c2c = sl.length - sl.width
+            sc = do_snap(f"{name} hartafstand", c2c, base, length_candidates(c2c, imperial),
+                         lambda p, i=i: p.slots[i].length - p.slots[i].width, "gat")
+            width, length = sw.value, sc.value + sw.value
+            snaps += [sw, sc]
+        else:
+            sL = do_snap(f"{name} lengte", sl.length, base, length_candidates(sl.length, imperial),
+                         lambda p, i=i: p.slots[i].length, "gat")
+            sW = do_snap(f"{name} breedte", sl.width, base, length_candidates(sl.width, imperial),
+                         lambda p, i=i: p.slots[i].width, "gat")
+            length, width = sL.value, sW.value
+            snaps += [sL, sW]
+            if sl.r > 0:
+                sr = do_snap(f"{name} hoekstraal", sl.r, unc.fillet, radius_candidates(sl.r),
+                             lambda p, i=i: p.slots[i].r, "afronding")
+                r = min(sr.value, width / 2)
+                snaps.append(sr)
+        sx = do_snap(f"{name} x", sl.x, unc.hole_xy, length_candidates(sl.x, imperial),
+                     lambda p, i=i: p.slots[i].x - origin(p, "x", p.slots[i].y), "positie")
+        sy = do_snap(f"{name} y", sl.y, unc.hole_xy, length_candidates(sl.y, imperial),
+                     lambda p, i=i: p.slots[i].y - origin(p, "y", p.slots[i].x), "positie")
+        out.slots[i] = replace(sl, x=sx.value, y=sy.value, length=max(length, width), width=width, angle=angle, r=r)
+        snaps += [sx, sy]
     return out, snaps
 
 
@@ -278,6 +322,9 @@ def build(part: Part2p5D) -> cq.Workplane:
         cutter = cq.Workplane("XY").workplane(offset=-1).polyline([tuple(p) for p in poly]).close() \
             .extrude(part.height + 2)
         model = model.cut(cutter)
+    for s in part.slots:
+        table = cadhelpers.sleuf_hoeken(s.x, s.y, s.length, s.width, math.degrees(s.angle), s.rad)
+        model = model.cut(cadhelpers.bouw_contour(cq, table).extrude(part.height + 2).translate((0, 0, -1)))
     return model
 
 
@@ -390,6 +437,25 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
                 note = f"  # gemeten ({sx.measured:.3f}, {sy.measured:.3f}) ± {max(sx.u95, sy.u95):.3f}"
             lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dvars[round(h.d, 6)]}),{note}")
         lines.append("]")
+    if part.slots:
+        lines += ["", "# Sleuven en rechthoekige uitsparingen"]
+        rows = []
+        for s, (name, var) in zip(part.slots, slot_names(part)):
+            if s.kind == "sleuf":
+                lines.append(f"{var}_breedte = {_fmt(s.width)}{_comment(by_name.get(f'{name} breedte'))}")
+                lines.append(f"{var}_hartafstand = {_fmt(s.length - s.width)}"
+                             f"{_comment(by_name.get(f'{name} hartafstand'))}")
+                length, r = f"{var}_hartafstand + {var}_breedte", f"{var}_breedte / 2"
+            else:
+                lines.append(f"{var}_lengte = {_fmt(s.length)}{_comment(by_name.get(f'{name} lengte'))}")
+                lines.append(f"{var}_breedte = {_fmt(s.width)}{_comment(by_name.get(f'{name} breedte'))}")
+                lines.append(f"{var}_hoekstraal = {_fmt(s.r)}{_comment(by_name.get(f'{name} hoekstraal'))}")
+                length, r = f"{var}_lengte", f"{var}_hoekstraal"
+            sx, sy = by_name.get(f"{name} x"), by_name.get(f"{name} y")
+            note = f"  # gemeten ({sx.measured:.3f}, {sy.measured:.3f}) ± {max(sx.u95, sy.u95):.3f}" if sx and sy else ""
+            rows.append(f"    ({_fmt(s.x)}, {_fmt(s.y)}, {length}, {var}_breedte, {_fmt(math.degrees(s.angle))}, {r}),"
+                        f"{note}")
+        lines += ["sleuven = [  # (x, y, lengte, breedte, hoek in graden, hoekstraal)"] + rows + ["]"]
     if part.cutouts:
         lines += ["", "# Overige doorgaande uitsparingen (polygonen)", "uitsparingen = ["]
         for poly in part.cutouts:
@@ -411,6 +477,10 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         lines += ["for punten in uitsparingen:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).polyline(punten).close()"
                   ".extrude(hoogte + 2))"]
+    if part.slots:
+        lines += ["for x, y, lengte, breedte, hoek, r in sleuven:",
+                  "    uitsparing = bouw_contour(cq, sleuf_hoeken(x, y, lengte, breedte, hoek, r))",
+                  "    model = model.cut(uitsparing.extrude(hoogte + 2).translate((0, 0, -1)))"]
     lines += ["", "", 'if __name__ == "__main__":',
               '    cq.exporters.export(model, "model.step")',
               '    print("model.step geschreven")', ""]

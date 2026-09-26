@@ -220,3 +220,19 @@ def test_pipeline_adds_a_missed_hole_only_when_the_model_fits_better(plate_scan)
     same, e_same = pipeline._add_missed_holes(plate(), K, plate_scan, silhouette.energy(plate(), K, plate_scan),
                                               log=messages.append)
     assert len(same.holes) == 1 and e_same == silhouette.energy(plate(), K, plate_scan)
+
+
+def test_edge_fit_recovers_a_slot():
+    """Een sleuf (V15) in de plaat: middelpunt, breedte en lengte uit de randen van de doorkijk."""
+    from camtocad.profile import Slot
+
+    truth = plate()
+    truth.slots = [Slot(130.0, 80.0, 14.0, 5.0, math.radians(90.0), 0.0, "sleuf")]
+    views = scan(truth)
+    start = truth.copy()
+    start.slots[0] = Slot(130.3, 79.7, 13.6, 4.7, math.radians(88.5), 0.0, "sleuf")
+    ef = edgefit.fit(start, K, views)
+    assert ef.accepted, ef.note
+    s = ef.part.slots[0]
+    assert (s.x, s.y, s.width) == pytest.approx((130.0, 80.0, 5.0), abs=0.05)
+    assert s.length == pytest.approx(14.0, abs=0.12) and math.degrees(s.angle) == pytest.approx(90.0, abs=0.3)

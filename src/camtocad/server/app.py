@@ -49,12 +49,16 @@ def _mat_choice(mat: str) -> str:
     return PRESETS[mat.upper()].name
 
 
-def _rulers(meetlijn: float, meetlijn_y: float | None) -> list[float]:
-    y = meetlijn if meetlijn_y is None else meetlijn_y
-    for v in (meetlijn, y):
+def _rulers(meetlijn: float | None, meetlijn_y: float | None) -> list[float] | None:
+    """Gemeten meetlijnen [X, Y], of None als ze niet zijn opgegeven (één waarde geldt voor beide)."""
+    if meetlijn is None and meetlijn_y is None:
+        return None
+    x = meetlijn if meetlijn is not None else meetlijn_y
+    y = meetlijn_y if meetlijn_y is not None else meetlijn
+    for v in (x, y):
         if not 95.0 <= v <= 105.0:
             raise HTTPException(400, "Meetlijn buiten 95-105 mm: print de mat opnieuw op 100%")
-    return [float(meetlijn), float(y)]
+    return [float(x), float(y)]
 
 
 class JobStore:
@@ -80,10 +84,11 @@ class JobStore:
             raise HTTPException(404, "Onbekende scan")
         return p
 
-    def create(self, mat: str = "auto", meetlijn=(100.0, 100.0)) -> str:
+    def create(self, mat: str = "auto", meetlijn=None) -> str:
         job_id = uuid.uuid4().hex[:12]
         (self.root / job_id / "fotos").mkdir(parents=True)
-        self.write(job_id, {"id": job_id, "state": "upload", "mat": mat, "meetlijn": list(meetlijn),
+        self.write(job_id, {"id": job_id, "state": "upload", "mat": mat,
+                            "meetlijn": list(meetlijn) if meetlijn is not None else None,
                             "created": time.time(), "photos": 0, "log": []})
         return job_id
 
@@ -198,9 +203,10 @@ class JobStore:
             self.update(job_id, log=lines[-50:])
 
         try:
-            rulers = status.get("meetlijn", 100.0)
+            rulers = status.get("meetlijn")  # None: niet gemeten
             rulers = [rulers, rulers] if isinstance(rulers, (int, float)) else rulers
-            opts = ScanOptions(mat=status.get("mat", "auto"), mat_scale=(rulers[0] / 100.0, rulers[1] / 100.0))
+            scale = (rulers[0] / 100.0, rulers[1] / 100.0) if rulers else None
+            opts = ScanOptions(mat=status.get("mat", "auto"), mat_scale=scale)
             result = self.runner(base / "fotos", base / "resultaat", opts, log=log, scan_name=job_id)
             self.update(job_id, state="klaar", finished=time.time(), summary=result.get("summary", {}),
                         warnings=result.get("warnings", [])[:20])
@@ -282,7 +288,7 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
 
     @app.post("/api/scans")
     def create_scan(request: Request, fotos: list[UploadFile] | None = File(None), mat: str = Form("auto"),
-                    meetlijn: float = Form(100.0), meetlijn_y: float | None = Form(None)):
+                    meetlijn: float | None = Form(None), meetlijn_y: float | None = Form(None)):
         """Nieuwe scan. Met foto's erbij wordt hij meteen verwerkt (alles in één keer); zonder foto's
         volgen die één voor één via /api/scans/{id}/fotos, met directe controle, en daarna /start."""
         check(request)
@@ -347,7 +353,7 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         changes = {}
         if mat is not None:
             changes["mat"] = _mat_choice(mat)
-        if meetlijn is not None:
+        if meetlijn is not None or meetlijn_y is not None:
             changes["meetlijn"] = _rulers(meetlijn, meetlijn_y)
         if changes:
             if store.read(job_id)["state"] in BUSY:
