@@ -1,6 +1,6 @@
 # Route A — verbeterpunten (onderzoek, september 2026)
 
-Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3), het gereedschap voor Fase 0 in v0.3 (§3b), en zwarte en witte onderdelen plus een betere fit in v0.4 (§3c); de rest staat hier als geprioriteerde lijst (§4).
+Dit document beschrijft wat er aan de implementatie van route A ([ROUTE-A.md](ROUTE-A.md)) beter kan. Een deel van de bevindingen zit al in v0.2 (§3), het gereedschap voor Fase 0 in v0.3 (§3b), zwarte en witte onderdelen plus een betere fit in v0.4 (§3c), en wat de eerste echte fotoset leerde in v0.4.1 (§2c, §3d); de rest staat hier als geprioriteerde lijst (§4).
 
 Het onderzoek bestond uit drie delen:
 
@@ -32,6 +32,10 @@ Aanleiding was de melding "Geen objectcontour gevonden" van de eerste gebruiker 
 - **Stille fouten waren het grootste risico.**
   - In de stresstests (§2) ging v0.1 in 10 van de 13 situaties onderuit. Drie keer was dat een crash. Zeven keer kwam er zonder waarschuwing een fout model uit: verkeerde maten (onder OpenCV 4.12 0,3 mm te hoog), spookgaten, ontbrekende gaten.
   - v0.2 heeft een kwaliteitspoort: twijfelgevallen krijgen "betrouwbaarheid: laag" met de reden, onzin wordt een foutmelding met uitleg.
+- **De eerste echte fotoset mislukte om een andere reden: het onderdeel lag niet stil** (§2c).
+  - Het lag in minstens vier liggingen: plat, omgedraaid, op zijn kop en op zijn kant. Een visual hull en een silhouetfit gaan uit van één vaste ligging.
+  - Daarbij: een zwart onderdeel op mat v1, glans, harde schaduwen en veel onscherpe foto's.
+  - *v0.4.1* herkent een verplaatst onderdeel en zegt welke foto's bij elkaar horen; de maskers passen zich per foto aan onscherpte, posefout en glans aan (§3d).
 - **Grootste open punten:**
   - nauwkeurigheid en een eerlijke U95. De fit telt pixels, en afrondingen komen niet beter dan ±0,3 mm.
   - zwarte en witte onderdelen. Sinds v0.4 lukken ze op mat v2 in de stresstests (§2b); echte foto's moeten dat bevestigen. Een harde slagschaduw wordt gemarkeerd, maar niet opgelost: diffuus licht blijft nodig.
@@ -114,6 +118,29 @@ Wat opvalt in v0.4:
 - **Gaten** komen tot 0,07 mm te klein uit (V13). Bij het zwarte onderdeel komt één gat 0,2 mm te klein uit: het ligt boven een groot zwart vlak van een marker (V5).
 - **Rekentijd:** 21–148 s per scan (twee scans tegelijk op 4 kernen). Het weghalen van overbodige hoekpunten kost tot ~80 s, alleen als er kandidaten zijn.
 
+**v0.4.1** (dezelfde scenario's, met de maskers voor echte foto's en de controle op verplaatsing, §3d): hetzelfde beeld.
+
+- De controle op verplaatsing hield in geen enkel scenario foto's apart; harde schaduw en zwaar blijven gemarkeerd.
+- Goed: buitenmaten 79,92–79,97 × 39,92–39,98, hoogtes 12,00–12,08, afrondingen R2,96–3,20, gaten Ø 6,53–6,60; klein onderdeel 29,92–29,95 × 19,93–19,97 met Ø 4,43–4,47; ring Ø 24,89 met gat Ø 8,00.
+- Het donkere onderdeel is beter: gaten Ø 6,53 en 6,53 (v0.4: 6,49 en 6,39).
+- Zwaar: één gat Ø 6,23 (v0.4: 6,37), gemarkeerd. De maskers in dat gat zijn gelijk aan v0.4; het verschil zit in de fit van dit instabiele scenario.
+
+## 2c. De eerste echte fotoset (september 2026)
+
+57 foto's van een zwarte accu op een geprinte A4-mat v1, met een telefoon (2992 × 2992 pixels). De verwerking stopte met "Geen objectcontour gevonden". Wat de analyse liet zien, van groot naar klein:
+
+- **Het onderdeel lag niet stil.** De set bevat minstens vier liggingen: plat met het etiket boven, omgedraaid, op zijn kop (je ziet de contacten) en op zijn kant. Ook binnen één reeks is het verplaatst: in de twee foto's recht van boven van de tweede reeks ligt het de ene keer plat en de andere keer op zijn kop, met de contacten boven. Een visual hull en een silhouetfit gaan uit van één vaste ligging. Met silhouetten van verschillende liggingen blijft er van de hull een grillig restje over, en vallen de bovenaanzichten nergens samen.
+- **Een zwart onderdeel op mat v1.** Op de zwarte vakken (zonder stippen) is het onderdeel onzichtbaar. Zekere mat is er alleen langs de vakranden, dus er wordt weinig weggesneden: de grove hull reikte tot 121 mm hoogte.
+- **Glans en harde schaduwen.** Een lamp maakte de zwarte vakken lichter (glans op de toner), en schaduwen van hand en telefoon vielen over de mat.
+- **Onscherpte en afstand.** 25 van de 53 bruikbare foto's hebben σ > 1,8 px (5 zelfs > 3 px). De camera hing vaak maar 9–15 cm boven de mat (mediaan 14 cm): grote parallax, weinig scherptediepte en een deel van de mat buiten beeld. De kalibratie haalt daardoor 1,6 px reprojectiefout; op synthetische scans is dat 0,1 px.
+- **Weinig bovenaanzichten per ligging.** Er zijn er 17, maar verdeeld over de liggingen; per ligging twee à drie.
+
+Wat v0.4.1 ermee doet (§3d):
+
+- De nieuwe controle op verplaatsing meldt het direct, met de groepen foto's die bij elkaar horen. Op de hele set: de grootste groep telt maar een kwart van de foto's. Ook de tweede reeks alleen (25 foto's) valt uiteen in groepen.
+- De maskers houden meer bewijs over. In v0.4 was op deze foto's gemiddeld een kwart van de mat "dubbelzinnig" (paars; in sommige foto's driekwart): door glans en ruis leek bijna alles even donker als het onderdeel. Nu is dat 3%, en wordt meer van het onderdeel gevonden (reeks 2b: 2,0% van de mat als object tegen 1,0%). Er komen wel wat meer losse vlekken buiten het onderdeel bij: 0,8% van de mat tegen 0,4%, vooral in glans en harde schaduw.
+- Een model van de accu levert deze set niet op. Daarvoor is een nieuwe scan nodig: mat v2, één ligging per scan, diffuus licht, telefoon stil en op 25–35 cm.
+
 ## 3. Opgelost in v0.2
 
 | Probleem | Oplossing | Waar |
@@ -171,6 +198,19 @@ Het zwarte onderdeel mislukte in v0.3 ook op mat v2 (§2). De analyse met de ech
 | Debugbeelden | Dubbelzinnige pixels paars in `masker_*.jpg` | `debug.py` |
 | Rekentijd | De extra stappen alleen in een uitsnede rond het object: +~15% per foto. Het weghalen van hoekpunten kost alleen tijd als er kandidaten zijn (~15 s per poging) | `masks.py` |
 
+## 3d. Opgelost in v0.4.1 (eerste echte fotoset)
+
+| Wat | Hoe | Waar |
+|---|---|---|
+| Verplaatst onderdeel herkennen | Na de maskers, vóór de hull. Per voxel van 3 mm: in hoeveel foto's valt hij op het object, en in hoeveel duidelijk op de mat (ook egale stukken, niet waar het object onzichtbaar zou zijn). Per foto twee toetsen tegen de consensus van de andere: langs de kijkstraal van elke objectpixel moet de consensus hoog zijn (25e percentiel, per maskerdeel; een losse vlek telt niet), en de foto mag de gezamenlijke hull niet op de mat zien. Groeperen: houd de foto's die het best passen (Otsu, of de slechtste 10% afpellen bij een gelijke stand) tot de groep klopt, en herhaal voor de rest. Twee of meer groepen en de grootste < 75% (of < 50% bij één groep), dan een melding met de groepen; anders gaan de paar afwijkers er met een waarschuwing uit. Kost ~3–5 s. Een klein duwtje (10 mm bij een onderdeel van 80 mm) valt niet op: de liggingen overlappen dan grotendeels | `placement.py`, `pipeline.py` |
+| Onscherpte in het masker (V13, deels) | De voorspelde mat wordt vervaagd tot de gemeten onscherpte van de foto (`preflight.py`). Anders geeft elke zwart-witrand van de mat in een bewogen foto aan weerszijden een afwijking die op object lijkt | `masks.py` |
+| Posefout per foto | De tolerantie aan patroonranden wordt per foto gemeten aan de mat zelf: het 75e percentiel van afwijking gedeeld door helling op duidelijke randen, tussen 0,4 en 2,5 px. Synthetisch blijft het 0,4 px; bij de echte foto's 0,5–2 px | `masks.py` |
+| Glans | Glans op de toner maakt zwart lichter en laat wit bijna gelijk; dat is geen versterking. Een aparte "zwart-optilling", gemeten binnen de zwarte vakken (fijn waar genoeg bronnen zijn, grof daartussen) | `masks.py` |
+| Schaduw tot over de papierrand | Waar in de buurt geen bronnen voor de versterking zijn (de witte rand, midden in een groot vak) volgt de versterking het grove verloop in plaats van "geen schaduw". Niet binnen ~10 mm van ontbrekende textuur: daar ontbreken de bronnen door het object zelf, en een doorgetrokken schaduw liet in het zware stressscenario stukjes object als mat doorgaan (spookgaatjes van Ø 0,8 mm) | `masks.py` |
+| Dubbelzinnig alleen bij het object | "Even donker als het object" alleen in de buurt van het object, en nooit meer dan een kwart van het zwart-witcontrast van de mat. Anders werd bij een ruisige foto de halve mat paars | `masks.py` |
+
+Geprobeerd en teruggedraaid: de ruis alleen op de vlakke stukken mat schatten. Dat gaf een lagere drempel, maar in het zware stressscenario telde de rand van de slagschaduw dan als object: één gat 0,38 mm te klein, zonder waarschuwing. Op de echte foto's was het verschil met de oude schatting niet systematisch. Ook de grove versterking overal toepassen bleek slecht: op de echte foto's gaf dat juist meer losse vlekken (1,2% van de mat tegen 0,8%).
+
 ## 4. Open verbeterpunten, op prioriteit
 
 Impact en moeite: **H**oog, **M**iddel, **L**aag. Moeite S/M/L staat voor dagen, een week, of meerdere weken.
@@ -198,8 +238,10 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | V10 | Foto's zoals telefoons ze maken | EXIF lezen: oriëntatie, lens, brandpunt, digitale zoom. HEIC via pillow-heif. Groeperen per camera of lens, en een cameramodel per toestel bewaren (voor kleine scans). Waarschuwen bij σ(f)/f > 0,3 % | H | M |
 | V11 | Mat niet vlak | Een residukaart per hoek over alle foto's toont krul. Eventueel een bundelaanpassing met een laag-orde matoppervlak | M | M |
 | V12 | Meer dan één ding op de mat, of het object deels ernaast | Waarschuwen, en het object kiezen dat in de bovenaanzichten steun heeft. Een liniaal of munt kan groter zijn dan het onderdeel. "Ligt deels naast de mat" als expliciete melding | M | S |
-| V13 | Maskerrand-bias en onscherpte per foto (deels gedaan in v0.3) | Gedaan: de onscherpte per foto wordt aan de mat gemeten (`preflight.py`), staat in `diagnose.json`, en onscherpe foto's worden gemeld. De randbias hangt niet meer van het matpatroon af (§3b). **Open:** de voorspelde mat met de gemeten σ vervagen, en daarmee de 50 %-regel en de kleinste herkenbare afronding per scan instellen | M | M |
+| V13 | Maskerrand-bias en onscherpte per foto (deels gedaan in v0.3 en v0.4.1) | Gedaan: de onscherpte per foto wordt aan de mat gemeten (`preflight.py`), staat in `diagnose.json`, en onscherpe foto's worden gemeld. De randbias hangt niet meer van het matpatroon af (§3b). De voorspelde mat wordt vervaagd tot de gemeten σ (§3d). **Open:** de kleinste herkenbare afronding per scan uit de gemeten onscherpte afleiden | M | M |
 | V14 | Kwaliteitspoort verfijnen (korte randen: gedaan in v0.3) | Residuclusters per foto: een gemist gat, een extra uitstulping. Snappen beoordelen op het energieverschil in plaats van het IoU-verschil, want 0,5 mm fout verandert de IoU maar ~0,005 | M | S |
+| V27 | Een klein duwtje herkennen (grote verplaatsing: gedaan in v0.4.1) | Een verschuiving van een paar millimeter valt in de consensus niet op (§3d). Na de fit per foto de verschuiving van het silhouet t.o.v. het model schatten; een groep opeenvolgende foto's met dezelfde verschuiving is een duwtje. Melden, of die groep apart fitten en de verschuiving meenemen | M | S |
+| V28 | Kalibratie op echte foto's | De eerste echte set haalde 1,6 px reprojectiefout, vooral door bewogen foto's en hoekruis. Foto's met σ > 3 px niet voor de kalibratie gebruiken (wel voor de maskers, als ze scherp genoeg zijn), hoeken wegen naar hun onscherpte, en in de fotocontrole waarschuwen als de camera dichter dan ~15 cm bij de mat is | M | S |
 
 ### 4.3 Grotere objectklasse
 
@@ -242,6 +284,7 @@ Voor een project dat AGPL-3.0 wil worden, telt ook de licentie van de **gewichte
 
 1. **Fase 0 met echte foto's.** Het gereedschap is klaar in v0.3: V1-harnas, V5 (mat v2), V6 (fotocontrole), V7 (printschaal). Sinds v0.4 horen ook zwarte en witte onderdelen in de meetset. Nu de meetset zelf maken en meten volgens [FASE-0.md](FASE-0.md): meten is weten.
 2. **v0.4 (gedaan):** de eerste stap van V8 (zwart op zwart, wit op wit), hoekpunten weghalen uit V4, en de afrondingsproef in de fit (§3c).
+   **v0.4.1 (gedaan):** na de eerste echte fotoset: een verplaatst onderdeel herkennen, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans (§2c, §3d).
 3. **v0.5:** V2 (fit op randen), V3 (U95) en de rest van V4 (gaten toevoegen). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid, afgesteld op de Fase 0-metingen.
 4. **v0.6:** de objectklasse (V15–V19) en de rest van de segmentatiecascade (V8: GrabCut, kleur, schaduw; V10).
 5. **v0.7 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).

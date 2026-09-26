@@ -1,5 +1,6 @@
 """Maskers voor onderdelen in de kleur van de mat: zwart op zwart, wit op wit (V8)."""
 
+import cv2
 import numpy as np
 import pytest
 from scipy import ndimage
@@ -79,3 +80,46 @@ def test_dark_part_is_solid_and_mat_does_not_leak_in(dark_top_view):
     assert np.count_nonzero(new.fg & hole) < 0.5 * np.count_nonzero(hole)
     # waar object en mat even donker zijn, is een pixel geen bewijs: de fit negeert die
     assert new.amb is not None and np.count_nonzero(new.amb & obj) > 0.05 * np.count_nonzero(obj)
+
+
+@pytest.fixture(scope="module")
+def empty_view():
+    """Schuine foto van de lege mat v2 (geen object): alles wat 'object' heet, is fout."""
+    spec = mat.PRESETS["A4"]
+    cam = render.default_camera(dist=(0, 0, 0, 0, 0))
+    raster = mat.rasterize_board(spec, 10.0, 3.0)
+    c = np.array([spec.board_w_mm / 2, spec.board_h_mm / 2, 0.0])
+    R, t = render.look_at(c + [-120.0, -150.0, 250.0], c)
+    img, _ = render.render_view(raster, cam, R, t, None, rng=np.random.default_rng(7))
+    pred, valid = masks.predict_background(raster, cam.K, Pose("leeg", R, t), (cam.width, cam.height))
+    return img.astype(np.float32), pred, valid, cam.K[0, 0] / 330.0
+
+
+def test_glare_on_the_black_squares_stays_mat(empty_view):
+    """Glans van een lamp maakt zwart lichter en laat wit bijna gelijk: geen versterking, maar ook geen object."""
+    img, pred, valid, ppm = empty_view
+    h, w = img.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    spot = np.exp(-(((xx - 0.55 * w) / 170.0) ** 2 + ((yy - 0.5 * h) / 130.0) ** 2))
+    glare = np.clip(img + 45.0 * spot * (1.0 - img / 255.0), 0, 255).astype(np.uint8)
+    m = masks.classify(glare, pred, valid, px_per_mm=ppm)
+    zone = (spot > 0.3) & valid
+    assert np.count_nonzero(m.fg & zone) < 0.005 * np.count_nonzero(zone)
+
+
+def test_a_blurred_photo_is_compared_with_an_equally_blurred_mat(empty_view, dark_top_view):
+    """Bij een bewogen foto geeft elke zwart-witrand anders aan weerszijden een afwijking. Die jaagt de
+    ruisschatting en dus de drempel omhoog (σ 19 in plaats van 3), en dan valt een donker onderdeel weg."""
+    img, pred, valid, ppm = empty_view
+    blurred = cv2.GaussianBlur(img, (0, 0), 2.5).astype(np.uint8)
+    plain = masks.classify(blurred, pred, valid, px_per_mm=ppm)
+    matched = masks.classify(blurred, pred, valid, px_per_mm=ppm, blur_px=2.5)
+    assert matched.sigma < 0.3 * plain.sigma
+    assert np.count_nonzero(matched.bg) > 1.15 * np.count_nonzero(plain.bg)  # meer zekere mat
+    assert not matched.fg.any()
+    img, pred, valid, truth, ppm = dark_top_view
+    blurred = cv2.GaussianBlur(img.astype(np.float32), (0, 0), 2.5).astype(np.uint8)
+    core = truth & valid & ~(ndimage.binary_dilation(~truth, iterations=4))
+    found = [np.count_nonzero(masks.classify(blurred, pred, valid, px_per_mm=ppm, **kw).fg & core)
+             / np.count_nonzero(core) for kw in ({}, {"blur_px": 2.5})]
+    assert found[1] > 0.97 and found[1] > found[0] + 0.05, found

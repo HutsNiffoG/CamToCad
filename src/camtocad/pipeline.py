@@ -21,7 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import __version__, cadmodel, calib, debug, hull, initial, masks, preflight, profile, report, silhouette
+from . import (__version__, cadmodel, calib, debug, hull, initial, masks, placement, preflight, profile, report,
+               silhouette)
 from .imgio import imwrite, read_gray
 from .mat import MatSpec, get_spec, rasterize_board
 
@@ -312,11 +313,13 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         img = calib.undistort(lookup[pose.name], cam)
         pred, valid = masks.predict_background(raster, cam.K, pose, (cam.width, cam.height))
         depth = float((pose.R @ np.array([spec.size_mm[0] / 2, spec.size_mm[1] / 2, 0.0]) + pose.t)[2])
-        return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0))
+        return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0),
+                                    blur_px=blur.get(pose.name))
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:  # grote beeldbewerkingen: OpenCV en numpy geven de GIL vrij
         views = list(pool.map(view_masks, cal.poses.values()))
     top_views: list = []
+    all_views, lig_of = views, {}  # ook de foto's die niet bij de rest passen staan in diagnose.json
     diag = {"camtocad": __version__, "opencv": cv2.__version__, "detector_bias_px": bias.tolist(),
             "camera": cam.to_dict(), "geweigerd": cal.rejected}
 
@@ -324,7 +327,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if not opts.debug_images:
             return
         diag.update(extra or {})
-        diag["fotos"] = debug.view_table(views, {d.name: d for d in dets}, {p.name for p, _ in top_views}, blur)
+        diag["fotos"] = debug.view_table(all_views, {d.name: d for d in dets}, {p.name for p, _ in top_views}, blur,
+                                         lig_of)
         debug.write_json(dbg / "diagnose.json", diag)
 
     def write_overlays() -> None:
@@ -335,8 +339,28 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             imwrite(dbg / f"masker_{Path(pose.name).stem}.jpg",
                         debug.mask_overlay(calib.undistort(lookup[pose.name], cam), m))
 
-    # 4. grove visual hull: waar staat het object ongeveer? (alleen lokaliseren en een bovengrens)
+    # 3b. ligt het onderdeel in alle foto's op dezelfde plek? (placement.py)
     board_bounds = (0.0, spec.size_mm[0], 0.0, spec.size_mm[1])
+    lig = placement.find(views, cam.K, board_bounds)
+    diag["ligging"] = lig.to_dict()
+    lig_of = {n: f"groep {k + 1}" for k, g in enumerate(lig.groups) for n in g}
+    lig_of |= {n: "past nergens bij" for n in lig.outliers} | {n: "niet beoordeeld" for n in lig.unjudged}
+    if lig.groups:
+        share = len(lig.groups[0]) / lig.judged
+        if share < 0.5 or (len(lig.groups) > 1 and share < 0.75):
+            write_overlays()
+            write_debug()
+            raise ScanError(placement.moved_message(lig, [n for n, _ in images]))
+        odd = {n for g in lig.groups[1:] for n in g} | set(lig.outliers)
+        if odd:  # een paar foto's die niet kloppen: onderdeel even aangeraakt, hand in beeld, mislukt masker
+            views = [v for v in views if v[0].name not in odd]
+            names = sorted(odd, key=[n for n, _ in images].index)
+            log(f"{len(odd)} foto('s) passen niet bij de rest en worden niet gebruikt: " + ", ".join(names))
+            warnings.append(f"{len(odd)} foto('s) niet gebruikt omdat ze niet bij de rest passen (onderdeel "
+                            "verschoven of aangeraakt, hand of ander voorwerp in beeld, of mislukt masker): "
+                            + ", ".join(names[:6]) + (" ..." if len(names) > 6 else ""))
+
+    # 4. grove visual hull: waar staat het object ongeveer? (alleen lokaliseren en een bovengrens)
     try:
         coarse = hull.reconstruct(views, cam.K, board_bounds, fine=False)
     except ValueError as e:
@@ -476,7 +500,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "objectklasse": "2,5D (extrusie met doorgaande gaten)",
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
-        "foto's gebruikt": f"{len(cal.poses)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
+        "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
         "camera": f"f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px",
         "betrouwbaarheid": "laag: " + "; ".join(issues) if issues else "normaal",
         "resolutie op het object": f"{mm_per_px:.3f} mm/pixel",

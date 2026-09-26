@@ -1,10 +1,10 @@
-# Route A — lokaal en open source (v0.4)
+# Route A — lokaal en open source (v0.4.1)
 
 Dit is de uitvoering van profiel A uit [OPEN-SOURCE-LOKAAL.md](OPEN-SOURCE-LOKAAL.md): foto's van een onderdeel op een geprinte kalibratiemat gaan naar je eigen pc, die er een CAD-model van maakt. Er is geen cloud nodig en er zijn geen licentiekosten; alle afhankelijkheden hebben een permissieve open-sourcelicentie.
 
 | | |
 |---|---|
-| **Status** | v0.4 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw in v0.4: zwarte en witte onderdelen op mat v2, afrondingen en overbodige hoekpunten in de fit. Sinds v0.3: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
+| **Status** | v0.4.1 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw in v0.4.1, na de eerste echte fotoset: een controle of het onderdeel tussendoor is verplaatst, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans. In v0.4: zwarte en witte onderdelen op mat v2, afrondingen en overbodige hoekpunten in de fit. Sinds v0.3: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
 | **Objectklasse** | 2,5D-onderdelen die plat op de mat liggen: extrusie van een contour (rechte randen met scherpe of afgeronde hoeken, of een cirkel) met doorgaande gaten |
 | **Uitvoer** | `model.step`, `model.stl`, parametrisch CadQuery-script `model.py`, meetrapport `report.html` / `report.json` |
 | **Platform** | Windows, macOS en Linux met Python 3.10–3.12; geen GPU nodig |
@@ -32,7 +32,8 @@ camtocad demo --uit camtocad-demo
    - Meet beide meetlijnen van 100,0 mm na: **X** onder de mat, **Y** links. Wijken ze af, geef ze dan op, bijvoorbeeld `--meetlijn 99.6 99.8`, of in de velden op de telefoonpagina. De printschaal wordt dan per richting gecorrigeerd.
    - Dit is mat v2: in elk zwart vak een raster witte stippen, zodat ook een donker onderdeel op een zwart vak te zien is. Een eerder geprinte mat (v1) werkt nog en wordt automatisch herkend, net als het formaat.
 2. **Foto's maken.** Leg het onderdeel plat in het midden van de mat, bij diffuus licht. Maak 30–60 foto's met de gewone camera-app van je telefoon (JPG):
-   - rondom, op twee à drie hoogtes (ongeveer 35°, 55° en 70° boven de mat);
+   - **raak het onderdeel niet aan tot de laatste foto**: één scan is één vaste ligging. Wil je de mat draaien, draai dan mat en onderdeel samen. Een andere kant (omgedraaid, op zijn kant) is een aparte scan;
+   - rondom, op twee à drie hoogtes (ongeveer 35°, 55° en 70° boven de mat), op zo'n 25–35 cm afstand met de hele mat in beeld;
    - **4–6 foto's recht van boven**: nodig voor de contour en om door gaten heen te kijken;
    - de mat steeds grotendeels in beeld, niet inzoomen, zelfde lens (geen groothoek/tele wisselen).
 3. **Controleren en verwerken**, op één van twee manieren:
@@ -62,7 +63,7 @@ Elke scan schrijft diagnosebeelden naar `<uitvoer>/debug/`, ook als de verwerkin
 | `masker_<foto>.jpg` | Het objectmasker over de foto: **oranje** = object, **blauw** = zekere mat, **paars** = object en mat zijn daar even donker of licht, dus de foto zegt daar niets (binnen het object opgevuld voor de startcontour; de fit negeert het). Alle gebruikte bovenaanzichten en een paar schuine foto's |
 | `lokalisatie.png` | De grove visual hull van boven over de mat (lichter = hoger), met het zoekgebied |
 | `bovenaanzicht.png` | Hoe vaak de bovenaanzichten "object" zeggen op de gekozen hoogte (geel = allemaal), met de startcontour in cyaan |
-| `diagnose.json` | Per foto: kijkhoek, onscherpte, objectaandeel, ruis en mathoeken; de dekking rond het object; de hoogtezoektocht; de terugvalopties die zijn geprobeerd |
+| `diagnose.json` | Per foto: kijkhoek, onscherpte, objectaandeel, ruis en mathoeken; de dekking rond het object; welke foto's bij welke ligging horen (`ligging`); de hoogtezoektocht; de terugvalopties die zijn geprobeerd |
 
 Meest voorkomende meldingen:
 
@@ -71,6 +72,11 @@ Meest voorkomende meldingen:
   - Is het grotendeels grijs, dan steekt het te weinig af tegen de mat. Paars is geen probleem: daar is het onderdeel even donker (of licht) als de mat, en dat wordt opgevangen. Grote paarse stukken ontstaan bij een zwart onderdeel op een mat v1: print dan mat v2.
   - Oplossing: diffuus licht, het onderdeel midden op de mat, en 4–6 foto's recht boven het onderdeel met de hele mat in beeld.
   - Achter de melding staat welke foto's er rond het object nog ontbreken.
+- **"Het onderdeel ligt niet in alle foto's op dezelfde plek"**
+  - De foto's spreken elkaar tegen: in de ene foto ligt het onderdeel ergens waar een andere foto gewoon mat ziet. Meestal is het tussendoor verschoven, gedraaid of op een andere kant gelegd. De melding noemt welke foto's bij elkaar horen.
+  - Oplossing: maak de scan opnieuw zonder het onderdeel aan te raken, en scan elke ligging apart.
+  - Passen maar een paar foto's niet (minder dan een kwart), dan gaat de verwerking door zonder die foto's. Het rapport noemt ze bij de waarschuwingen: "foto('s) niet gebruikt omdat ze niet bij de rest passen". Dat kan ook een hand of ander voorwerp in beeld zijn, of een mislukt masker.
+  - Een klein duwtje (een paar millimeter) valt hier niet op. Dat zie je aan "silhouetten passen matig" in het rapport.
 - **"gekozen mat A4, maar de foto's tonen mat A3"**: de mat op de foto's is gebruikt. Controleer of dat de mat is die je bedoelde.
 - **"betrouwbaarheid: laag"** in het rapport. Het model is gemaakt, maar iets klopt niet; de reden staat erbij. Bijvoorbeeld een gat dat als niet-ronde uitsparing is herkend, of een model dat in sommige foto's slecht past. Controleer die maten.
 - **Foto's "niet gebruikt (afwijkend formaat)"**: andere lens, zoom of bijgesneden. Staand opgeslagen foto's worden automatisch teruggedraaid.
@@ -83,7 +89,8 @@ Meest voorkomende meldingen:
 | Mat | `mat.py`, `pdf.py` | ChArUco-mat als vector-PDF op exacte schaal, met meetlijnen X en Y en een stippenraster in de zwarte vakken. Eigen marker-ID's per formaat: de mat wordt herkend | §4.5 |
 | Fotocontrole | `preflight.py` | Per foto: mat, onscherpte (gemeten aan de matranden), belichting, kijkhoek. Per scan: waar ligt het object, dekking per richting en hoogte, aanwijzingen | — |
 | Camera | `calib.py` | Mat herkennen, camera zelf kalibreren (Zhang), per foto een metrische pose: de mat is de tracker. De printschaal (X en Y) zit in de matgeometrie. De hoekverschuiving van de geïnstalleerde OpenCV-versie wordt gemeten en gecorrigeerd; staand opgeslagen foto's worden teruggedraaid | §4.5, OPEN-SOURCE-LOKAAL §2.1 |
-| Maskers | `masks.py` | Voorspel per foto hoe de mat eruitziet; afwijkingen zijn object. "Zekere mat" alleen waar het lokale patroon de mat herhaalt (correlatie), zodat donkere en witte onderdelen niet wegvallen en schaduwen mat blijven. Randpixels volgens de 50%-regel. Waar object en mat even donker of licht zijn (zwart op zwart), is een pixel geen bewijs: binnen het object wordt zo'n stuk opgevuld, de fit negeert het | §5.3 [R3c] |
+| Maskers | `masks.py` | Voorspel per foto hoe de mat eruitziet; afwijkingen zijn object. "Zekere mat" alleen waar het lokale patroon de mat herhaalt (correlatie), zodat donkere en witte onderdelen niet wegvallen en schaduwen mat blijven. Randpixels volgens de 50%-regel. Waar object en mat even donker of licht zijn (zwart op zwart), is een pixel geen bewijs: binnen het object wordt zo'n stuk opgevuld, de fit negeert het. Per foto aangepast aan onscherpte (de voorspelling even vaag), posefout (gemeten aan de matranden) en glans (zwart lichter dan verwacht) | §5.3 [R3c] |
+| Ligging | `placement.py` | Ligt het onderdeel in alle foto's op dezelfde plek? Per voxel (3 mm) hoeveel foto's hem op het object zien en hoeveel op de mat; per foto of de andere foto's zijn objectpixels steunen en of hij de gezamenlijke hull niet op de mat ziet. Foto's met verschillende liggingen vallen zo in groepen uiteen | — |
 | Lokaliseren | `hull.py` | Grove visual hull (2 mm): waar ligt het object, en een bovengrens voor de hoogte | §5.3 [R3c] |
 | Startmodel | `initial.py`, `profile.py` | Hoogte zoeken waarop de bovenaanzichten samenvallen, terugprojecteren → contour → randen, afrondingen, gaten; met terugvalopties en een uitgelegde fout | §6.3–6.5 |
 | Model fitten | `silhouette.py`, `pipeline.py` | Analysis-by-synthesis: model-silhouet renderen in élke foto, pixelverschil minimaliseren (hoogte, randen, afrondingen, gaten). Daarna per hoek grote stappen in de afronding proberen, en hoekpunten weghalen waar het model zonder even goed past (een knik of een korte schuine rand zonder bewijs) | §6.8, §7.3 |
@@ -118,10 +125,13 @@ Over alle stresstests die geen waarschuwing geven (ook een zwart en een wit onde
 
 Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.4 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
 
-## Beperkingen van v0.4
+De eerste echte fotoset (een zwarte accu op mat v1) is niet gelukt: het onderdeel lag in minstens vier verschillende liggingen, en een zwart onderdeel op mat v1 is op de zwarte vakken onzichtbaar. Wat dat opleverde staat in [ROUTE-A-VERBETERPUNTEN.md §2c](ROUTE-A-VERBETERPUNTEN.md#2c-de-eerste-echte-fotoset-september-2026).
+
+## Beperkingen van v0.4.1
 
 - **Objectklasse:** alleen 2,5D-onderdelen plat op de mat, met doorgaande gaten. Geen blinde gaten, kamers, treden in de hoogte, afschuiningen op de bovenrand, schroefdraad of vrije vormen. Afschuiningen op verticale hoeken worden als afronding benaderd; buitencontouren met bogen groter dan een hoekafronding (bijv. een sleufvorm) worden met rechte randen benaderd.
 - **Bovenaanzichten zijn verplicht**: zonder foto's recht van boven stopt de verwerking met een duidelijke melding.
+- **Eén ligging per scan.** Een verplaatst of omgedraaid onderdeel wordt herkend en gemeld; een klein duwtje van een paar millimeter niet (zie "Als het niet lukt").
 - **Belichting:**
   - Schaduwen op de gestructureerde delen van de mat worden herkend.
   - Een harde slagschaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort markeert het resultaat dan als onbetrouwbaar (in de stresstests: altijd).
@@ -130,7 +140,7 @@ Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn
 - **Onzekerheid (U95)** is een indicatie op basis van resolutie en aantal foto's, nog niet gekalibreerd op echte metingen. Meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)).
 - **Afrondingen** zijn het minst nauwkeurig (−0,1 tot +0,4 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
 - **Afrondingen kleiner dan ~3 pixels** (bij de demo ~0,8 mm) zijn niet te onderscheiden van scherpe hoeken en worden als scherp gemodelleerd; het rapport meldt dat.
-- **Rekentijd:** ~55 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen; foto's worden standaard teruggeschaald naar 2000 pixels. Tot ~2,5 minuten als er overbodige hoekpunten uit de contour moeten (zwart onderdeel, schaduw). De fotocontrole kost ~0,1–0,3 s per foto.
+- **Rekentijd:** ~55 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen, waarvan ~4 s voor de controle op verplaatsing; foto's worden standaard teruggeschaald naar 2000 pixels. Tot ~2,5 minuten als er overbodige hoekpunten uit de contour moeten (zwart onderdeel, schaduw). De fotocontrole kost ~0,1–0,3 s per foto.
 - **Nog geen native app:** de telefoon gebruikt de browser. De geleide AR-opname uit het architectuurdocument volgt met de Android-app.
 
 ## Licenties

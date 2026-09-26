@@ -111,12 +111,21 @@ def _drop_small(mask: np.ndarray, min_area: float) -> np.ndarray:
     return keep[labels]
 
 
-def _object_level(fg: np.ndarray, o: np.ndarray, radius_px: float) -> np.ndarray | None:
-    """Lokale grijswaarde van het object (gemiddelde over het binnenste van het masker in de buurt)."""
+def _object_level(fg: np.ndarray, o: np.ndarray, radius_px: float):
+    """Lokale grijswaarde van het object (gemiddelde over het binnenste van het masker in de buurt).
+
+    Geeft (grijswaarde, in de buurt), of None zonder object. Alleen in de buurt van het object (binnen
+    ~2 x de straal van zijn binnenste) is de schatting iets waard: verder weg zou een algemene waarde,
+    vervuild door een valse vlek object in een schaduw, de hele mat 'even donker als het object' maken.
+    """
     inner = cv2.erode(fg.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
     if np.count_nonzero(inner) < 50:
         return None
-    return _normconv(o, inner.astype(np.float32), max(4.0, radius_px), float(np.median(o[inner])))
+    sigma = max(4.0, radius_px)
+    wgt = inner.astype(np.float32)
+    level = _normconv(o, wgt, sigma, float(np.median(o[inner])))
+    near = _normconv(wgt, np.ones_like(wgt), sigma, 0.0) > 0.02
+    return level, near
 
 
 def _closure(fg: np.ndarray, radius_px: float) -> np.ndarray:
@@ -171,7 +180,7 @@ def _fill_ambiguous(fg: np.ndarray, ambiguous: np.ndarray, evidence: np.ndarray,
 
 
 def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, radius: float, window: int,
-                       min_area: float):
+                       min_area: float, contrast: np.ndarray):
     """Zwart op zwart, wit op wit: geeft (objectmasker, dubbelzinnig, zekere-mat-toegestaan), of None.
 
     Waar de mat dezelfde grijswaarde heeft als het object ernaast, is een pixel zelf geen bewijs, en ook
@@ -181,15 +190,18 @@ def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, rad
     ligt ertussen, en de fit bepaalt hem uit het bewijs rondom. De rest is dubbelzinnig: de fit negeert
     het, en binnen het object wordt het voor de startcontour opgevuld (_fill_ambiguous).
     """
-    level = _object_level(fg, o, radius)
-    if level is None:
+    found = _object_level(fg, o, radius)
+    if found is None:
         return None
+    level, near = found
     domain = _closure(fg, radius)
     # losse vlekjes object binnen de sluiting horen erbij (een witte stip onder een zwart onderdeel; vlak
     # naast een gat vaak het enige bewijs waar het object ophoudt); daarbuiten zijn ze ruis
     support = fg | (specks & domain)
     diff = np.abs(level - bgv)
-    same = valid & (diff < 2.0 * tau)
+    # 'even donker' binnen 2τ, maar nooit meer dan een kwart van het zwart-witcontrast van de mat: bij een
+    # ruisige foto zou anders alles op elkaar lijken
+    same = valid & near & (diff < np.minimum(2.0 * tau, 0.25 * contrast))
     kw = np.ones((window, window), np.uint8)
     mat_ok = mat_seen & (~same | (cv2.erode(mat_seen.astype(np.uint8), kw) > 0))
     leak = support & same & (res <= tau) & (cv2.dilate((valid & ~support).astype(np.uint8), kw) > 0)
@@ -208,6 +220,29 @@ def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, rad
         d_mat = cv2.distanceTransform((~evidence).astype(np.uint8), cv2.DIST_L2, 3)
         filled = filled | (rest & (d_obj < d_mat))
     return _drop_small(filled, min_area) | (specks & domain), unseen | leak, mat_ok
+
+
+def _black_lift(o: np.ndarray, p: np.ndarray, model: np.ndarray, sources: np.ndarray) -> np.ndarray:
+    """Hoeveel lichter het zwart van de mat is dan het versterkingsmodel zegt (glans, strooilicht).
+
+    Glans van een lamp op de toner maakt de zwarte vakken lichter en laat wit bijna gelijk; een lokale
+    versterking kan dat niet beschrijven. Gemeten op zwarte pixels ruim binnen een vak (vlak bij een
+    rand mengen onscherpte en posefout de kleuren) waarvan het venster het matpatroon herhaalt, fijn
+    (8 px) waar genoeg bronnen zijn en grof (40 px) daartussen. Afwijkingen tot 3 grijswaarden zijn ruis.
+    """
+    gx = cv2.Sobel(p, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(p, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    black = sources & (p < 40.0) & (np.sqrt(gx * gx + gy * gy) < 4.0)
+    if np.count_nonzero(black) < 200:
+        return np.zeros_like(o)
+    r = o - model
+    wgt = black.astype(np.float32)
+    coarse = _normconv(r, wgt, 40.0, 0.0, min_weight=0.002)
+    fine = _normconv(r, wgt, 8.0, 0.0, min_weight=0.0)
+    density = _normconv(wgt, np.ones_like(wgt), 8.0, 0.0)
+    alpha = np.clip(density / 0.05, 0.0, 1.0)
+    lift = alpha * fine + (1.0 - alpha) * coarse
+    return (np.sign(lift) * np.maximum(np.abs(lift) - 3.0, 0.0)).astype(np.float32)
 
 
 def _local_stats(o: np.ndarray, p: np.ndarray, k: int):
@@ -236,7 +271,8 @@ def _normconv(values: np.ndarray, weight: np.ndarray, sigma: float, fallback: fl
 def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sigma: float = 6.0,
              tau_min: float = 14.0, texture_min: float = 10.0, min_area_frac: float = 2e-4,
              misreg_px: float = 0.4, ncc_mat: float = 0.75, window: int = 7, use_gain: bool = True,
-             use_texture_missing: bool = True, px_per_mm: float = 4.0, fill_mm: float = 3.5) -> ViewMasks:
+             use_texture_missing: bool = True, px_per_mm: float = 4.0, fill_mm: float = 3.5,
+             blur_px: float | None = None) -> ViewMasks:
     """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend.
 
     Twee soorten bewijs:
@@ -248,11 +284,21 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     geen zekere mat meer (en waar textuur verwacht wordt maar ontbreekt, is het object). De
     correlatie is ongevoelig voor versterking: een schaduw op de mat blijft mat, en de lokale
     versterking die daaruit volgt, corrigeert ook de egale vlakken in de schaduw.
+
+    Echte foto's wijken op nog drie manieren af van de voorspelde mat, en daar past het masker zich
+    per foto op aan: onscherpte (`blur_px`, gemeten in preflight.py; de voorspelling wordt even
+    onscherp gemaakt), een kleine posefout (de tolerantie aan patroonranden wordt gemeten aan de mat
+    zelf, in plaats van vast 0,4 px) en glans (zwart dat lichter is dan de versterking zegt).
     """
     if observed.ndim == 3:
         observed = cv2.cvtColor(observed, cv2.COLOR_BGR2GRAY)
     o = cv2.GaussianBlur(observed.astype(np.float32), (0, 0), 0.8)
-    p = cv2.GaussianBlur(pred.astype(np.float32), (0, 0), 0.8)
+    p = pred.astype(np.float32)
+    if blur_px is not None and blur_px > 1.0:
+        # een bewogen of onscherpe foto: de voorspelling (zelf ~0,5 px vaag) even vaag maken, anders geeft
+        # elke zwart-witrand van de mat aan weerszijden een afwijking die op object lijkt
+        p = cv2.GaussianBlur(p, (0, 0), float(np.sqrt(blur_px ** 2 - 1.0)))
+    p = cv2.GaussianBlur(p, (0, 0), 0.8)
     a, b, sigma = _robust_affine(o, p, valid)
 
     # traag verlopende belichtingsverschillen wegwerken (genormaliseerde convolutie over de mat)
@@ -268,42 +314,24 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     textured = valid & (s_pred > texture_min)
     mat_seen = textured & (ncc > ncc_mat) & (s_obs > 0.25 * s_pred) & (s_obs < 2.5 * s_pred)
     # Bron voor de lokale versterking: alleen vensters waar niveau en contrast dezelfde versterking
-    # geven, zoals bij mat in schaduw of glans. Een objectrand die toevallig met het patroon
-    # correleert (bijv. de rand van een gat langs een vakrand) geeft twee verschillende 'versterkingen'
-    # en zou anders het object in de buurt als beschaduwde mat laten doorgaan.
+    # geven, zoals bij mat in schaduw. Een objectrand die toevallig met het patroon correleert (bijv. de
+    # rand van een gat langs een vakrand) geeft twee verschillende 'versterkingen' en zou anders het
+    # object in de buurt als beschaduwde mat laten doorgaan. (Glans maakt zwart lichter en laat wit
+    # bijna gelijk: dat is geen versterking, en daarvoor is er de zwart-optilling hieronder.)
     g_level = mo / np.maximum(a * mp + b, 1.0)
     g_contrast = s_obs / np.maximum(s_pred, 1e-3)
     gain_src = mat_seen & (np.abs(np.log(np.maximum(g_level, 1e-3) / np.maximum(g_contrast, 1e-3))) < 0.25)
-
-    # tolerantie voor een kleine posefout: evenredig met de lokale gradiënt van de voorspelling
-    # (een vast 3x3-min/max-venster is te ruim: objectpixels op patroonranden zouden dan 'mat' lijken)
-    gx = cv2.Sobel(p, cv2.CV_32F, 1, 0, ksize=3) / 8.0
-    gy = cv2.Sobel(p, cv2.CV_32F, 0, 1, ksize=3) / 8.0
-    grad = misreg_px * abs(a) * np.sqrt(gx * gx + gy * gy)
     texture_missing = textured & (s_pred > 1.5 * texture_min) & (ncc < 0.3) & (s_obs < 0.35 * s_pred)
     if not use_texture_missing:
         texture_missing = np.zeros_like(textured)
-    k3 = np.ones((3, 3), np.uint8)
-    min_area = min_area_frac * observed.size
 
-    def foreground(gain):
-        bgv = gain * (a * p + b)
-        res = np.maximum(np.abs(o - bgv) - gain * grad, 0.0)
-        sel = valid & mat_seen if mat_seen.sum() > 1000 else valid
-        sig = 1.4826 * float(np.median(np.abs((o - bgv)[sel][::7]))) + 1e-3
-        tau = max(k_sigma * sig, tau_min)
-        fg = (valid & ((res > tau) | texture_missing)).astype(np.uint8)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3) > 0
-        large = _drop_small(fg, min_area)
-        return large, fg & ~large, bgv, res, tau, sig
-
-    # lokale versterking (schaduw, glans): verhouding van lokale sommen van foto en voorspelling,
-    # alleen over pixels waarvan het venster het matpatroon herhaalt (objectpixels tellen dus niet
-    # mee). Tweede ronde zonder pixels die niet bij die versterking passen (bijv. een objectrand
-    # met toevallig hoge correlatie). Kleine afwijkingen (< 3%) zijn ruis en worden 1.
+    # lokale versterking (schaduw): verhouding van lokale sommen van foto en voorspelling, alleen over
+    # pixels waarvan het venster het matpatroon herhaalt (objectpixels tellen dus niet mee). Tweede ronde
+    # zonder pixels die niet bij die versterking passen (bijv. een objectrand met toevallig hoge
+    # correlatie). Kleine afwijkingen (< 3%) zijn ruis en worden 1.
     den_img = a * p + b
     gain = np.ones_like(o)
+    lift = np.zeros_like(o)
     if use_gain:
         # Niet vlak naast bewijs voor het object: textuur die verwacht wordt maar ontbreekt (binnen een
         # halve vensterbreedte plus één pixel). Anders kan een objectrand die samenvalt met een vakrand
@@ -311,20 +339,58 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         # schaduw' de versterking omlaag trekken, en valt het object ernaast weg als beschaduwd wit.
         # Niet ruimer: een slagschaduw ligt direct naast het object en heeft zijn bronnen juist daar.
         # (Een afwijking op een egaal stuk mat telt niet als bewijs: dat kan net zo goed schaduw zijn.)
-        evidence = texture_missing.astype(np.uint8)
-        near_obj = cv2.dilate(evidence, np.ones((window + 2, window + 2), np.uint8)) > 0
+        near_obj = cv2.dilate(texture_missing.astype(np.uint8), np.ones((window + 2, window + 2), np.uint8)) > 0
         gain_src &= ~near_obj
         src = gain_src.astype(np.float32)
+        # Waar in de buurt geen bronnen zijn (de witte rand van het papier, midden in een groot vak), het
+        # grove verloop volgen in plaats van 'geen schaduw': een schaduw van hand of telefoon valt ook
+        # over de rand. Niet binnen ~10 mm van ontbrekende textuur: daar ontbreken de bronnen juist
+        # door het object, en een doorgetrokken schaduw zou stukken object als beschaduwde mat laten
+        # doorgaan (gaatjes midden in het object).
+        reach = int(10.0 * px_per_mm)
+        obj_zone = cv2.dilate(texture_missing.astype(np.uint8), np.ones((2 * reach + 1, 2 * reach + 1), np.uint8)) > 0
         for _ in range(2):
             num = cv2.GaussianBlur(o * src, (0, 0), 6.0)
             den = cv2.GaussianBlur(den_img * src, (0, 0), 6.0)
             wsum = cv2.GaussianBlur(src, (0, 0), 6.0)
-            gain = np.where(wsum > 0.05, np.clip(num / np.maximum(den, 1e-3), 0.2, 2.5), 1.0).astype(np.float32)
+            coarse = np.clip(_normconv(o, src, 40.0, 1.0, min_weight=0.002)
+                             / np.maximum(_normconv(den_img, src, 40.0, 1.0, min_weight=0.002), 1e-3), 0.2, 2.5)
+            coarse = np.where(obj_zone, 1.0, coarse)
+            gain = np.where(wsum > 0.05, np.clip(num / np.maximum(den, 1e-3), 0.2, 2.5), coarse).astype(np.float32)
             fit = np.abs(o - gain * den_img) < np.maximum(3.0 * sigma, 0.08 * gain * den_img)
             src = (gain_src & fit).astype(np.float32)
         dev = gain - 1.0
         gain = (1.0 + np.sign(dev) * np.maximum(np.abs(dev) - 0.03, 0.0)).astype(np.float32)
-    fg, specks, bgv, res, tau, sigma = foreground(gain)
+        lift = _black_lift(o, p, gain * den_img, mat_seen & ~near_obj)
+    q = p / 255.0
+    bgv = gain * den_img + lift * (1.0 - q)
+    contrast = np.maximum(gain * abs(a) * 255.0 - lift, 1.0)  # lokaal verschil tussen wit en zwart van de mat
+
+    # tolerantie voor een kleine posefout: evenredig met de lokale gradiënt van de voorspelling
+    # (een vast 3x3-min/max-venster is te ruim: objectpixels op patroonranden zouden dan 'mat' lijken)
+    gx = cv2.Sobel(p, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(p, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    gmag = contrast / 255.0 * np.sqrt(gx * gx + gy * gy)  # helling van de voorspelde mat (grijswaarden/pixel)
+    # Posefout per foto, gemeten aan de mat zelf: de afwijking aan duidelijke patroonranden gedeeld door
+    # de helling daar is de verschuiving in pixels. Een synthetische scan blijft op 0,4 px; bij een echte
+    # foto (onscherpe kalibratiefoto's, een niet helemaal vlakke mat) is het vaak 0,5-1,5 px.
+    misreg = misreg_px
+    strong = mat_seen & (gmag > 20.0)
+    if np.count_nonzero(strong) > 500:
+        misreg = float(np.clip(np.percentile(np.abs(o - bgv)[strong] / gmag[strong], 75), misreg_px, 2.5))
+    res = np.maximum(np.abs(o - bgv) - misreg * gmag, 0.0)
+    # ruis over alle zekere mat, randen inbegrepen: alleen de vlakke stukken geeft een lagere drempel,
+    # en dan telt de rand van een slagschaduw (die de versterking niet helemaal volgt) als object
+    sel = valid & mat_seen if mat_seen.sum() > 1000 else valid
+    sigma = 1.4826 * float(np.median(np.abs((o - bgv)[sel][::7]))) + 1e-3
+    tau = max(k_sigma * sigma, tau_min)
+    k3 = np.ones((3, 3), np.uint8)
+    min_area = min_area_frac * observed.size
+    fg = (valid & ((res > tau) | texture_missing)).astype(np.uint8)
+    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
+    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3) > 0
+    large = _drop_small(fg, min_area)
+    fg, specks = large, fg & ~large
     fg = _refine_boundary(fg, o, bgv, valid, tau)
     mat_ok, amb = mat_seen, None
     radius = fill_mm * px_per_mm
@@ -334,7 +400,7 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         m = int(radius) + window + 2
         sl = (slice(max(y - m, 0), y + h + m), slice(max(x - m, 0), x + w + m))
         out = _resolve_ambiguity(fg[sl], specks[sl], o[sl], bgv[sl], valid[sl], res[sl], mat_seen[sl], tau,
-                                 radius, window, min_area)
+                                 radius, window, min_area, contrast[sl])
         if out is not None:
             fg, amb, mat_ok = np.zeros_like(fg), np.zeros_like(fg), mat_seen.copy()
             fg[sl], amb[sl], mat_ok[sl] = out
@@ -349,7 +415,7 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     # 'onbekend' in plaats van de fit naar binnen te duwen.
     match = valid & ~fg & (res <= tau)
     mean15 = cv2.blur(p, (15, 15))
-    texture15 = np.sqrt(np.maximum(cv2.blur(p * p, (15, 15)) - mean15 * mean15, 0.0)) * abs(a)
+    texture15 = np.sqrt(np.maximum(cv2.blur(p * p, (15, 15)) - mean15 * mean15, 0.0)) * (contrast / 255.0)
     near_seen = cv2.dilate(mat_seen.astype(np.uint8), np.ones((window, window), np.uint8)) > 0
     inner = cv2.erode(fg.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(np.float32)
     obj_den = cv2.boxFilter(inner, -1, (11, 11), normalize=False)

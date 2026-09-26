@@ -167,3 +167,18 @@ def test_a_kink_without_evidence_is_removed_but_a_real_one_stays():
     part, _, removed = pipeline._simplify_outline(bevel, K, views, silhouette.energy(bevel, K, views),
                                                   log=lambda m: None)
     assert removed == 0 and part.outer.n == 5
+
+
+@pytest.mark.slow
+def test_a_part_moved_halfway_through_the_photos_is_reported(tmp_path):
+    """Eerst rondom in de ene ligging, dan verschoven en gedraaid: melden, niet een half model maken."""
+    spec = mat.PRESETS["A4"]
+    kw = dict(rings=((40.0, 8), (65.0, 6)), top_views=3)
+    first = render.render_scan(render.place(pipeline.demo_part(), spec, angle_deg=17.0, offset=(5, -8)), spec,
+                               seed=1, **kw)
+    moved = render.render_scan(render.place(pipeline.demo_part(), spec, angle_deg=60.0, offset=(45, 25)), spec,
+                               seed=2, **kw)
+    images = [(f"a_{v.name}", v.image) for v in first] + [(f"b_{v.name}", v.image) for v in moved]
+    with pytest.raises(pipeline.ScanError, match="niet in alle foto's op dezelfde plek") as err:
+        pipeline.run_scan(images, tmp_path, pipeline.ScanOptions(), log=lambda m: None)
+    assert "2 groepen" in str(err.value)
