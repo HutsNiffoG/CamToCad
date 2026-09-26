@@ -276,7 +276,27 @@ Nog gevonden, niet opgelost:
 
 - De snelle modelrenderer van de pixelfit (`silhouette.render`) tekent in schuine aanzichten ~0,15–0,18 px te ruim (gemeten tegen 5 × 5 supersampling; vermoedelijk dunne wandvierhoeken die na het krimpen van 0,5 px omklappen). Daardoor komt de pixelfit ~0,05 mm te klein uit. De randfit heeft er geen last van: die vergelijkt direct met de maskers. Zie V29.
 - De startcontour kan bij een afgeronde hoek een knikje van een paar graden krijgen (een koorde die bijna in het verlengde van de rand ligt). `_simplify_outline` haalt het weg, maar het maakt de startcontour ~2% te groot.
-- Wie de meetlijnen precies 100,0 mm meet, is niet te onderscheiden van wie ze niet opgeeft; beide krijgen 0,3% printschaal in de U95.
+- Wie de meetlijnen precies 100,0 mm meet, is niet te onderscheiden van wie ze niet opgeeft; beide krijgen 0,3% printschaal in de U95. (Opgelost in v0.6, §3f.)
+
+## 3f. Opgelost in v0.6 (V15, V19, meetlijnen)
+
+| Wat | Hoe | Waar |
+|---|---|---|
+| Sleuven en uitsparingen (V15) | Een doorgaande sleuf of rechthoekige uitsparing is een eigen feature: lengte, breedte, richting en hoekafronding; een sleuf is een rechthoek met afronding = halve breedte. Tot v0.5 bleef zo'n opening een ruwe polygoon uit de startcontour die nooit werd gefit (door parallax te klein). Nu doet hij mee in de pixelfit en de randfit, krijgt hij per maat een U95, en wordt hij gesnapt zoals een ontwerper hem maatvoert: een sleuf met breedte (vaak een doorgangsmaat, ISO 273) en hartafstand, een uitsparing met lengte, breedte en hoekstraal; de as haaks als hij binnen 2° haaks staat. CAD en script bouwen hem met dezelfde hulpfunctie (`sleuf_hoeken`) | `profile.py`, `silhouette.py`, `edgefit.py`, `cadmodel.py`, `cadhelpers.py`, `report.py` |
+| Welke vorm? | Uit de bovenaanzichten alleen is dat niet betrouwbaar: parallax rondt de hoeken van een uitsparing af (R1,5 leek R3,4), en de doorkijk door een gat is in schuine foto's lensvormig, tot bijna 2 x zo lang als breed. De startcontour kiest daarom alleen een sleuf of rechthoek als die duidelijk beter past dan een cirkel (op de volledige contour, niet op een vereenvoudigde polygoon die de hoeken afsnijdt). Na de pixelfit worden de alternatieven getoetst op de silhouetten, die de parallax exact doorrekenen: elk gat ≥ 3 mm ook als uitsparing (gericht als de contour), een korte sleuf ook als gat, en een overgebleven polygoon ook als sleuf of rechthoek. De vorm die duidelijk beter past blijft; bij gelijke stand de eenvoudigste. In de stresstests werd de uitsparing van 10 x 8 mm in drie van de zes scenario's eerst als gat Ø 10 gezien, en één keer zelfs naar Ø 10,0 gesnapt; met de toets geen enkele keer meer | `profile.py`, `holes.py`, `pipeline.py` |
+| Niet 2,5D (V19) | Na de randfit per punt van de bovenrand de mediaan (over de foto's) van de afstand tot de maskerrand, waar er bewijs is (zekere mat vlakbij, of het punt ligt al voorbij de strook zonder bewijs). Een stuk van ≥ 8 mm dat meer dan 0,3 mm afwijkt, is een trede of plaatselijke afschuining (of een verhoging), met de plaats in werkcoördinaten. En per foto: steekt de bovenrand in de lage foto's (< 45°) boven het model uit en in de hoge (≥ 60°) niet, dan is de bovenrand rondom afgeschuind of afgerond. Zonder die toets gaf een beugel met rondom 2 mm afschuining stil een hoogte van 10,07 in plaats van 12 mm (IoU 0,998, "betrouwbaarheid: normaal") | `prismcheck.py`, `pipeline.py` |
+| Meetlijnen | "Niet gemeten" is iets anders dan "gemeten: 100,0 mm". De webpagina stuurt alleen ingevulde meetlijnen mee (de velden zijn leeg met 100,0 als voorbeeld), de CLI alleen met `--meetlijn`. Gemeten telt in U95 als 0,05% printschaal, niet gemeten als 0,3% | `pipeline.py`, `cli.py`, `server/`, `validate.py` |
+
+De drempels van V19 komen uit gerenderde scans: op elf prisma's bleef de bovenrand plaatselijk binnen 0,11 mm (behalve 0,46 mm over ~5 mm bij de schaduwbult van het schaduwscenario, dat al gemarkeerd wordt), en het verschil tussen lage en hoge foto's tussen 0,00 en +0,04 mm. Een trede van 6 mm gaf tot 2,1 mm over 77 mm contour, een afschuining van 2 mm rondom −0,06 mm, een liggende cilinder +0,40 mm. Een afschuining van 1 mm blijft daaronder.
+
+**Stresstests v0.6.** De vijftien scenario's van §3e (zelfde scans) plus zes met een beugel met gat, sleuf (6,6 breed, hartafstand 16) en uitsparing (10 x 8, R1,5), en vier onderdelen die geen prisma zijn.
+
+- **Gewone prisma's:** dezelfde maten als v0.5, tot op de duizendste; alle 101 maten zonder waarschuwing binnen U95, geen foute snap. Geen gat werd een uitsparing, en de vormtoets markeerde geen prisma.
+- **Beugel met sleuf en uitsparing** (basis, donker, licht, schaduw, weinig lage foto's, 40° gedraaid): in alle zes gevonden als gat, sleuf en uitsparing. Van de 80 maten zonder waarschuwing valt 98% binnen U95, geen foute snap. Sleufbreedte 6,54–6,66 (waar 6,6), hartafstand 15,91–16,03 → 16; uitsparing 9,96–10,04 x 7,92–8,18 → 10 x 8, hoekstraal 1,49–1,92 (waar 1,5; niet gesnapt). De twee maten buiten U95 zitten bij het donkere onderdeel: daar liep de randfit tegen zijn vertrouwensgebied (het gat, zwart op zwart) en bleef de pixelfit met de grove U95 staan; gat −0,17 en uitsparingsbreedte +0,18 mm bij U95 ±0,16.
+- **Zonder de toetsen na de fit** (eerste versie) werd de uitsparing in drie van de zes scenario's een gat Ø 10, één keer gesnapt naar Ø 10,0, en bleef de sleuf twee keer een polygoon.
+- **Rekentijd:** op zich, één scan tegelijk, de beugel 64 → 74 s en het kleine plaatje 35 → 38 s: de toets of een gat een uitsparing is, kost ~5 s per gat. (In de regressie liepen drie scans tegelijk; daar waren de tijden hoger.)
+- **Geen prisma:** afschuining van 2 mm rondom → gemeld (was stil: hoogte 10,07 in plaats van 12, "betrouwbaarheid: normaal"); trede van 6 mm over de laatste 20 mm → gemeld met plaats ("van (60, 0) tot (60, 40), over 77 mm"); liggende cilinder → gemeld (naast de al lage IoU); prisma zonder gaten → normaal.
+
 
 ## 4. Open verbeterpunten, op prioriteit
 
@@ -315,11 +335,11 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 
 | # | Verbetering | Aanpak | Impact | Moeite |
 |---|---|---|---|---|
-| V15 | Sleuven en rechthoekige uitsparingen parametrisch | Nu zijn het ruwe polygonen, door parallax te klein. Een sleuf- en rechthoekmodel dat ook gefit wordt | H | S–M |
+| V15 | ~~Sleuven en rechthoekige uitsparingen parametrisch~~ (gedaan in v0.6) | Gedaan: een rechthoek met afgeronde hoeken (een sleuf als de afronding de halve breedte is), gefit, gesnapt en met U95; de vorm wordt na de pixelfit getoetst (§3f). **Open:** sleuven en uitsparingen die aan de buitenrand uitkomen (een U-vormige inham), gebogen sleuven, en `camtocad valideer` voor sleufmaten | H | S |
 | V16 | Randen uit beeldgradiënten van de bovenaanzichten | Gatranden, verzinkingen, treden en afschuiningen zijn in silhouetten onzichtbaar maar in de foto wel te zien | H | M |
-| V17 | Getrapte prisma's en afschuiningen op de bovenrand | Hoogtezoektocht per pixel geeft niveaus; een afschuining als gelaagd prisma | H | L |
+| V17 | Getrapte prisma's en afschuiningen op de bovenrand | V19 meldt ze nu (en waar); nog modelleren: per contourstuk een eigen hoogte (trede), en een afschuining of afronding van de bovenrand als extra parameter die de randfit schat. De afwijkingen uit `prismcheck.py` geven een startwaarde | H | L |
 | V18 | Draaidelen die liggen | Een revolve-model, plus een generieke mesh-silhouetrenderer waarmee elk parametrisch CadQuery-sjabloon te fitten is | M–H | L |
-| V19 | "Niet 2,5D" herkennen | Melden in plaats van een fout model. Blinde gaten als vraag aan de gebruiker | M | M |
+| V19 | ~~"Niet 2,5D" herkennen~~ (gedaan in v0.6) | Gedaan: trede of plaatselijke afschuining langs de bovenrand, en een afschuining of afronding rondom (§3f). **Open:** een afschuining van ~1 mm (valt binnen de ruis), afschuiningen van gatranden (verzinkingen, V16), en blinde gaten als vraag aan de gebruiker | M | M |
 | V20 | Vrije vormen | [OpenMVS 2.4](https://github.com/cdcseacave/openMVS) (AGPL-3.0, dieptekaarten op de CPU, maskers, COLMAP-import) met de matposes. Daarna primitieven fitten (pyransac3d, Open3D, CGAL) en naar CadQuery. Geleerde CAD-voorstellen ([CADReasoner](https://github.com/zhemdi/CADReasoner) Apache-2.0, [CADENA](https://arxiv.org/abs/2608.00799) MIT) hooguit als optionele GPU-plugin, met de parameters altijd opnieuw gefit op de foto's. De auteurs van CADENA melden zelf een flinke kwaliteitsdaling op echte onderdelen | M | L |
 
 ### 4.4 Software, prestaties, distributie
@@ -354,8 +374,9 @@ Voor een project dat AGPL-3.0 wil worden, telt ook de licentie van de **gewichte
 2. **v0.4 (gedaan):** de eerste stap van V8 (zwart op zwart, wit op wit), hoekpunten weghalen uit V4, en de afrondingsproef in de fit (§3c).
    **v0.4.1 (gedaan):** na de eerste echte fotoset: een verplaatst onderdeel herkennen, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans (§2c, §3d).
 3. **v0.5 (gedaan):** V2 (fit op randen), V3 (U95 per maat) en de rest van V4 (gaten toevoegen), afgesteld op gerenderde scans (§3e). Het bijstellen op de Fase 0-metingen volgt met V1.
-4. **v0.6:** de objectklasse (V15–V19) en de rest van de segmentatiecascade (V8: GrabCut, kleur, schaduw; V10).
-5. **v0.7 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
+4. **v0.6 (gedaan):** sleuven en uitsparingen (V15), "niet 2,5D" herkennen (V19), en gemeten meetlijnen apart van 100,0 mm (§3f).
+5. **v0.7:** treden en afschuiningen modelleren (V17), randen uit de grijswaarden (V16, V2-open), de exacte modelrenderer (V29), en de rest van de segmentatiecascade (V8: GrabCut, kleur, schaduw; V10).
+6. **v0.8 en verder:** draaidelen (V18), vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
 
 ## 7. Verantwoording
 

@@ -1,11 +1,11 @@
-# Route A — lokaal en open source (v0.5)
+# Route A — lokaal en open source (v0.6)
 
 Dit is de uitvoering van profiel A uit [OPEN-SOURCE-LOKAAL.md](OPEN-SOURCE-LOKAAL.md): foto's van een onderdeel op een geprinte kalibratiemat gaan naar je eigen pc, die er een CAD-model van maakt. Er is geen cloud nodig en er zijn geen licentiekosten; alle afhankelijkheden hebben een permissieve open-sourcelicentie.
 
 | | |
 |---|---|
-| **Status** | v0.5 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw in v0.5: de maten worden op subpixelniveau op de silhouetranden gefit, elke maat krijgt een eigen U95 (jackknife over de foto's, afgesteld op 95% dekking), en een gat dat de startcontour miste wordt alsnog toegevoegd. In v0.4.1, na de eerste echte fotoset: een controle of het onderdeel tussendoor is verplaatst, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans. In v0.4: zwarte en witte onderdelen op mat v2, afrondingen en overbodige hoekpunten in de fit. Sinds v0.3: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
-| **Objectklasse** | 2,5D-onderdelen die plat op de mat liggen: extrusie van een contour (rechte randen met scherpe of afgeronde hoeken, of een cirkel) met doorgaande gaten |
+| **Status** | v0.6 — werkt end-to-end op synthetische scans en is gehard tegen storingen uit echte foto's (schaduw, weinig of scheve bovenaanzichten, OpenCV 4.x/5.x). Nieuw in v0.6: sleuven en rechthoekige uitsparingen als echte, maatgevoerde features, en een melding als het onderdeel niet 2,5D is (een trede, of een afschuining rondom), in plaats van een stil fout model. In v0.5: de maten worden op subpixelniveau op de silhouetranden gefit, elke maat krijgt een eigen U95 (jackknife over de foto's, afgesteld op 95% dekking), en een gat dat de startcontour miste wordt alsnog toegevoegd. In v0.4.1, na de eerste echte fotoset: een controle of het onderdeel tussendoor is verplaatst, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans. In v0.4: zwarte en witte onderdelen op mat v2, afrondingen en overbodige hoekpunten in de fit. Sinds v0.3: mat v2, fotocontrole vooraf, printschaal in X en Y, en gereedschap om scans met schuifmaatmetingen te vergelijken ([Fase 0](FASE-0.md)) |
+| **Objectklasse** | 2,5D-onderdelen die plat op de mat liggen: extrusie van een contour (rechte randen met scherpe of afgeronde hoeken, of een cirkel) met doorgaande gaten, sleuven en rechthoekige uitsparingen |
 | **Uitvoer** | `model.step`, `model.stl`, parametrisch CadQuery-script `model.py`, meetrapport `report.html` / `report.json` |
 | **Platform** | Windows, macOS en Linux met Python 3.10–3.12; geen GPU nodig |
 
@@ -29,7 +29,7 @@ camtocad demo --uit camtocad-demo
 
 1. **Mat printen.** `camtocad mat --formaat A4` (of `A3`, `Letter`) schrijft `kalibratiemat_A4.pdf`.
    - Print op 100% (werkelijke grootte), op mat papier, en leg de mat vlak op een stijve ondergrond.
-   - Meet beide meetlijnen van 100,0 mm na: **X** onder de mat, **Y** links. Wijken ze af, geef ze dan op, bijvoorbeeld `--meetlijn 99.6 99.8`, of in de velden op de telefoonpagina. De printschaal wordt dan per richting gecorrigeerd.
+   - Meet beide meetlijnen van 100,0 mm na: **X** onder de mat, **Y** links, en geef ze op, bijvoorbeeld `--meetlijn 99.6 99.8`, of in de velden op de telefoonpagina. De printschaal wordt dan per richting gecorrigeerd. Geef ze ook op als ze precies 100,0 mm zijn: zonder meting rekent de U95 met een onbekende printschaal (0,3%, ±0,5 mm op 80 mm).
    - Dit is mat v2: in elk zwart vak een raster witte stippen, zodat ook een donker onderdeel op een zwart vak te zien is. Een eerder geprinte mat (v1) werkt nog en wordt automatisch herkend, net als het formaat.
 2. **Foto's maken.** Leg het onderdeel plat in het midden van de mat, bij diffuus licht. Maak 30–60 foto's met de gewone camera-app van je telefoon (JPG):
    - **raak het onderdeel niet aan tot de laatste foto**: één scan is één vaste ligging. Wil je de mat draaien, draai dan mat en onderdeel samen. Een andere kant (omgedraaid, op zijn kant) is een aparte scan;
@@ -47,7 +47,7 @@ camtocad demo --uit camtocad-demo
 Opties voor `scan`:
 
 - `--mat`: `A4`, `A3`, `Letter`, `A4-v1` of `A3-v1`. Standaard wordt de mat herkend aan de markers.
-- `--meetlijn X [Y]`: gemeten lengte van de 100 mm-lijnen.
+- `--meetlijn X [Y]`: gemeten lengte van de 100 mm-lijnen. Weglaten betekent: niet gemeten.
 - `--max-zijde 2000`: werkresolutie.
 - `--snapdrempel 0.8`.
 - `--inch`: snappen naar inchmaten.
@@ -78,7 +78,9 @@ Meest voorkomende meldingen:
   - Passen maar een paar foto's niet (minder dan een kwart), dan gaat de verwerking door zonder die foto's. Het rapport noemt ze bij de waarschuwingen: "foto('s) niet gebruikt omdat ze niet bij de rest passen". Dat kan ook een hand of ander voorwerp in beeld zijn, of een mislukt masker.
   - Een klein duwtje (een paar millimeter) valt hier niet op. Dat zie je aan "betrouwbaarheid: laag" in het rapport: het model past dan in een deel van de foto's slecht (in de test met 10 mm verschuiving: IoU 0,69 in de slechtste foto).
 - **"gekozen mat A4, maar de foto's tonen mat A3"**: de mat op de foto's is gebruikt. Controleer of dat de mat is die je bedoelde.
-- **"betrouwbaarheid: laag"** in het rapport. Het model is gemaakt, maar iets klopt niet; de reden staat erbij. Bijvoorbeeld een gat dat als niet-ronde uitsparing is herkend, of een model dat in sommige foto's slecht past. Controleer die maten.
+- **"betrouwbaarheid: laag"** in het rapport. Het model is gemaakt, maar iets klopt niet; de reden staat erbij. Bijvoorbeeld een uitsparing die geen gat, sleuf of rechthoek is, of een model dat in sommige foto's slecht past. Controleer die maten.
+- **"geen 2,5D-vorm?"** in het rapport: het onderdeel past niet in één prisma. "Langs de rand van (60, 0) tot (60, 40) ligt de bovenkant lager" is een trede of een plaatselijke afschuining op die plek (werkcoördinaten, zoals in het rapport). "In de lage foto's steekt de bovenrand rondom iets boven het model uit" is een afschuining of afronding van de hele bovenrand: de gemeten hoogte is dan die van de onderkant van de afschuining, niet de totale hoogte. Meet in beide gevallen de hoogtes na met een schuifmaat; het model zelf heeft één hoogte.
+- **"gat Ø … is een uitsparing"** of **"korte sleuf … is een gat"** in de log: de startcontour zag een opening anders dan hij is (door parallax lijkt een uitsparing in de bovenaanzichten ronder, en een schuin gezien gat langwerpig). De fit heeft beide vormen geprobeerd en houdt de vorm die het best bij de silhouetten past.
 - **"randfit niet gebruikt"** in de log: de subpixelfit wilde meer dan 0,5 mm van de pixelfit afwijken, meestal omdat de contour rommelig is. De maten komen dan uit de pixelfit, en U95 is de grove schatting uit resolutie en aantal foto's; het rapport noemt de methode onder de maattabel. Dit gaat meestal samen met "betrouwbaarheid: laag".
 - **"gat toegevoegd"** in de log: een gat ontbrak in de startcontour, maar in de foto's recht van boven is daar door het bovenvlak heen mat te zien, en het model past met het gat duidelijk beter. Controleer het gat als het onderdeel daar geen gat hoort te hebben.
 - **Foto's "niet gebruikt (afwijkend formaat)"**: andere lens, zoom of bijgesneden. Staand opgeslagen foto's worden automatisch teruggedraaid.
@@ -96,8 +98,9 @@ Meest voorkomende meldingen:
 | Lokaliseren | `hull.py` | Grove visual hull (2 mm): waar ligt het object, en een bovengrens voor de hoogte | §5.3 [R3c] |
 | Startmodel | `initial.py`, `profile.py` | Hoogte zoeken waarop de bovenaanzichten samenvallen, terugprojecteren → contour → randen, afrondingen, gaten; met terugvalopties en een uitgelegde fout | §6.3–6.5 |
 | Model fitten | `silhouette.py`, `pipeline.py` | Analysis-by-synthesis: model-silhouet renderen in élke foto, pixelverschil minimaliseren (hoogte, randen, afrondingen, gaten). Daarna per hoek grote stappen in de afronding proberen, en hoekpunten weghalen waar het model zonder even goed past (een knik of een korte schuine rand zonder bewijs) | §6.8, §7.3 |
-| Gemiste gaten | `holes.py`, `pipeline.py` | Waar de foto's recht van boven door het bovenvlak heen mat zien, ontbreekt een gat: het wordt toegevoegd als het model er duidelijk beter door past. Een ronde uitsparing wordt een gat | §7.3 |
+| Gaten, sleuven, uitsparingen | `profile.py`, `holes.py`, `pipeline.py` | Een opening in de startcontour wordt een gat, een sleuf of een rechthoek met afgeronde hoeken, of blijft een polygoon. Na de pixelfit worden de alternatieven getoetst: gat of uitsparing, korte sleuf of gat, polygoon of sleuf; de vorm die het best bij de silhouetten past, blijft. Waar de foto's recht van boven door het bovenvlak heen mat zien, ontbreekt een gat: het wordt toegevoegd als het model er duidelijk beter door past | §7.3 |
 | Randfit | `edgefit.py` | Kleinste kwadraten op de subpixelafstand tussen de geprojecteerde modelranden (onder- of bovenrand, per foto) en de maskerrand, robuust tegen uitschieters, binnen ±0,5 mm van de pixelfit | §6.8, §7.3 |
+| Vorm | `prismcheck.py` | Past een prisma wel? Een stuk bovenrand dat in alle foto's lager of hoger ligt dan het model (trede, plaatselijke afschuining), of een bovenrand die in de lage foto's boven het model uitsteekt (afschuining of afronding rondom), wordt een melding in plaats van een stil compromis | §7.3 |
 | Onzekerheid | `uncertainty.py` | Per maat: de spreiding als steeds een zesde van de foto's wegvalt (jackknife), plus een systematisch deel per soort maat en de printschaal. Afgesteld op 95% dekking op gerenderde scans | §6.1, §8 |
 | Ontwerpintentie | `snapping.py`, `cadmodel.py` | Werkassenstelsel met datum, randen exact haaks, Bayesiaans snappen (hele mm, ISO 273, tapboormaten, standaardstralen), steekcirkels | §6.6 |
 | CAD | `cadmodel.py`, `cadhelpers.py` | OpenCascade-solid via CadQuery, STEP/STL-export, leesbaar script met benoemde maten | §6.9 |
@@ -109,7 +112,7 @@ Meest voorkomende meldingen:
 
 ## Resultaten op synthetische scans
 
-Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het object), met lensvervorming, ruis en belichtingsverloop. De camera en de poses worden uit de foto's zelf bepaald.
+Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het object), met lensvervorming, ruis en belichtingsverloop. De camera en de poses worden uit de foto's zelf bepaald. De beugel met sleuf en uitsparing komt uit de stresstests (scenario met ruis, JPEG en vignettering).
 
 | Onderdeel | Maat | Waarheid | Gefit | Na snappen |
 |---|---|---|---|---|
@@ -119,36 +122,40 @@ Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het objec
 | L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 60,01 / 30,00 / 24,95 / 49,99, hoogte 8,03 | exact |
 | | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,19; de scherpe hoeken blijven scherp | R2,19 (niet gesnapt, binnen U95) |
 | | gat | Ø 5,5 op (15, 12) | Ø 5,47 op (15,01, 11,99) | Ø 5,5 (ISO 273 M5) op (15, 12) |
+| Beugel met sleuf en uitsparing | lengte × breedte × hoogte | 80 × 40 × 12 | 79,98 × 40,01 × 12,00 | 80 × 40 × 12 |
+| | sleuf | 6,6 breed, hartafstand 16, op (48, 20) | 6,62, hartafstand 15,94, op (47,98, 20,01) | 6,62 (niet gesnapt: 6,5 en 6,6 beide plausibel), hartafstand 16, op (48, 20) |
+| | uitsparing | 10 × 8, R1,5, op (70, 20) | 10,02 × 8,00, R1,60, op (69,99, 20,03) | 10 × 8, R1,60 (niet gesnapt), op (70, 20) |
 | Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,96 × 10,03 | Ø 50 × 10 |
 | | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,43 op Ø 34,98 | 4 × Ø 4,43 (niet gesnapt, binnen U95) op Ø 35, parametrisch patroon |
 
 Het rapport geeft bij elke maat een U95. Bij deze scans zijn geen meetlijnen opgegeven, dus telt 0,3% printschaal mee; bij lange maten overheerst die (±0,48 mm op 80 mm). Zonder die term is U95 ongeveer ±0,05 mm voor de hoogte, ±0,06 mm voor lengtes, ±0,08 mm voor gatposities, ±0,16 mm voor gaten en ±0,41 mm voor afrondingen. Met gemeten meetlijnen telt de printschaal voor 0,05%: een lengte van 80 mm krijgt dan ±0,10 mm.
 
-Over alle stresstests die geen waarschuwing geven (ook een zwart en een wit onderdeel, zie [ROUTE-A-VERBETERPUNTEN.md §3e](ROUTE-A-VERBETERPUNTEN.md#3e-opgelost-in-v05-v2-v3-v4)):
+Over alle stresstests die geen waarschuwing geven (ook een zwart en een wit onderdeel, zie [ROUTE-A-VERBETERPUNTEN.md §3e en §3f](ROUTE-A-VERBETERPUNTEN.md#3f-opgelost-in-v06-v15-v19-meetlijnen)):
 
 - buitenmaten binnen ±0,06 mm van de waarheid, hoogtes −0,02 tot +0,04 mm (v0.4.1 op dezelfde scans: ±0,11 en tot +0,07);
 - gaten −0,07 tot +0,01 mm. Eén uitzondering: bij het zwarte onderdeel ligt een gat boven een groot zwart markervlak, en dat komt 0,31 mm te klein uit, met een U95 van ±1,16 mm (niet gesnapt);
 - afrondingen 0 tot +0,18 mm; scherpe hoeken blijven scherp;
-- elke maat binnen zijn eigen U95 (101 van 101), en van de 84 gesnapte maten is er geen fout gesnapt.
+- elke maat binnen zijn eigen U95 (101 van 101), en van de 84 gesnapte maten is er geen fout gesnapt;
+- sleuven en uitsparingen in zes scenario's: sleufbreedte −0,06 tot +0,06 mm, hartafstand −0,09 tot +0,03 mm, uitsparing ±0,04 mm in lengte en −0,08 tot +0,18 mm in breedte; 98% van die maten binnen U95 (de twee missers bij het donkere onderdeel, waar de randfit niet werd gebruikt), geen foute snap.
 
-Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.5 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
+Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.6 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
 
 De eerste echte fotoset (een zwarte accu op mat v1) is niet gelukt: het onderdeel lag in minstens vier verschillende liggingen, en een zwart onderdeel op mat v1 is op de zwarte vakken onzichtbaar. Wat dat opleverde staat in [ROUTE-A-VERBETERPUNTEN.md §2c](ROUTE-A-VERBETERPUNTEN.md#2c-de-eerste-echte-fotoset-september-2026).
 
-## Beperkingen van v0.5
+## Beperkingen van v0.6
 
-- **Objectklasse:** alleen 2,5D-onderdelen plat op de mat, met doorgaande gaten. Geen blinde gaten, kamers, treden in de hoogte, afschuiningen op de bovenrand, schroefdraad of vrije vormen. Afschuiningen op verticale hoeken worden als afronding benaderd; buitencontouren met bogen groter dan een hoekafronding (bijv. een sleufvorm) worden met rechte randen benaderd.
+- **Objectklasse:** alleen 2,5D-onderdelen plat op de mat, met doorgaande gaten, sleuven en rechthoekige uitsparingen. Geen blinde gaten, kamers, treden in de hoogte, afschuiningen op de bovenrand, schroefdraad of vrije vormen. Een trede of een afschuining rondom van ~2 mm wordt wel gemeld ("geen 2,5D-vorm?"), maar niet gemodelleerd; een afschuining van ~1 mm valt niet op, en zonder foto's onder 45° is een afschuining rondom niet te zien. Afschuiningen op verticale hoeken worden als afronding benaderd; buitencontouren met bogen groter dan een hoekafronding (bijv. een halfronde kop) worden met rechte randen benaderd. Een uitsparing die geen sleuf of rechthoek is (bijv. een L-vormige opening), blijft een polygoon en wordt gemarkeerd.
 - **Bovenaanzichten zijn verplicht**: zonder foto's recht van boven stopt de verwerking met een duidelijke melding.
 - **Eén ligging per scan.** Een verplaatst of omgedraaid onderdeel wordt herkend en gemeld; een klein duwtje van een paar millimeter niet (zie "Als het niet lukt").
 - **Belichting:**
   - Schaduwen op de gestructureerde delen van de mat worden herkend.
   - Een harde slagschaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort markeert het resultaat dan als onbetrouwbaar (in de stresstests: altijd).
   - Gebruik diffuus licht, en mat papier voor de mat.
-- **Zwarte en witte onderdelen:** op mat v2 lukken ze in de stresstests. Waar het onderdeel even donker (of licht) is als de mat, telt de foto niet mee; binnen het onderdeel wordt zo'n stuk opgevuld, en de fit gebruikt alleen echt bewijs. Het zwakste punt is een gat boven een groot zwart vlak van een marker: de rand is daar in de bovenaanzichten niet te zien. In de stresstest van v0.5 komt zo'n gat 0,31 mm te klein uit, maar met een U95 van ±1,16 mm: het rapport laat zien dat die maat onzeker is, en hij wordt niet gesnapt. v0.4.1 gaf op dezelfde scans Ø 5,99 ± 0,16 en snapte naar 6,0 (waar: 6,6). Op een mat v1 (zonder stippen) mislukt een zwart onderdeel nog; het resultaat wordt dan gemarkeerd. Print mat v2.
-- **Onzekerheid (U95)** per maat: afgesteld op gerenderde scans, waar 95–100% van de fouten erbinnen valt. Op echte foto's kan de systematiek groter zijn; meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)). Zonder opgegeven meetlijnen telt 0,3% printschaal mee (±0,5 mm op 80 mm): meet de meetlijnen voor een kleinere U95. Ook wie precies 100,0 mm meet, krijgt die 0,3%, want dat is niet te onderscheiden van niets opgeven.
+- **Zwarte en witte onderdelen:** op mat v2 lukken ze in de stresstests. Waar het onderdeel even donker (of licht) is als de mat, telt de foto niet mee; binnen het onderdeel wordt zo'n stuk opgevuld, en de fit gebruikt alleen echt bewijs. Het zwakste punt is een gat boven een groot zwart vlak van een marker: de rand is daar in de bovenaanzichten niet te zien. In de stresstests van v0.5 en v0.6 komt zo'n gat 0,31 mm te klein uit, maar met een U95 van ±1,16 mm: het rapport laat zien dat die maat onzeker is, en hij wordt niet gesnapt. v0.4.1 gaf op dezelfde scans Ø 5,99 ± 0,16 en snapte naar 6,0 (waar: 6,6). Op een mat v1 (zonder stippen) mislukt een zwart onderdeel nog; het resultaat wordt dan gemarkeerd. Print mat v2.
+- **Onzekerheid (U95)** per maat: afgesteld op gerenderde scans, waar 95–100% van de fouten erbinnen valt. Op echte foto's kan de systematiek groter zijn; meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)). Zonder opgegeven meetlijnen telt 0,3% printschaal mee (±0,5 mm op 80 mm): meet de meetlijnen voor een kleinere U95, en geef ze ook op als ze precies 100,0 mm zijn.
 - **Afrondingen** zijn het minst nauwkeurig (tot ±0,4 mm, U95 ~0,4 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
 - **Afrondingen kleiner dan ~4,5 pixels** (bij de demo ~1,1 mm) zijn niet te onderscheiden van scherpe hoeken en worden als scherp gemodelleerd; het rapport meldt dat.
-- **Rekentijd:** ~60–90 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen, waarvan ~4 s voor de controle op verplaatsing en ~5–20 s voor de randfit en de onzekerheid per maat; foto's worden standaard teruggeschaald naar 2000 pixels. Tot ~2,5 minuten als er overbodige hoekpunten uit de contour moeten (zwart onderdeel, schaduw). De fotocontrole kost ~0,1–0,3 s per foto.
+- **Rekentijd:** ~60–90 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen (de demobeugel: 74 s), waarvan ~4 s voor de controle op verplaatsing, ~5–20 s voor de randfit en de onzekerheid per maat, en ~5 s per gat om te toetsen of het geen uitsparing is; foto's worden standaard teruggeschaald naar 2000 pixels. Tot ~2,5 minuten als er overbodige hoekpunten uit de contour moeten (zwart onderdeel, schaduw). De fotocontrole kost ~0,1–0,3 s per foto.
 - **Nog geen native app:** de telefoon gebruikt de browser. De geleide AR-opname uit het architectuurdocument volgt met de Android-app.
 
 ## Licenties
@@ -161,7 +168,7 @@ Een uitgebreid, geprioriteerd overzicht staat in [ROUTE-A-VERBETERPUNTEN.md](ROU
 
 1. **Fase 0 met echte foto's:** 10–20 onderdelen met bekende maten scannen, afwijkingen en de dekking van U95 meten, de systematische termen en drempels bijstellen (debugbeelden in `resultaat/debug/`).
 2. **Randen uit de grijswaarden** (subpixel, in plaats van de maskerrand) en uit beeldgradiënten binnen het object: gatranden, treden en afschuiningen die in het silhouet niet te zien zijn.
-3. **Uitbreiding van de objectklasse:** treden en kamers (meerdere hoogteniveaus), afschuiningen, sleufvormen, gatenpatronen op rechthoekige delen.
+3. **Uitbreiding van de objectklasse:** treden en kamers (meerdere hoogteniveaus) en afschuiningen als model, niet alleen als melding; gatenpatronen op rechthoekige delen.
 4. **Vrije vormen:** COLMAP + OpenMVS met de matposes, en `camtocad cad` voor puntenwolken.
 5. **Android-app** (GPL, zonder Google Play Services) met geleide opname: dekkingskoepel, automatisch afdrukken, stills op volle resolutie.
 6. **FreeCAD-export** (`.FCStd` met PartDesign-feature tree) naast het CadQuery-script.
