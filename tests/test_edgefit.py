@@ -142,6 +142,15 @@ def test_edge_position_along_the_axes():
     assert uncertainty.edge_position(part, 1, "x") == pytest.approx(145.0)
     assert uncertainty.edge_position(part, 3, "x") == pytest.approx(95.0)
     assert uncertainty.edge_position(part, 0, "y") == pytest.approx(65.0)
+    # een iets scheve rand: de ligging op de hoogte van een gat, zodat een draaiing van het hele onderdeel
+    # de gatpositie ten opzichte van die rand niet verandert
+    tilted = part.transformed(math.radians(2.0), np.zeros(2))
+    hole = tilted.holes[0]
+    o, k = tilted.outer, 3
+    n = np.array([math.cos(o.angles[k]), math.sin(o.angles[k])])
+    x_at = uncertainty.edge_position(tilted, k, "x", at=hole.y)
+    assert n @ [x_at, hole.y] == pytest.approx(n @ o.center + o.offsets[k])
+    assert hole.x - x_at == pytest.approx((110.0 - 95.0) / math.cos(math.radians(2.0)), abs=1e-9)
 
 
 def test_budget_adds_systematics_and_print_scale():

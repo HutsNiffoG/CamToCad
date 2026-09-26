@@ -57,12 +57,14 @@ class Sensitivity:
         return float(math.sqrt(max(float(g @ self.C @ g), 0.0)))
 
 
-def edge_position(part: Part2p5D, k: int, axis: str) -> float:
-    """Ligging van rand k langs de as ('x' of 'y') in werkcoördinaten, ook als hij iets scheef staat."""
+def edge_position(part: Part2p5D, k: int, axis: str, at: float = 0.0) -> float:
+    """Ligging van rand k langs de as ('x' of 'y') in werkcoördinaten, ook als hij iets scheef staat:
+    x van de randlijn op hoogte y = `at` (of y bij x = `at`). Voor een gat telt de rand ter hoogte van het
+    gat; dan verandert de maat niet als het hele onderdeel een fractie draait."""
     o = part.outer
     n = np.array([math.cos(o.angles[k]), math.sin(o.angles[k])])
     c = float(n @ o.center + o.offsets[k])
-    return c / (n[0] if axis == "x" else n[1])
+    return (c - n[1] * at) / n[0] if axis == "x" else (c - n[0] * at) / n[1]
 
 
 @dataclass

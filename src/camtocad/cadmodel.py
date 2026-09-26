@@ -223,10 +223,11 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             out.holes[i] = Hole(out.holes[i].x, out.holes[i].y, s.value)
         snaps.append(s)
 
-    def origin(p: Part2p5D, axis: str) -> float:
+    def origin(p: Part2p5D, axis: str, at: float) -> float:
+        """Datum voor gatposities: het middelpunt, of de datumrand ter hoogte van het gat."""
         if p.outer.kind == "circle":
             return float(p.outer.center[0 if axis == "x" else 1])
-        return edge_position(p, datum[axis], axis) if axis in datum else 0.0
+        return edge_position(p, datum[axis], axis, at) if axis in datum else 0.0
 
     # gatenpatroon op een steekcirkel (ronde delen): steekcirkeldiameter snappen, gaten exact verdelen
     patterned: set[int] = set()
@@ -253,9 +254,9 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         if i in patterned:
             continue
         sx = do_snap(f"gat {i + 1} x", h.x, unc.hole_xy, length_candidates(h.x, imperial),
-                     lambda p, i=i: p.holes[i].x - origin(p, "x"), "positie")
+                     lambda p, i=i: p.holes[i].x - origin(p, "x", p.holes[i].y), "positie")
         sy = do_snap(f"gat {i + 1} y", h.y, unc.hole_xy, length_candidates(h.y, imperial),
-                     lambda p, i=i: p.holes[i].y - origin(p, "y"), "positie")
+                     lambda p, i=i: p.holes[i].y - origin(p, "y", p.holes[i].x), "positie")
         out.holes[i] = Hole(sx.value, sy.value, h.d)
         snaps += [sx, sy]
     return out, snaps
