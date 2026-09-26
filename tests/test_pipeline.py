@@ -69,3 +69,48 @@ def test_scaled_part_scales_every_dimension():
     big = part.scaled(1.03)
     assert big.height == pytest.approx(4.12) and big.holes[0].d == pytest.approx(3.09)
     assert big.outer.area() == pytest.approx(part.outer.area() * 1.03 ** 2, rel=1e-3)
+
+
+def test_quality_gate_flags_a_contour_with_a_small_notch():
+    from camtocad.profile import Part2p5D, Profile
+
+    def from_vertices(V):
+        V = np.asarray(V, float)
+        d = np.roll(V, -1, axis=0) - V
+        n = np.column_stack([d[:, 1], -d[:, 0]]) / np.linalg.norm(d, axis=1, keepdims=True)  # buitennormaal (CCW)
+        c = V.mean(axis=0)
+        return Profile("polygon", c, np.arctan2(n[:, 1], n[:, 0]), np.einsum("ij,ij->i", n, V - c), np.zeros(len(V)))
+
+    stats = {"iou_median": 0.995, "iou_min": 0.99}
+    clean = Part2p5D(10.0, from_vertices([(0, 0), (80, 0), (80, 40), (0, 40)]))
+    assert pipeline._quality_issues(clean, stats, 100, 1500) == []
+    notch = Part2p5D(10.0, from_vertices([(0, 0), (80, 0), (80, 40), (0, 40), (0, 21), (-1.2, 19.7), (2.4, 18.6),
+                                          (-1.4, 17.6), (0, 17.2)]))
+    assert any("korte randen" in i for i in pipeline._quality_issues(notch, stats, 100, 1500))
+    kink = Part2p5D(10.0, from_vertices([(0, 0), (80, 0), (80, 41.2), (61, 39.9), (0, 39.9)]))
+    kink.outer.fillets[3] = 430.0
+    issues = pipeline._quality_issues(kink, stats, 100, 1500)
+    assert any("knik van 3.9°" in i for i in issues) and any("afronding is groter" in i for i in issues)
+
+
+def test_holes_without_visible_mat_are_suspect():
+    """Een gat waardoor in geen bovenaanzicht zekere mat te zien is, is mogelijk een spookgat."""
+    from camtocad.calib import Pose, project
+    from camtocad.masks import ViewMasks
+    from camtocad.profile import Hole, Part2p5D, Profile
+    from camtocad.render import look_at
+
+    K = np.array([[1300.0, 0.0, 799.5], [0.0, 1300.0, 599.5], [0.0, 0.0, 1.0]])
+    prof = Profile("polygon", np.array([120.0, 80.0]), np.array([-np.pi / 2, 0, np.pi / 2, np.pi]),
+                   np.array([20.0, 40.0, 20.0, 40.0]), np.zeros(4))
+    part = Part2p5D(10.0, prof, [Hole(100.0, 80.0, 6.0), Hole(140.0, 80.0, 6.0)])
+    views = []
+    for dx in (-5.0, 5.0):
+        R, t = look_at([120.0 + dx, 80.0, 330.0], [120.0, 80.0, 0.0])
+        pose = Pose("top", R, t)
+        bg = np.zeros((1200, 1600), bool)
+        uv, _ = project(np.array([[100.0, 80.0, 0.0]]), pose, K)  # alleen door gat 1 is mat te zien
+        u, v = np.round(uv[0]).astype(int)
+        bg[v - 8:v + 9, u - 8:u + 9] = True
+        views.append((pose, ViewMasks(np.zeros_like(bg), bg, np.ones_like(bg))))
+    assert pipeline.unseen_holes(part, K, views) == [1]

@@ -77,3 +77,14 @@ def test_coverage_names_the_missing_directions():
     laag = next(a for a in cov["advies"] if a.startswith("Laag"))
     assert "boven" in laag and "onder," not in laag
     assert any(a.startswith("Nog geen foto's hoog") for a in cov["advies"])
+
+
+def test_photos_in_paths_with_non_ascii_characters(tmp_path):
+    from camtocad.imgio import imwrite, read_gray
+
+    folder = tmp_path / "Jörg ø"
+    folder.mkdir()
+    img = (np.arange(600).reshape(20, 30) % 256).astype(np.uint8)
+    assert imwrite(folder / "foto.png", img)
+    assert np.array_equal(read_gray(folder / "foto.png"), img)
+    assert read_gray(folder / "bestaat-niet.jpg") is None

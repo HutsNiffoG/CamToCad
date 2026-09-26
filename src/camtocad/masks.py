@@ -196,14 +196,14 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     den_img = a * p + b
     gain = np.ones_like(o)
     if use_gain:
-        # Niet vlak naast bewijs voor het object: textuur die ontbreekt, of een afwijking waar de mat
-        # geen textuur heeft (een schaduw op gestippeld zwart behoudt zijn textuur en telt dus niet).
-        # Anders kan een objectrand die samenvalt met een vakrand (grijs object naast het donkere
-        # gat, op de plek van een zwart-witovergang) als 'mat in schaduw' de versterking omlaag
-        # trekken, en valt het object ernaast weg als beschaduwd wit.
-        fg0 = foreground(np.ones_like(o))[0]
-        evidence = (texture_missing | (fg0 & ~textured)).astype(np.uint8)
-        near_obj = cv2.dilate(evidence, np.ones((2 * window + 1, 2 * window + 1), np.uint8)) > 0
+        # Niet vlak naast bewijs voor het object: textuur die verwacht wordt maar ontbreekt (binnen een
+        # halve vensterbreedte plus één pixel). Anders kan een objectrand die samenvalt met een vakrand
+        # (grijs object naast het donkere gat, op de plek van een zwart-witovergang) als 'mat in
+        # schaduw' de versterking omlaag trekken, en valt het object ernaast weg als beschaduwd wit.
+        # Niet ruimer: een slagschaduw ligt direct naast het object en heeft zijn bronnen juist daar.
+        # (Een afwijking op een egaal stuk mat telt niet als bewijs: dat kan net zo goed schaduw zijn.)
+        evidence = texture_missing.astype(np.uint8)
+        near_obj = cv2.dilate(evidence, np.ones((window + 2, window + 2), np.uint8)) > 0
         gain_src &= ~near_obj
         src = gain_src.astype(np.float32)
         for _ in range(2):

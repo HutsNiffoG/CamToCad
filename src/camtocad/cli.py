@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "mat":
             from .mat import write_mat
             paths = write_mat(args.formaat, args.uit)
-            print(f"Kalibratiemat {args.formaat} geschreven:")
+            print(f"Kalibratiemat {PRESETS[args.formaat].name} geschreven:")
             for kind, path in paths.items():
                 print(f"  {kind}: {path}")
             print("Print de PDF op 100% (werkelijke grootte) en meet beide 100 mm-lijnen (X en Y) na.")

@@ -28,6 +28,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 from . import calib
+from .imgio import read_gray
 from .mat import MatSpec, board_to_mat, get_spec, make_board, rasterize_board
 
 WORK_SIDE = 2000  # dezelfde werkresolutie als de pipeline
@@ -73,18 +74,6 @@ class PhotoCheck:
 
 
 # ----------------------------------------------------------------------------- beelden
-
-def read_gray(path: str | Path) -> np.ndarray | None:
-    """Leest een foto als grijswaarden, zonder EXIF-rotatie (sensorformaat, zoals de pipeline).
-    Via imdecode: werkt ook met niet-ASCII-tekens in het pad (Windows)."""
-    try:
-        data = np.fromfile(str(path), np.uint8)
-    except OSError:
-        return None
-    if data.size == 0:
-        return None
-    return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
-
 
 def to_work(img: np.ndarray, max_side: int = WORK_SIDE) -> np.ndarray:
     if img.ndim == 3:

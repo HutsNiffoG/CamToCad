@@ -193,13 +193,26 @@ def _usable(fp: Footprint) -> bool:
     return x > 0 and y > 0 and x + w < W and y + h < H
 
 
+def _smooth(mask: np.ndarray, r: int) -> np.ndarray:
+    """Morfologisch openen en sluiten met een schijf van straal r: uitsteeksels en inhammen van een
+    paar rastercellen (schaduwrand, ruis) verdwijnen, de vorm en de gaten blijven."""
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    m = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, k)
+    return cv2.morphologyEx(m, cv2.MORPH_CLOSE, k) > 0
+
+
 def to_part(fp: Footprint, height: float) -> Part2p5D:
-    outer, holes, cutouts = from_footprint(fp.mask, fp.origin, fp.px, lenient_holes=True)
-    outer, _ = regularize_angles(outer)
-    outer = remove_short_edges(outer, 3 * fp.px)
-    if not outer.is_valid():
-        raise ValueError("contour levert geen geldige omtrek op")
-    return Part2p5D(height, outer, holes, cutouts)
+    # Geeft een rafelige rand een ongeldige omtrek (bijv. een lusje), dan eerst gladgestreken opnieuw
+    # proberen (0,75 en 1,5 mm), in plaats van meteen een terugvaloptie met een lagere drempel, die
+    # juist meer schaduw meeneemt.
+    for r in (0, 3, 6):
+        mask = fp.mask if r == 0 else _smooth(fp.mask, r)
+        outer, holes, cutouts = from_footprint(mask, fp.origin, fp.px, lenient_holes=True)
+        outer, _ = regularize_angles(outer)
+        outer = remove_short_edges(outer, 3 * fp.px)
+        if outer.is_valid():
+            return Part2p5D(height, outer, holes, cutouts)
+    raise ValueError("contour levert geen geldige omtrek op")
 
 
 def clipped_by_view(fp: Footprint) -> bool:

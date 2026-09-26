@@ -34,11 +34,11 @@ Aanleiding was de melding "Geen objectcontour gevonden" van de eerste gebruiker 
   - v0.2 heeft een kwaliteitspoort: twijfelgevallen krijgen "betrouwbaarheid: laag" met de reden, onzin wordt een foutmelding met uitleg.
 - **Grootste open punten:**
   - nauwkeurigheid en een eerlijke U95. De fit telt pixels, en afrondingen komen niet beter dan ±0,3 mm.
-  - donkere onderdelen op de zwarte vakken. Hier is een betere mat nodig.
+  - donkere onderdelen op de zwarte vakken. Mat v2 (v0.3) helpt deels; de stipvrije stroken vragen nog om V8.
   - de objectklasse: treden, verzinkingen, afschuiningen.
-  - begeleiding tijdens het fotograferen.
+  - begeleiding tijdens het fotograferen. Sinds v0.3 volgt na elke foto een controle met aanwijzingen; live in de camera nog niet (V25).
 
-## 2. Stresstests: v0.1 tegenover v0.2
+## 2. Stresstests: v0.1, v0.2 en v0.3
 
 Proefstukken:
 
@@ -46,25 +46,38 @@ Proefstukken:
 - **Plaatje:** 30 × 20 × 5 mm, R2-hoeken, gat Ø 4,5.
 - **Ring:** Ø 25 × 8 mm, gat Ø 8.
 
-Ruis, JPEG-compressie, vignettering en verscherping zitten in alle scenario's behalve "basis". Maten zijn de gefitte waarden vóór het snappen. **Stil fout** betekent: een fout model zonder waarschuwing.
+Ruis, JPEG-compressie, vignettering en verscherping zitten in alle scenario's behalve "basis". Maten zijn de gefitte waarden vóór het snappen. **Stil fout** betekent: een fout model zonder waarschuwing. v0.1 en v0.2 draaiden met mat v1, v0.3 met mat v2.
 
-| Scenario | Situatie | v0.1 | v0.2 |
-|---|---|---|---|
-| Basis | Beugel, 46 foto's, schone render | Goed: 79,96 × 39,95 × 12,02 | Goed: 79,86 × 39,93 × 12,07 |
-| Realistisch | Ruis, JPEG, vignettering, verscherping | Goed: 79,92 × 39,89 × 12,02 | Goed: 79,94 × 39,91 × 12,03 |
-| Harde schaduw | Slagschaduw van 55 % | **Stil fout**: IoU 0,78, gaten op de verkeerde plek | 79,92 × 39,96 × 12,00, maar één gat als uitsparing: **gemarkeerd als onbetrouwbaar** |
-| Donker onderdeel | Albedo 0,08 (zwart kunststof) | **Crash** (deling door nul) | **Duidelijke foutmelding**: het silhouet is maar half zichtbaar (V5) |
-| Wit onderdeel | Albedo 0,95 | **Stil fout**: 12 spookgaten, IoU 0,78 | 79,93 × 39,88 × 11,99, maar twee spookgaatjes (Ø 1,2) en een uitsparing: **gemarkeerd als onbetrouwbaar**¹ |
-| Handschaduw | Schaduw van hand en telefoon in de bovenaanzichten | **Stil fout** in de codereview: 87,5 × 64,1 × 10,8 | Goed: 79,92 × 39,91 × 12,02 |
-| Verspreide bovenaanzichten | Tot 45 mm naast het onderdeel, 10° scheef | Goed, maar één gat Ø 6,46 | Goed: 79,89 × 39,92 × 12,05 |
-| Weinig lage foto's | Alleen ringen op 60° en 75°, 5 bovenaanzichten | **Stil fout**: h 12,49, 79,29 × 39,62, geen gaten | 79,93 × 39,92 × 12,01, maar één gat als uitsparing: **gemarkeerd als onbetrouwbaar**¹ |
-| Klein onderdeel | Plaatje 30 × 20 × 5, R2, Ø 4,5 | **Crash** (singuliere matrix) | Goed: 29,92 × 19,93 × 5,01, Ø 4,48 |
-| Klein, weinig lage foto's | Idem, bovenaanzichten 6° scheef | **Crash** | Goed: 29,84 × 19,88 × 5,12, Ø 4,55. Afrondingen onzeker |
-| Ring | Ø 25 × 8, gat Ø 8, weinig lage foto's | **Stil fout**: spookobject 56 × 154 mm, IoU 0,52 | Goed: Ø 24,88 × 8,08, gat Ø 7,99 |
-| Zwaar | Schaduw, bolle mat, handschaduw en verspreide bovenaanzichten samen | **Stil fout**: h 11,89, geen gaten, IoU 0,93 | Goed: 79,91 × 39,94 × 12,05, 2 × Ø 6,58 (één extra korte rand) |
-| OpenCV 4.12 | Basisscan met de oudere OpenCV | **Stil fout**: h 12,31; 79,80 × 39,82 | 12,02; 79,92 × 39,93 (hoekverschuiving gemeten en gecorrigeerd) |
+| Scenario | Situatie | v0.1 | v0.2 | v0.3 (mat v2) |
+|---|---|---|---|---|
+| Basis | Beugel, 46 foto's, schone render | Goed: 79,96 × 39,95 × 12,02 | Goed: 79,86 × 39,93 × 12,07 | Goed: 80,01 × 39,95 × 12,04, 2 × Ø 6,59 |
+| Realistisch | Ruis, JPEG, vignettering, verscherping | Goed: 79,92 × 39,89 × 12,02 | Goed: 79,94 × 39,91 × 12,03 | Goed: 79,98 × 39,94 × 12,03, 2 × Ø 6,59 |
+| Harde schaduw | Slagschaduw van 55 % | **Stil fout**: IoU 0,78, gaten op de verkeerde plek | 79,92 × 39,96 × 12,00, maar één gat als uitsparing: **gemarkeerd als onbetrouwbaar** | 80,03 × 39,97 × 12,00, 2 × Ø 6,53, maar een inhammetje bij één hoek (korte randen): **gemarkeerd als onbetrouwbaar** |
+| Donker onderdeel | Albedo 0,08 (zwart kunststof) | **Crash** (deling door nul) | **Duidelijke foutmelding**: het silhouet is maar half zichtbaar (V5) | Rommelig model (50 randen): **gemarkeerd als onbetrouwbaar**, na ~3 minuten. Mat v2 maakt het onderdeel grotendeels zichtbaar, maar in de stipvrije stroken blijven strepen "onbekend" (V8) |
+| Wit onderdeel | Albedo 0,95 | **Stil fout**: 12 spookgaten, IoU 0,78 | 79,93 × 39,88 × 11,99, maar twee spookgaatjes (Ø 1,2) en een uitsparing: **gemarkeerd als onbetrouwbaar**¹ | 79,91 × 39,90 × 12,13 met de twee echte gaten (Ø 6,46), maar 12 spookgaatjes (Ø 1,5–3): **gemarkeerd als onbetrouwbaar** (gaten waardoor geen mat te zien is) |
+| Handschaduw | Schaduw van hand en telefoon in de bovenaanzichten | **Stil fout** in de codereview: 87,5 × 64,1 × 10,8 | Goed: 79,92 × 39,91 × 12,02 | Goed: 79,98 × 39,92 × 12,03, 2 × Ø 6,60² |
+| Verspreide bovenaanzichten | Tot 45 mm naast het onderdeel, 10° scheef | Goed, maar één gat Ø 6,46 | Goed: 79,89 × 39,92 × 12,05 | Goed: 79,97 × 39,97 × 12,01, 2 × Ø 6,58² |
+| Weinig lage foto's | Alleen ringen op 60° en 75°, 5 bovenaanzichten | **Stil fout**: h 12,49, 79,29 × 39,62, geen gaten | 79,93 × 39,92 × 12,01, maar één gat als uitsparing: **gemarkeerd als onbetrouwbaar**¹ | Goed: 79,95 × 39,96 × 12,02, 2 × Ø 6,55² |
+| Klein onderdeel | Plaatje 30 × 20 × 5, R2, Ø 4,5 | **Crash** (singuliere matrix) | Goed: 29,92 × 19,93 × 5,01, Ø 4,48 | Goed: 29,90 × 19,92 × 5,07, Ø 4,47² |
+| Klein, weinig lage foto's | Idem, bovenaanzichten 6° scheef | **Crash** | Goed: 29,84 × 19,88 × 5,12, Ø 4,55. Afrondingen onzeker | Goed: 29,93 × 19,94 × 5,10, Ø 4,43² |
+| Ring | Ø 25 × 8, gat Ø 8, weinig lage foto's | **Stil fout**: spookobject 56 × 154 mm, IoU 0,52 | Goed: Ø 24,88 × 8,08, gat Ø 7,99 | Goed: Ø 24,88 × 8,08, gat Ø 8,00² |
+| Zwaar | Schaduw, bolle mat, handschaduw en verspreide bovenaanzichten samen | **Stil fout**: h 11,89, geen gaten, IoU 0,93 | Goed: 79,91 × 39,94 × 12,05, 2 × Ø 6,58 (één extra korte rand) | 79,95 × 39,90 × 12,07, maar een knik van 3,8° in de bovenrand en één gat Ø 6,38: **gemarkeerd als onbetrouwbaar**³ |
+| OpenCV 4.12 | Basisscan met de oudere OpenCV | **Stil fout**: h 12,31; 79,80 × 39,82 | 12,02; 79,92 × 39,93 (hoekverschuiving gemeten en gecorrigeerd) | Goed: 79,91 × 39,96 × 12,07 (hoekverschuiving +0,50 px gemeten en gecorrigeerd) |
 
 ¹ Gedraaid vóór de laatste reparatie van de gatherkenning. Die reparatie lostte hetzelfde probleem op in "realistisch" (daar nu beide gaten Ø 6,59); deze twee scenario's zijn daarna niet opnieuw gedraaid.
+
+² Gedraaid met de definitieve maskers van v0.3, maar vóór de laatste aanpassingen aan de fit (eerder stoppen, gladgestreken startcontour). Bij "basis" en "realistisch", die opnieuw gedraaid zijn, veranderden lengtes, hoogte en gaten daardoor minder dan 0,02 mm en de afrondingen tot 0,2 mm.
+
+³ De markering komt van de controles op een knik in een rand en een te grote afronding. Die zijn na deze run toegevoegd en nagerekend op het bewaarde model; bij de goede scans in deze tabel slaan ze niet aan.
+
+Wat opvalt in v0.3 (mat v2):
+
+- **Goede scans worden nauwkeuriger.** Buitenmaten en hoogtes liggen binnen ±0,08 mm (v0.2: lengtes ~0,1 mm te klein). De maskerrand heeft geen bias meer die met het matpatroon meeverandert (§3b). Gaten komen 0,01–0,1 mm te klein uit en afrondingen tot 0,3 mm te groot: dat moet Fase 0 op echte foto's bevestigen of corrigeren (V13).
+- **"Weinig lage foto's" is nu goed** (v0.2: een gat werd een uitsparing).
+- **Harde schaduw en "zwaar" worden als onbetrouwbaar gemarkeerd.** De hoofdmaten kloppen, maar er zitten kleine fouten langs de schaduwkant, en in "zwaar" is één gat 0,2 mm te klein. Diffuus licht blijft nodig.
+- **Spookgaten worden herkend.** Een gat waardoor in geen enkel bovenaanzicht zekere mat te zien is, maakt het resultaat onbetrouwbaar. Het witte onderdeel had er 12; de twee echte gaten tonen de stippen van de mat en slaan niet aan.
+- **Een zwart onderdeel lukt nog niet.** Met mat v2 is het grotendeels zichtbaar, maar in de stipvrije stroken langs de vakranden en rond de hoeken blijft het "onbekend". De startcontour wordt dan rommelig en het resultaat wordt terecht als onbetrouwbaar gemarkeerd. De volgende stap staat in §4.2 (V8).
+- **Rekentijd.** Faalt een scan, dan kost dat geen tientallen minuten meer: de fit stopt bij stilstand of bij een matige pasvorm, en een rommelige startcontour krijgt maar een korte verfijning (in v0.2 kostte het zwarte onderdeel 12 minuten).
 
 Wat opvalt in v0.2:
 
@@ -104,7 +117,9 @@ Wat opvalt in v0.2:
 | V6 | Fotocontrole vooraf | Per foto ~0,1 s: mat gevonden, onscherpte, belichting en kijkhoek, met een oordeel goed, matig of onbruikbaar. De onscherpte is σ in pixels, gemeten door de voorspelde matpatches te vervagen tot ze op de foto passen (nauwkeurig tot ~0,05 px). Per scan: waar het object ligt (hoeken en markers die steeds ontbreken), een dekkingskaart per richting en hoogte, en concrete aanwijzingen. De telefoonpagina uploadt per foto met direct oordeel, toont de dekkingskaart, laat slechte foto's verwijderen en foto's toevoegen aan een bestaande of mislukte scan, en toont de debugbeelden. Verkleinen op de telefoon maakt de upload ~5× kleiner. Op de opdrachtregel: `camtocad controleer` | `preflight.py`, `server/` |
 | V7 | Printschaal per richting | Meetlijnen X en Y (`--meetlijn X Y`, twee velden op de telefoonpagina). De schaal zit in de matgeometrie van kalibratie, poses en maskers, dus ook een ongelijke schaal wordt goed verwerkt, en de hoogte schaalt mee | `mat.py`, `calib.py`, `pipeline.py` |
 | — | Onscherpte en dekking in de verwerking | Per foto de onscherpte in `diagnose.json`, met een waarschuwing bij σ > 1,8 px. Bij "geen bovenaanzichten" of "geen objectcontour" staat in de melding welke foto's rond het object ontbreken; bij een onvolledige set volgt een waarschuwing in het rapport | `pipeline.py` |
-| — | Maskers rond het object | Drie reparaties, gevonden bij het testen van mat v2 en ook nuttig met v1: (1) de lokale versterking (schaduw) gebruikt alleen vensters waar niveau en contrast dezelfde versterking geven, en niet vlak naast bewijs voor het object; anders liet een gatrand die samenvalt met een vakrand het object ernaast als "beschaduwd wit" wegvallen. (2) De randstrook "zekere mat" voor de fit bevat alleen pixels die duidelijk op de mat lijken. (3) Randpixels zonder bruikbaar contrast volgen de meerderheid van hun buren. De maskerrand heeft daardoor geen bias meer die met het matpatroon meeverandert | `masks.py` |
+| — | Maskers rond het object | Drie reparaties, gevonden bij het testen van mat v2 en ook nuttig met v1. (1) De lokale versterking (schaduw) gebruikt alleen vensters waar niveau en contrast dezelfde versterking geven, en niet vlak naast ontbrekende textuur (het object). Anders liet een gatrand die samenvalt met een vakrand het object ernaast als "beschaduwd wit" wegvallen. (2) De randstrook "zekere mat" voor de fit bevat alleen pixels die duidelijk op de mat lijken. (3) Randpixels zonder bruikbaar contrast volgen de meerderheid van hun buren. De maskerrand heeft daardoor geen bias meer die met het matpatroon meeverandert | `masks.py` |
+| — | Startcontour en kwaliteitspoort | Geeft een rafelige rand een ongeldige omtrek, dan eerst gladgestreken opnieuw proberen, in plaats van terug te vallen op een lagere stemdrempel die juist meer schaduw meeneemt. Nieuwe signalen voor "onbetrouwbaar": twee of meer zeer korte randen (< 2,5 mm; een uitstulping of inham die er niet is), een knik van minder dan 10° in een rand (vaak een schaduw langs die rand), een afronding die groter is dan de randen eromheen, en gaten waardoor in geen enkel bovenaanzicht zekere mat te zien is (spookgaten) | `initial.py`, `pipeline.py` |
+| V21 (deels) | Sneller | De maskers per foto lopen parallel in threads (OpenCV en numpy geven de GIL vrij bij grote beelden): 2,4× sneller op 4 kernen. De silhouetenergie heeft minder Python-overhead per foto: 81 in plaats van 229 ms per evaluatie. Threads maakten die juist trager. De fit stopt als de laatste 200 evaluaties samen < 0,1% opleveren, of na hooguit één extra blok als het model matig past (IoU < 0,95). Een rommelige startcontour (> 20 randen, gaten en uitsparingen) krijgt maar een korte verfijning. De demoscan (46 foto's van 1600 × 1200) kost daarmee ~70 s op 4 kernen; een mislukte scan kost geen tientallen minuten meer | `pipeline.py`, `silhouette.py` |
 
 ## 4. Open verbeterpunten, op prioriteit
 
@@ -128,13 +143,13 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | # | Verbetering | Aanpak | Impact | Moeite |
 |---|---|---|---|---|
 | V7 | ~~Anisotrope printschaal (sx ≠ sy)~~ (gedaan in v0.3) | Gedaan: meetlijnen X en Y, de schaal zit in de matgeometrie. De printschaalcontrole zit in `camtocad valideer` (alle lengtes procentueel te groot of te klein). **Open:** de meetlijnen zijn in de foto's zelf niet te meten, want ze schalen mee met de print; alleen een onafhankelijk object met bekende maat (eindmaat, bankpas 85,60 × 53,98 mm) kan de schaal controleren | H | S–M |
-| V8 | Segmentatiecascade | GrabCut met de bestaande driedeling object/mat/onbekend. Kleur (afstand tot de zwart-witte mat) als extra objectbewijs. [PyMatting](https://github.com/pymatting/pymatting) (MIT) voor een subpixel-alfarand. Schaduwdetectie op regioniveau voor egale vlakken ([overzicht](https://arxiv.org/abs/1304.1233)) | H | M |
+| V8 | Segmentatiecascade (nu ook nodig voor zwarte onderdelen op mat v2) | Eerste stap: "onbekende" stroken binnen een zwart object opvullen waar geen zekere mat is (dat zijn de stipvrije stroken van mat v2; een echt gat laat de stippen zien). Daarna GrabCut met de bestaande driedeling object/mat/onbekend. Kleur (afstand tot de zwart-witte mat) als extra objectbewijs. [PyMatting](https://github.com/pymatting/pymatting) (MIT) voor een subpixel-alfarand. Schaduwdetectie op regioniveau voor egale vlakken ([overzicht](https://arxiv.org/abs/1304.1233)) | H | M |
 | V9 | Optioneel een geleerd masker, alleen met Apache-2.0-code en -gewichten | [SAM 2.1](https://github.com/facebookresearch/sam2), [HQ-SAM 2](https://github.com/SysCV/sam-hq) of [EfficientViT-SAM](https://huggingface.co/mit-han-lab/efficientvit-sam) via ONNX Runtime op de CPU, geprompt met een kader en punten uit het matmasker. Altijd combineren met het matresidu en met meerdere foto's: SAM faalt op spiegelend metaal en lage contrasten. De CPU-snelheid is nog niet gemeten | M–H | M |
 | V10 | Foto's zoals telefoons ze maken | EXIF lezen: oriëntatie, lens, brandpunt, digitale zoom. HEIC via pillow-heif. Groeperen per camera of lens, en een cameramodel per toestel bewaren (voor kleine scans). Waarschuwen bij σ(f)/f > 0,3 % | H | M |
 | V11 | Mat niet vlak | Een residukaart per hoek over alle foto's toont krul. Eventueel een bundelaanpassing met een laag-orde matoppervlak | M | M |
 | V12 | Meer dan één ding op de mat, of het object deels ernaast | Waarschuwen, en het object kiezen dat in de bovenaanzichten steun heeft. Een liniaal of munt kan groter zijn dan het onderdeel. "Ligt deels naast de mat" als expliciete melding | M | S |
-| V13 | Maskerrand-bias (~0,13 px naar binnen) en onscherpte per foto | Meten op de bekende randen van de mat. Daarmee de 50 %-regel en de kleinste herkenbare afronding per scan instellen, en onscherpe foto's markeren | M | M |
-| V14 | Kwaliteitspoort verfijnen | Residuclusters per foto: een gemist gat, een extra uitstulping. Snappen beoordelen op het energieverschil in plaats van het IoU-verschil, want 0,5 mm fout verandert de IoU maar ~0,005 | M | S |
+| V13 | Maskerrand-bias en onscherpte per foto (deels gedaan in v0.3) | Gedaan: de onscherpte per foto wordt aan de mat gemeten (`preflight.py`), staat in `diagnose.json`, en onscherpe foto's worden gemeld. De randbias hangt niet meer van het matpatroon af (§3b). **Open:** de voorspelde mat met de gemeten σ vervagen, en daarmee de 50 %-regel en de kleinste herkenbare afronding per scan instellen | M | M |
+| V14 | Kwaliteitspoort verfijnen (korte randen: gedaan in v0.3) | Residuclusters per foto: een gemist gat, een extra uitstulping. Snappen beoordelen op het energieverschil in plaats van het IoU-verschil, want 0,5 mm fout verandert de IoU maar ~0,005 | M | S |
 
 ### 4.3 Grotere objectklasse
 
@@ -151,10 +166,10 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 
 | # | Verbetering | Aanpak | Impact | Moeite |
 |---|---|---|---|---|
-| V21 | Nog ~2× sneller | Carving per z-vlak met één homografie, undistort-maps één keer berekenen, threadpool over foto's (OpenCV geeft de GIL vrij), grote JPEG's verkleind decoderen, gatringen vectoriseren | M | S |
+| V21 | Nog sneller (deels gedaan in v0.3: threads, eerder stoppen) | Carving per z-vlak met één homografie, undistort-maps één keer berekenen, grote JPEG's verkleind decoderen, gatringen vectoriseren | M | S |
 | V22 | Structuur | Stapfuncties met gecachte tussenresultaten (`--vanaf`). Alle drempels in één `Tuning`-dataclass, ook in `report.json`. Een `ScanResult`, dode code weg (fijne hull, `surface_points`). Maskers als uitsnede: nu ~3,6 GB bij 300 foto's | M | M |
-| V23 | Installatie | Lockfile (uv of pixi). CadQuery 2.8 met cadquery-ocp 7.9.3.x: 8.0.1 breekt CadQuery. VTK-vrije OCP. `camtocad doctor`: één cv2-wheel, versies, hoekverschuiving. Paden met niet-ASCII-tekens op Windows (`imdecode`/`tofile`). Installer via [PyApp](https://github.com/ofek/pyapp) of pixi-pack | M | M |
-| V24 | Server | HTTPS op het LAN, nodig voor een live camera in de browser ([getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)). Quota en opruimen, verwijderen, PDF atomisch schrijven, `--lan` expliciet, per bestand uploaden met hervatten, magic bytes controleren. Bij AGPL een bronlink in de pagina (§13) | M | S–M |
+| V23 | Installatie | Lockfile (uv of pixi). CadQuery 2.8 met cadquery-ocp 7.9.3.x: 8.0.1 breekt CadQuery. VTK-vrije OCP. `camtocad doctor`: één cv2-wheel, versies, hoekverschuiving. ~~Paden met niet-ASCII-tekens op Windows~~ (gedaan in v0.3: `imgio.py`). Installer via [PyApp](https://github.com/ofek/pyapp) of pixi-pack | M | M |
+| V24 | Server | HTTPS op het LAN, nodig voor een live camera in de browser ([getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)). Quota en opruimen, PDF atomisch schrijven, `--lan` expliciet, hervatten van een afgebroken upload, magic bytes controleren (verwijderen en per foto uploaden: gedaan in v0.3). Bij AGPL een bronlink in de pagina (§13) | M | S–M |
 | V25 | Live begeleiding in de browser | [OpenCV.js](https://github.com/opencv/opencv/blob/4.x/platforms/js/opencv_js.config.py) herkent de mat live in het voorbeeldbeeld en geeft een dekkingskaart, scherpte en glans. Vereist V24 (HTTPS). WebXR werkt niet op iOS, dus daar niet op leunen | H | M |
 | V26 | CI | Stresstests in klein formaat als regressietests. Matrix: OS × OpenCV 4.10/5.x × numpy 1/2 | M | M |
 

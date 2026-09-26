@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,9 +22,11 @@ import cv2
 import numpy as np
 
 from . import __version__, cadmodel, calib, debug, hull, initial, masks, preflight, report, silhouette
+from .imgio import imwrite, read_gray
 from .mat import MatSpec, get_spec, rasterize_board
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
 
 
 class ScanError(ValueError):
@@ -54,7 +58,7 @@ def load_images(folder: str | Path, max_side: int = 2000, log=print) -> list[tup
     paths = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in IMAGE_EXT)
     out = []
     for p in paths:
-        img = preflight.read_gray(p)  # ook met niet-ASCII-tekens in het pad (Windows)
+        img = read_gray(p)  # ook met niet-ASCII-tekens in het pad (Windows)
         if img is None:
             log(f"  overgeslagen (onleesbaar): {p.name}")
             continue
@@ -94,9 +98,68 @@ def _advice(cov: dict) -> str:
     return (" Voor een nieuwe fotoset: " + " ".join(cov["advies"])) if cov.get("advies") else ""
 
 
-def _quality_issues(part, stats: dict, evals: int, max_evals: int) -> list[str]:
+def unseen_holes(part, K: np.ndarray, top_views: list, min_px: int = 20) -> list[int]:
+    """Gaten waardoor in geen enkel bovenaanzicht zekere mat te zien is: mogelijk spookgaten (bijv. een
+    wit onderdeel op de witte marge, waar object en mat niet te onderscheiden zijn). Per foto de doorkijk:
+    binnen de projectie van zowel de boven- als de onderrand van het gat."""
+    from .profile import circle_polygon
+
+    out = []
+    for i, h in enumerate(part.holes):
+        ring = circle_polygon((h.x, h.y), h.d / 2, 48)
+        seen = judged = False
+        for pose, m in top_views:
+            uv = []
+            for z in (part.height, 0.0):
+                p, depth = calib.project(np.column_stack([ring, np.full(len(ring), z)]), pose, K)
+                if np.any(depth <= 0):
+                    break
+                uv.append(p)
+            if len(uv) < 2:
+                continue
+            lo = np.floor(np.min(np.vstack(uv), axis=0)).astype(int) - 1
+            hi = np.ceil(np.max(np.vstack(uv), axis=0)).astype(int) + 2
+            H, W = m.bg.shape
+            if lo[0] < 0 or lo[1] < 0 or hi[0] > W or hi[1] > H:
+                continue
+            a = np.zeros((hi[1] - lo[1], hi[0] - lo[0]), np.uint8)
+            b = np.zeros_like(a)
+            cv2.fillPoly(a, [np.round(uv[0] - lo).astype(np.int32)], 1)
+            cv2.fillPoly(b, [np.round(uv[1] - lo).astype(np.int32)], 1)
+            through = (a & b).astype(bool)
+            if through.sum() < min_px:
+                continue
+            judged = True
+            if m.bg[lo[1]:hi[1], lo[0]:hi[0]][through].mean() > 0.1:
+                seen = True
+                break
+        if judged and not seen:
+            out.append(i)
+    return out
+
+
+def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25) -> list[str]:
     """Signalen dat het model niet klopt, ook al is er een model uitgekomen."""
     issues = []
+    if part.outer.kind == "polygon":
+        # een uitstulping of inham van een paar pixels (schaduw, rommelig masker) geeft korte randen
+        V = part.outer.vertices()
+        short_mm = max(2.0, 10.0 * mm_per_px)
+        short = int(np.sum(np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1) < short_mm))
+        if short >= 2:
+            issues.append(f"{short} zeer korte randen (< {short_mm:.1f} mm): mogelijk een uitstulping of inham die "
+                          "er niet is")
+        # een knik van een paar graden in een rechte rand (schaduw langs die rand), vaak met een enorme
+        # 'afronding' die de knik gladstrijkt
+        o = part.outer
+        turn = np.degrees(np.abs((o.angles - np.roll(o.angles, 1) + np.pi) % (2 * np.pi) - np.pi))
+        if np.any(turn < 10.0):
+            issues.append(f"een rand heeft een knik van {float(turn.min()):.1f}°: waarschijnlijk een schaduw of een "
+                          "rommelig masker langs die rand")
+        lengths = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1)  # rand k: hoekpunt k -> k+1
+        shorter = np.minimum(lengths, np.roll(lengths, 1))  # de randen aan weerszijden van hoekpunt k
+        if np.any(o.fillets > shorter):
+            issues.append("een afronding is groter dan de randen eromheen: onwaarschijnlijke vorm")
     if stats["iou_median"] < 0.98:
         issues.append(f"silhouetten passen matig (IoU mediaan {stats['iou_median']:.3f}; goed is > 0,98)")
     if stats["iou_min"] < 0.95:
@@ -189,11 +252,14 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
 
     # 3. objectmaskers
     raster = rasterize_board(spec, 10.0, 3.0)
-    views = []
-    for name, pose in cal.poses.items():
-        img = calib.undistort(lookup[name], cam)
+
+    def view_masks(pose):
+        img = calib.undistort(lookup[pose.name], cam)
         pred, valid = masks.predict_background(raster, cam.K, pose, (cam.width, cam.height))
-        views.append((pose, masks.classify(img, pred, valid)))
+        return pose, masks.classify(img, pred, valid)
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:  # grote beeldbewerkingen: OpenCV en numpy geven de GIL vrij
+        views = list(pool.map(view_masks, cal.poses.values()))
     top_views: list = []
     diag = {"camtocad": __version__, "opencv": cv2.__version__, "detector_bias_px": bias.tolist(),
             "camera": cam.to_dict(), "geweigerd": cal.rejected}
@@ -210,7 +276,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             return
         others = [v for v in views if all(v[0] is not t[0] for t in top_views)]
         for pose, m in top_views[:6] + others[:: max(1, len(others) // 4)][:4]:
-            cv2.imwrite(str(dbg / f"masker_{Path(pose.name).stem}.jpg"),
+            imwrite(dbg / f"masker_{Path(pose.name).stem}.jpg",
                         debug.mask_overlay(calib.undistort(lookup[pose.name], cam), m))
 
     # 4. grove visual hull: waar staat het object ongeveer? (alleen lokaliseren en een bovengrens)
@@ -235,7 +301,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     write_overlays()
     log(f"object gelokaliseerd: {hi[0] - lo[0]:.0f} x {hi[1] - lo[1]:.0f} mm, hoogte ≤ {z_top:.0f} mm")
     if opts.debug_images:
-        cv2.imwrite(str(dbg / "lokalisatie.png"),
+        imwrite(dbg / "lokalisatie.png",
                     debug.hull_image(coarse, board_bounds, (lo[0] - 6, hi[0] + 6, lo[1] - 6, hi[1] + 6)))
 
     # 5. startmodel uit de bovenaanzichten (hoogte waarop ze samenvallen, met terugvalopties)
@@ -253,7 +319,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if opts.debug_images:
             fp = initial.footprint(top_views, cam.K, max(2.0, 0.3 * z_top),
                                    (lo[0] - 6, hi[0] + 6, lo[1] - 6, hi[1] + 6))
-            cv2.imwrite(str(dbg / "bovenaanzicht.png"), debug.footprint_image(fp))
+            imwrite(dbg / "bovenaanzicht.png", debug.footprint_image(fp))
         write_debug({"startmodel": {"fout": str(e), "pogingen": e.details}})
         raise ScanError("Geen objectcontour gevonden in de foto's recht van boven. "
                         + NO_CONTOUR_HELP.format(debug=dbg) + _advice(cov)) from e
@@ -277,7 +343,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if abs(part.height - h_old) < 0.5:
             break
     if opts.debug_images:
-        cv2.imwrite(str(dbg / "bovenaanzicht.png"), debug.footprint_image(init.footprint))
+        imwrite(dbg / "bovenaanzicht.png", debug.footprint_image(init.footprint))
     write_debug({"startmodel": {
         "methode": init.footprint.method, "hoogte_mm": round(part.height, 3), "pogingen": init.notes,
         "hoogtezoektocht": None if sweep is None else {
@@ -285,7 +351,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "oppervlak_mm2": sweep.area.round(1).tolist(), "beste_mm": sweep.best, "informatief": sweep.informative},
     }})
     vd = silhouette.prepare(views, cam.K, part, z_max=part.height * 1.4 + 4)
-    part, energy, evals = silhouette.refine(part, cam.K, vd, max_evals=opts.max_evals, log=log)
+    max_evals = opts.max_evals
+    n_features = (part.outer.n if part.outer.kind == "polygon" else 1) + len(part.holes) + len(part.cutouts)
+    if n_features > 20:  # rommelige startcontour: het resultaat wordt toch 'onbetrouwbaar'; niet minutenlang fitten
+        max_evals = min(max_evals, 300)
+        log(f"rommelige startcontour ({n_features} randen, gaten en uitsparingen): korte verfijning")
+    part, energy, evals = silhouette.refine(part, cam.K, vd, max_evals=max_evals, log=log)
     oc = part.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, part.height / 2])
     mm_per_px = _object_distance(cal.poses.values(), center) / cam.K[0, 0]
@@ -299,7 +370,11 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     stats_fit = silhouette.view_stats(part, cam.K, vd)
     log(f"model gefit: hoogte {part.height:.3f} mm, {len(part.holes)} gat(en), "
         f"silhouet-IoU mediaan {stats_fit['iou_median']:.4f}")
-    issues = _quality_issues(part, stats_fit, evals, opts.max_evals)
+    issues = _quality_issues(part, stats_fit, evals, opts.max_evals, mm_per_px)
+    ghosts = unseen_holes(part, cam.K, top_views)
+    if ghosts:
+        issues.append(f"{len(ghosts)} gat(en) waardoor in geen bovenaanzicht mat te zien is: mogelijk spookgaten "
+                      "(controleer ze; bij een oude mat v1 kan dit ook een echt gat boven een egaal zwart vak zijn)")
     if stats_fit["iou_median"] < 0.9:
         write_debug({"kwaliteit": issues})
         raise ScanError("Het gevonden model past niet bij de foto's (silhouet-IoU mediaan "
@@ -395,7 +470,7 @@ def run_demo(out_dir: str | Path, log=print, seed: int = 5) -> dict:
     log("synthetische scan renderen (beugel 80 x 40 x 12 mm, 2 x Ø 6,6, R3) ...")
     views = render_scan(place(demo_part(), spec, angle_deg=17.0, offset=(5, -8)), spec, default_camera(), seed=seed)
     for v in views:
-        cv2.imwrite(str(photos / f"{v.name}.png"), v.image)
+        imwrite(photos / f"{v.name}.png", v.image)
     result = run_scan(photos, out / "resultaat", ScanOptions(mat="A4"), log=log, scan_name="demo")
     # de werkelijke maten in het formaat van `camtocad valideer` (validate.py)
     truth = {"naam": "demo: beugel 80 x 40 x 12", "mat": "A4",

@@ -29,6 +29,7 @@ import cv2
 import numpy as np
 
 from . import __version__
+from .imgio import imwrite
 from .pdf import PdfCanvas
 
 Rect = tuple[float, float, float, float, float]  # x, y, breedte, hoogte, grijswaarde (0 = zwart)
@@ -237,8 +238,8 @@ def ruler_rects(spec: MatSpec) -> tuple[list[Rect], list[tuple[float, float, str
         rects.append((ox + 10.0 * k - lw / 2, yr - length, lw, length, 0.0))
     texts += [(ox - 0.8, yr - 8.0, "0", 7.0), (ox + 48.6, yr - 8.0, "50", 7.0), (ox + 97.0, yr - 8.0, "100 mm", 7.0)]
     if spec.version >= 2:
-        texts.append((ox + 108.0, yr - 1.2, "Meetlijn X = 100,0 mm, meetlijn Y links: meet beide na met een "
-                                            "schuifmaat en geef afwijkingen op", 7.0))
+        texts.append((ox + 108.0, yr - 1.2, "Meetlijnen X (hier) en Y (links): 100,0 mm. Meet ze na en geef "
+                                            "afwijkingen op", 7.0))
     else:
         texts.append((ox + 108.0, yr - 1.2, "Meetlijn 100,0 mm - controleer met een schuifmaat of liniaal", 7.0))
 
@@ -393,6 +394,6 @@ def write_mat(spec: str | MatSpec, out_dir: str | Path) -> dict[str, Path]:
     stem = f"kalibratiemat_{spec.name}"
     paths = {"pdf": out / f"{stem}.pdf", "png": out / f"{stem}.png", "json": out / f"{stem}.json"}
     write_pdf(spec, paths["pdf"])
-    cv2.imwrite(str(paths["png"]), rasterize_page(spec))
+    imwrite(paths["png"], rasterize_page(spec))
     paths["json"].write_text(json.dumps(descriptor(spec), indent=2), encoding="utf-8")
     return paths

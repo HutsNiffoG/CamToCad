@@ -71,15 +71,15 @@ def _shrink(uv: np.ndarray, delta: float = 0.5) -> np.ndarray | None:
     0,5 px groter dan 'pixelmidden binnen de polygoon'. Zonder deze correctie zou de optimizer het
     model 0,5 px te klein fitten. Geeft None voor (bijna) gedegenereerde polygonen.
     """
-    x, y = uv[:, 0], uv[:, 1]
-    area = 0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    nxt = np.concatenate([uv[1:], uv[:1]])
+    area = 0.5 * float(np.sum(uv[:, 0] * nxt[:, 1] - uv[:, 1] * nxt[:, 0]))
     if abs(area) < 1.0:
         return None
-    d = np.roll(uv, -1, axis=0) - uv
+    d = nxt - uv
     d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
     s = 1.0 if area > 0 else -1.0
     n = s * np.column_stack([-d[:, 1], d[:, 0]])  # naar binnen gerichte normaal van rand i (van i naar i+1)
-    n_prev = np.roll(n, 1, axis=0)
+    n_prev = np.concatenate([n[-1:], n[:-1]])
     denom = np.maximum(1.0 + np.sum(n * n_prev, axis=1), 0.25)  # miterlengte begrenzen
     return uv + delta * (n + n_prev) / denom[:, None]
 
@@ -122,8 +122,8 @@ def render(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray | None =
     fill(ub, mask)
     fill(ut, mask)
     quads = np.stack([ub, np.roll(ub, -1, axis=0), np.roll(ut, -1, axis=0), ut], axis=1)
-    for q in _shrink_quads(quads):
-        cv2.fillConvexPoly(mask, _to_fixed(q, v.x0, v.y0), 1, cv2.LINE_8, SHIFT)
+    for q in _to_fixed(_shrink_quads(quads), v.x0, v.y0):  # één omzetting voor alle wanden
+        cv2.fillConvexPoly(mask, q, 1, cv2.LINE_8, SHIFT)
     # doorkijk door gaten: binnen de projectie van zowel de boven- als de onderrand
     tmp_t = np.zeros_like(mask)
     tmp_b = np.zeros_like(mask)
@@ -141,13 +141,19 @@ def render(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray | None =
     return mask
 
 
+def _mismatch(part: Part2p5D, K: np.ndarray, v: ViewData, ring: np.ndarray) -> tuple[int, int, int]:
+    P = render(part, K, v, ring).astype(bool)
+    return np.count_nonzero(P & v.bg), np.count_nonzero(P & v.unk), np.count_nonzero(~P & v.fg)
+
+
 def energy(part: Part2p5D, K: np.ndarray, views: list[ViewData], w_unknown: float = 0.25) -> float:
-    total = 0.0
+    # Serieel: per foto is het vooral Python-werk aan kleine arrays; threads maakten het twee keer trager.
     ring = part.outer.outline(12.0)
+    bg = unk = fg = 0
     for v in views:
-        P = render(part, K, v, ring).astype(bool)
-        total += np.count_nonzero(P & v.bg) + w_unknown * np.count_nonzero(P & v.unk) + np.count_nonzero(~P & v.fg)
-    return total
+        a, b, c = _mismatch(part, K, v, ring)
+        bg, unk, fg = bg + a, unk + b, fg + c
+    return bg + w_unknown * unk + fg
 
 
 # ----------------------------------------------------------------------------- initialisatie
@@ -242,12 +248,17 @@ def fit_height(part: Part2p5D, K: np.ndarray, views: list[ViewData], h_max: floa
 
 
 def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int = 1500,
-           log=None) -> tuple[Part2p5D, float, int]:
+           log=None, abort_iou: float = 0.8) -> tuple[Part2p5D, float, int]:
     """Kompaszoektocht per parameter met halverende stappen; ongeldige geometrie wordt overgeslagen.
 
     Twee aanvullingen tegen te vroeg stoppen in een smalle vallei (bijv. hoogte en randen die
     elkaar in schuine foto's compenseren): na elke ronde een patroonstap (Hooke-Jeeves: de hele
     verplaatsing van die ronde nog eens), en na convergentie een herstart met grotere stappen.
+    Past het model na 300 evaluaties nog steeds slecht (IoU-mediaan < `abort_iou`), dan stopt de
+    zoektocht: de kwaliteitspoort keurt het toch af, en doorzoeken kost dan minuten; past het matig
+    (< 0,95), dan volgt nog hooguit één blok van 300. Ook bij ruisige
+    maskers (bijv. een zwart onderdeel) blijven er piepkleine 'verbeteringen' te vinden: levert de
+    laatste 200 evaluaties samen minder dan 0,1% op, dan is de fit klaar.
     """
     base = part.outer.angles.copy()
     params = _params(part)
@@ -259,7 +270,23 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
         return cand.outer.kind != "polygon" or cand.outer.is_valid()
 
     restarts, e_restart = 0, e_best
+    next_check = 300
+    history = [e_best]  # beste energie per evaluatie
     while evals < max_evals:
+        history += [e_best] * (evals - len(history) + 1)
+        if evals >= 400 and history[evals - 200] - e_best < 1e-3 * e_best:
+            if log:
+                log(f"verfijning: geen noemenswaardige verbetering meer na {evals} evaluaties")
+            break
+        if abort_iou and evals >= next_check:
+            next_check += 300
+            iou = view_stats(best, K, views)["iou_median"]
+            if iou < abort_iou:
+                if log:
+                    log(f"verfijning afgebroken na {evals} evaluaties: het model past niet bij de foto's")
+                break
+            if iou < 0.95:  # past matig: nog één blok, dan is het 'onbetrouwbaar' toch al duidelijk
+                max_evals = min(max_evals, evals + 300)
         start = {p.name: _get(best, base, p.name) for p in params}
         moved_any = False
         for p in params:

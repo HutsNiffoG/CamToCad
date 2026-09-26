@@ -101,18 +101,18 @@ Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het objec
 
 | Onderdeel | Maat | Waarheid | Gefit | Na snappen |
 |---|---|---|---|---|
-| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,93 × 39,93 × 12,05 | 80 × 40 × 12 |
-| | afrondingen (4x) | R3 | R3,04 | R3 |
-| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,57 op (9,98, 19,97) en (69,97, 19,97) | Ø 6,565 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact |
-| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,93 / 29,95 / 24,93 / 49,96, hoogte 8,05 | exact |
-| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,17, 2 × scherp | R2,17 (niet gesnapt, binnen U95) |
-| | gat | Ø 5,5 op (15, 12) | Ø 5,44 op (14,96, 11,97) | Ø 5,5 (ISO 273 M5) op (15, 12) |
-| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 50,09 × 10,03 | Ø 50 × 10 |
-| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,46 op Ø 34,96 | 4 × Ø 4,5 (M4) op Ø 35, parametrisch patroon |
+| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,92 × 39,94 × 12,08 | 80 × 40 × 12 |
+| | afrondingen (4x) | R3 | R2,93–R3,15 | R3 |
+| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,59 en Ø 6,51 op (9,92, 19,92) en (69,95, 19,96) | Ø 6,55 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact |
+| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,97 / 29,96 / 24,91 / 49,95, hoogte 8,04 | exact |
+| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,27, 1 × R0,9, 1 × scherp | R2,27 en R0,9 (niet gesnapt, binnen U95) |
+| | gat | Ø 5,5 op (15, 12) | Ø 5,47 op (14,98, 11,95) | Ø 5,5 (ISO 273 M5) op (15, 12) |
+| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,94 × 10,03 | Ø 50 × 10 |
+| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,41 op Ø 35,01 | 4 × Ø 4,41 (niet gesnapt) op Ø 35, parametrisch patroon |
 
-De gefitte maten liggen binnen ±0,1 mm van de waarheid (afrondingen binnen +0,2 mm). Dat is ruim binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat; hoe dicht v0.1 daarbij in de buurt komt, moet Fase 0 uitwijzen.
+De gefitte buitenmaten en hoogtes liggen binnen ±0,1 mm van de waarheid, de gaten 0,01–0,1 mm te klein en de afrondingen tot +0,3 mm te groot. Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.3 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
 
-## Beperkingen van v0.1
+## Beperkingen van v0.3
 
 - **Objectklasse:** alleen 2,5D-onderdelen plat op de mat, met doorgaande gaten. Geen blinde gaten, kamers, treden in de hoogte, afschuiningen op de bovenrand, schroefdraad of vrije vormen. Afschuiningen op verticale hoeken worden als afronding benaderd; buitencontouren met bogen groter dan een hoekafronding (bijv. een sleufvorm) worden met rechte randen benaderd.
 - **Bovenaanzichten zijn verplicht**: zonder foto's recht van boven stopt de verwerking met een duidelijke melding.
@@ -120,11 +120,11 @@ De gefitte maten liggen binnen ±0,1 mm van de waarheid (afrondingen binnen +0,2
   - Schaduwen op de gestructureerde delen van de mat worden herkend.
   - Een harde schaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort meldt dat meestal.
   - Gebruik diffuus licht, en mat papier voor de mat.
-- **Donkere onderdelen op de zwarte vakken** (en witte op wit) zijn daar deels onzichtbaar: in de stresstest werd ongeveer de helft van het silhouet gezien. De fit leunt dan op de overige foto's. Een mat met fijnere textuur (mat v2) moet dit oplossen.
-- **Onzekerheid (U95)** is een indicatie op basis van resolutie en aantal foto's, nog niet gekalibreerd op echte metingen (zie ARCHITECTURE.md §8).
+- **Donkere onderdelen:** op de zwarte vakken van mat v2 zijn ze zichtbaar doordat de stippen verdwijnen. Op een mat v1 blijven ze daar deels onzichtbaar. **Witte onderdelen** zijn op de smalle witte marges rond de markers nog slecht te zien; de markers zelf helpen daar.
+- **Onzekerheid (U95)** is een indicatie op basis van resolutie en aantal foto's, nog niet gekalibreerd op echte metingen. Meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)).
 - **Afrondingen** zijn het minst nauwkeurig (±0,3 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
 - **Afrondingen kleiner dan ~3 pixels** (bij de demo ~0,8 mm) zijn niet te onderscheiden van scherpe hoeken en worden als scherp gemodelleerd; het rapport meldt dat.
-- **Rekentijd:** ~40 s per scan van 46 foto's op een gewone CPU; foto's worden standaard teruggeschaald naar 2000 pixels.
+- **Rekentijd:** ~70 s per scan van 46 foto's (1600 × 1200) op een gewone CPU met 4 kernen; foto's worden standaard teruggeschaald naar 2000 pixels. De fotocontrole kost ~0,1–0,3 s per foto.
 - **Nog geen native app:** de telefoon gebruikt de browser. De geleide AR-opname uit het architectuurdocument volgt met de Android-app.
 
 ## Licenties
