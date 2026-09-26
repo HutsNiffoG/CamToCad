@@ -214,6 +214,70 @@ Het zwarte onderdeel mislukte in v0.3 ook op mat v2 (§2). De analyse met de ech
 
 Geprobeerd en teruggedraaid: de ruis alleen op de vlakke stukken mat schatten. Dat gaf een lagere drempel, maar in het zware stressscenario telde de rand van de slagschaduw dan als object: één gat 0,38 mm te klein, zonder waarschuwing. Op de echte foto's was het verschil met de oude schatting niet systematisch. Ook de grove versterking overal toepassen bleek slecht: op de echte foto's gaf dat juist meer losse vlekken (1,2% van de mat tegen 0,8%).
 
+## 3e. Opgelost in v0.5 (V2, V3, V4)
+
+| Wat | Hoe | Waar |
+|---|---|---|
+| Randfit (V2) | Na de pixelfit een kleinste-kwadratenfit op subpixelafstanden tot de silhouetrand. Modelpunten (~1 per mm) op de onder- en bovenrand van de contour en de gaten; per foto telt de onderrand als de wand naar de camera kijkt, anders de bovenrand, en alleen punten op het modelsilhouet. Residu: afstand tot de rand van het objectmasker (bilineair), min 0,2 × de strook zonder bewijs tussen object en zekere mat (tot 1,5 px; breder is gebrek aan bewijs, niet menging), gewogen naar hoeveel zekere mat er vlakbij is. Cauchy-verlies (0,5 px), dus een uitschieter telt nauwelijks. Alleen binnen ±0,5 mm en ±0,3° van de pixelfit, anders blijft die staan. Een parameter die de contour bij een stap van 0,1 mm ongeldig maakt (een afronding die net past, de randjes van een hap uit het masker), blijft vast: zijn afgeleide is een sprong naar de strafwaarde en zette in het zware stressscenario de hele fit vast | `edgefit.py`, `pipeline.py` |
+| U95 per maat (V3) | Toevallig deel: jackknife over 6 groepen foto's (per groep opnieuw oplossen zonder die foto's). De formele covariantie uit de Jacobiaan is veel te optimistisch (honderden randpunten per foto zijn niet onafhankelijk), en één Gauss-Newtonstap per groep onderschat de spreiding tot 20× (afrondingen). Per maat σ² = gᵀCg, met g de numerieke gradiënt van de maat in het werkassenstelsel (randposities t.o.v. de datumrand, gatposities t.o.v. de datum). Systematisch deel per soort maat, in pixels op het object (tabel hieronder). Printschaal: 0,05% met gemeten meetlijnen, anders 0,3%. Snappen gebeurt zonder de printschaal (een schaalfout verschuift alle maten samen), het rapport telt hem wel mee. Staat de randfit niet, dan blijft de indicatieve U95 van v0.4 (met dezelfde printschaalterm) | `uncertainty.py`, `edgefit.py`, `cadmodel.py`, `pipeline.py` |
+| Gemiste gaten (V4) | Het bovenvlak (z = hoogte) wordt in rasters van 0,25 mm teruggeprojecteerd in de foto's recht van boven (≤ 25°). Waar ≥ 2 foto's én de meerderheid zekere mat zien, niet binnen 1 mm van een rand of bestaand gat, ligt een kandidaat; een cluster van ≥ Ø 1,5 mm wordt een cirkel. Eerst alleen dat gat op maat fitten, dan kort alles; het gat blijft als de energie duidelijk daalt (meer dan 0,2% + 20). Een (bijna) ronde uitsparing wordt een gat | `holes.py`, `pipeline.py` |
+| Scherpe hoeken | De randfit ziet een scherpe hoek als een afronding van 3,5–4 px (onscherpte en masker ronden hem af). De grens voor "niet te onderscheiden van scherp" gaat daarom van 3 naar 4,5 px (~1,1 mm bij 0,25 mm/px). Zonder die stap kreeg de L-vorm twee afrondingen van R1 op scherpe hoeken | `pipeline.py` |
+| Renderer van de stresstests | 3 × 3 supersampling in plaats van 2 × 2: met een even aantal was een half bedekte pixel "geen object", en de gerenderde objectmaskers lagen 0,14 px binnen de ware rand. De stressresultaten van v0.4 waren daardoor iets te klein. Alle v0.5-cijfers gebruiken opnieuw gerenderde scans; ter vergelijking draaide ook v0.4.1 daarop | `render.py` |
+
+**IJking van de systematische termen.** De randfit met jackknife op tien gerenderde scans (beugel in zes stressscenario's, plaatje, ring, L-vorm en flens), 110 maten tegen de waarheid. Per soort de kleinste systematische term waarbij 95% van de fouten binnen U95 valt, en de gekozen waarde (met wat marge):
+
+| Soort | n | \|fout\| mediaan / max (mm) | Binnen 2σ van alleen de jackknife | Nodig voor 95% | Gekozen (px) | Binnen U95 | U95 mediaan (mm) |
+|---|---|---|---|---|---|---|---|
+| lengte | 18 | 0,036 / 0,058 | 17% | 0,12 px | 0,12 | 100% | 0,062 |
+| hoogte | 10 | 0,024 / 0,043 | 20% | 0,09 px | 0,10 | 100% | 0,052 |
+| gat Ø | 19 | 0,035 / 0,309 | 42% | 0,27 px | 0,30 | 100% | 0,154 |
+| positie | 31 | 0,027 / 0,154 | 52% | 0,12 px | 0,15 | 100% | 0,081 |
+| afronding | 32 | 0,071 / 0,431 | 44% | 0,74 px | 0,80 | 100% | 0,411 |
+
+De jackknife alleen is dus te optimistisch: op deze scans is de fout vooral systematisch. De maskerrand ligt per scène net anders (een donker of licht onderdeel: lengtes +0,04 tot +0,06 mm, een klein plaatje −0,05 mm), en kleine diepe gaten (Ø 4,5 in 10 mm) komen tot 0,14 mm te klein uit. Afrondingen blijven het zwakst (tot ±0,4 mm, vooral waar de pixelfit een extra randje in de contour liet). Dit is afgesteld op gerenderde scans; op echte foto's kan de systematiek groter zijn (V1).
+
+**Stresstests v0.5.** De scenario's van §2b plus drie extra (vervormde mat, gamma, zwaar met een klein donker onderdeel), opnieuw gerenderd met de nieuwe renderer. Ter vergelijking draaide v0.4.1 op dezelfde scans. **Goed** betekent: geen waarschuwing. De maten zijn gefit, vóór het snappen.
+
+| Scenario | v0.5 | v0.4.1 (zelfde scans) |
+|---|---|---|
+| Basis | Goed: 79,98 × 40,02 × 12,01, R3,07, Ø 6,59 | Goed: 79,95 × 39,94 × 12,06, R3,06, Ø 6,59 |
+| Realistisch | Goed: 79,99 × 40,01 × 12,00, R3,03, Ø 6,60 | Goed: 79,98 × 39,94 × 12,04, R3,16, Ø 6,59 |
+| Harde schaduw | Gemarkeerd (twee korte randen aan de schaduwkant): 80,06 × 40,06 × 11,96, Ø 6,56 | Gemarkeerd |
+| Donker onderdeel | Goed: 80,04 × 40,05 × 11,98, R3,13, Ø 6,57 en **6,29 ± 1,16** | Goed: 79,95 × 39,93 × 12,03, Ø 6,43 en **5,99 ± 0,16, gesnapt naar 6,0** |
+| Wit onderdeel | Goed: 80,04 × 40,05 × 12,02, R3,12, Ø 6,56 | Goed: 80,00 × 39,98 × 12,00, R3,19, Ø 6,56 |
+| Handschaduw | Goed: 79,98 × 40,01 × 12,00, R3,04, Ø 6,61 | Goed: 79,98 × 39,92 × 12,06, R3,14, Ø 6,61 |
+| Verspreide bovenaanzichten | Goed: 79,98 × 40,01 × 12,00, R3,03, Ø 6,58 | Goed: 79,94 × 39,97 × 12,06, R3,16, Ø 6,57 |
+| Weinig lage foto's | Goed: 79,99 × 40,01 × 12,02, R3,07, Ø 6,59 | Goed: 79,97 × 39,99 × 12,04, R3,18, Ø 6,60 |
+| Klein onderdeel | Goed: 29,95 × 19,97 × 5,03, R2,01, Ø 4,46 | Goed: 29,89 × 19,92 × 5,07, R2,00, Ø 4,45 |
+| Klein, weinig lage foto's | Goed: 29,99 × 20,00 × 5,02, R2,18, Ø 4,43 | Goed: 29,94 × 19,94 × 5,05, R2,07, Ø 4,43 |
+| Ring | Goed: Ø 24,95 × 8,04, gat Ø 7,97 | Goed: Ø 24,91 × 8,07, gat Ø 7,98 |
+| Zwaar | Gemarkeerd (een schaduwbult): 79,97 × 40,03 × 12,02, Ø 6,56 | Gemarkeerd, Ø 6,25 en 6,60 |
+| Vervormde mat | Goed: 79,97 × 40,01 × 12,01, R3,04, Ø 6,59 | Goed: 79,94 × 39,94 × 12,06, R3,17, Ø 6,61 |
+| Gamma | Goed: 80,02 × 40,03 × 12,01, R3,09, Ø 6,57 | Goed: 80,00 × 40,00 × 12,03, R3,26, Ø 6,56 |
+| Zwaar, klein en donker | Gemarkeerd: rommelige contour (16 randen, R tot 9,5, gat Ø 3,95); de randfit loopt tegen zijn vertrouwensgebied en blijft uit | Gemarkeerd, zelfde model |
+
+Over de 101 maten van de scans zonder waarschuwing:
+
+| Soort | \|fout\| mediaan / max v0.5 | v0.4.1 | U95 mediaan v0.5 (zonder printschaal) | v0.4.1 (met 0,05% printschaal) |
+|---|---|---|---|---|
+| hoogte | 0,015 / 0,040 | 0,055 / 0,073 | 0,051 | 0,105 |
+| lengtes | 0,017 / 0,052 | 0,055 / 0,110 | 0,062 | 0,154 |
+| gaten Ø | 0,027 / 0,309 | 0,029 / 0,607 | 0,154 | 0,123 |
+| gatposities | 0,027 / 0,154 | 0,034 / 0,326 | 0,079 | 0,111 |
+| afrondingen | 0,068 / 0,183 | 0,161 / 0,261 | 0,408 | 0,286 |
+
+- **Binnen U95:** 100% in v0.5 (101 van 101); in v0.4.1 95%, maar de grootste fouten vielen er ver buiten. Het gat van het donkere onderdeel boven het zwarte markervlak was in v0.4.1 Ø 5,99 ± 0,16 en werd naar 6,0 gesnapt (waar: 6,6). In v0.5 is het Ø 6,29 ± 1,16: de jackknife ziet dat dit gat slecht bepaald is, en snappen gebeurt dan niet.
+- **Snappen:** 84 maten gesnapt, alle goed (v0.4.1: 79, waarvan 1 fout).
+- **Hoogte en lengtes ~3× nauwkeuriger.** De pixelfit kwam ~0,05 mm te klein uit door de modelrenderer (V29); de randfit vergelijkt direct met de maskers.
+- **Gemarkeerde scans** blijven gemarkeerd: geen stille fouten. Hun maten vallen niet altijd binnen U95 (in het zware kleine scenario is het model zelf fout); de waarschuwing zegt dat.
+- **Rekentijd:** 16–121 s per scan (v0.4.1 op dezelfde scans: 23–141 s, twee scans tegelijk op 4 kernen). De randfit kost 0–9 s, de jackknife 0–11 s.
+
+Nog gevonden, niet opgelost:
+
+- De snelle modelrenderer van de pixelfit (`silhouette.render`) tekent in schuine aanzichten ~0,15–0,18 px te ruim (gemeten tegen 5 × 5 supersampling; vermoedelijk dunne wandvierhoeken die na het krimpen van 0,5 px omklappen). Daardoor komt de pixelfit ~0,05 mm te klein uit. De randfit heeft er geen last van: die vergelijkt direct met de maskers. Zie V29.
+- De startcontour kan bij een afgeronde hoek een knikje van een paar graden krijgen (een koorde die bijna in het verlengde van de rand ligt). `_simplify_outline` haalt het weg, maar het maakt de startcontour ~2% te groot.
+- Wie de meetlijnen precies 100,0 mm meet, is niet te onderscheiden van wie ze niet opgeeft; beide krijgen 0,3% printschaal in de U95.
+
 ## 4. Open verbeterpunten, op prioriteit
 
 Impact en moeite: **H**oog, **M**iddel, **L**aag. Moeite S/M/L staat voor dagen, een week, of meerdere weken.
@@ -225,9 +289,9 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | # | Verbetering | Waarom | Aanpak | Impact | Moeite |
 |---|---|---|---|---|---|
 | V1 | **Echte fotoset met schuifmaatmetingen** (gereedschap klaar in v0.3) | Alle drempels en U95 zijn nu op synthetische scans afgesteld | 10–20 onderdelen: metaal, zwart, wit, kunststof. Referentie met eindmaten en een ringkaliber, in de stijl van [ISO 10360-13 / VDI 2634](https://www.nist.gov/publications/vdivde-2634-2-and-iso-10360-13-performance-evaluation-tests-and-systematic-errors). Draaien als regressiesuite. **Open:** de set zelf maken volgens [FASE-0.md](FASE-0.md) en daarmee U95 en de drempels afstellen | H | M |
-| V2 | **Fit op randafstanden in plaats van pixeltelling** | Pixeltelling is een trapfunctie: traag, geen covariantie, en afrondingen dwalen ±0,3 mm. De rasterizer is alleen exact voor randen langs de assen (−0,09 px bij 30°) | Residuen tussen geprojecteerde modelranden en de afstandstransformatie van elk masker (subpixel), met `scipy.optimize.least_squares` (soft-L1). Eventueel subpixelranden met [Devernay (IPOL)](https://www.ipol.im/pub/art/2017/216/) | H | L |
-| V3 | **U95 die klopt** | U95 volgt nu alleen uit de resolutie | Covariantie uit V2, plus leave-one-out of bootstrap over de foto's. Termen voor printschaal (0,3 % · L als er geen meetlijn is opgegeven) en kalibratie-σ ([mrcal](https://mrcal.secretsauce.net/uncertainty.html)). Toetsen op 95 % dekking met V1 | H | M |
-| V4 | **Topologie bijwerken na de fit** (hoekpunten weghalen: gedaan in v0.4) | De fit kan geen gaten of randen toevoegen: een gemist gat blijft gemist | Gedaan: knikken en korte randen weg als het model zonder even goed past (§3c). **Open:** clusters "zekere mat" binnen het bovenvlak (in ≥ 2 bovenaanzichten) worden een gat; ronde uitsparingen worden gaten | H | M |
+| V2 | ~~Fit op randafstanden in plaats van pixeltelling~~ (gedaan in v0.5) | Pixeltelling is een trapfunctie: traag, geen covariantie, en afrondingen dwalen ±0,3 mm | Gedaan: `edgefit.py`, zie §3e. **Open:** subpixelranden uit de grijswaarden zelf ([Devernay, IPOL](https://www.ipol.im/pub/art/2017/216/)) in plaats van de maskerrand; dan hoeft de strook zonder bewijs niet meer met een vaste fractie (0,2) te worden verdeeld | H | M |
+| V3 | ~~U95 die klopt~~ (gedaan in v0.5, op gerenderde scans) | U95 volgde alleen uit de resolutie | Gedaan: jackknife over groepen foto's, systematiek per soort maat en printschaal, afgesteld op 95% dekking (§3e). **Open:** toetsen en bijstellen op echte foto's met V1; kalibratie-σ ([mrcal](https://mrcal.secretsauce.net/uncertainty.html)) als aparte term | H | M |
+| V4 | ~~Topologie bijwerken na de fit~~ (gedaan in v0.4 en v0.5) | De fit kan geen gaten of randen toevoegen: een gemist gat blijft gemist | Gedaan: knikken en korte randen weg als het model zonder even goed past (§3c); gemiste gaten toevoegen en ronde uitsparingen als gat (§3e). **Open:** een gemiste uitstulping of inham in de buitencontour (residuclusters langs de rand, V14) | H | M |
 | V5 | ~~Mat v2~~ (gedaan in v0.3) | Een donker onderdeel op een zwart vak is onzichtbaar: in de stresstest werd maar ~50 % van het silhouet gezien | Gedaan: stippenraster in de zwarte vakken, eigen marker-ID's per formaat, Letter. **Open:** stippen in de zwarte vlakken van de markers en donkere stippen in de witte marges eromheen (de markerdetectie mag er niet onder lijden). Een gat van een zwart onderdeel boven een groot zwart markervlak is nu het zwakste punt: de rand is daar in de bovenaanzichten niet te zien. Verder middengrijze vakken, en controleren of de stippen op gewone printers goed uitkomen (V1) | H | M |
 | V6 | ~~Preflight bij het uploaden~~ (gedaan in v0.3) | Een slechte fotoset blijkt nu pas na de verwerking | Gedaan: zie §3b. **Open:** een live camerabeeld met dezelfde controle (V25) | H | M |
 
@@ -241,10 +305,11 @@ V5, V6 en V7 zijn in v0.3 gedaan, en voor V1 staat het gereedschap klaar (§3b).
 | V10 | Foto's zoals telefoons ze maken | EXIF lezen: oriëntatie, lens, brandpunt, digitale zoom. HEIC via pillow-heif. Groeperen per camera of lens, en een cameramodel per toestel bewaren (voor kleine scans). Waarschuwen bij σ(f)/f > 0,3 % | H | M |
 | V11 | Mat niet vlak | Een residukaart per hoek over alle foto's toont krul. Eventueel een bundelaanpassing met een laag-orde matoppervlak | M | M |
 | V12 | Meer dan één ding op de mat, of het object deels ernaast | Waarschuwen, en het object kiezen dat in de bovenaanzichten steun heeft. Een liniaal of munt kan groter zijn dan het onderdeel. "Ligt deels naast de mat" als expliciete melding | M | S |
-| V13 | Maskerrand-bias en onscherpte per foto (deels gedaan in v0.3 en v0.4.1) | Gedaan: de onscherpte per foto wordt aan de mat gemeten (`preflight.py`), staat in `diagnose.json`, en onscherpe foto's worden gemeld. De randbias hangt niet meer van het matpatroon af (§3b). De voorspelde mat wordt vervaagd tot de gemeten σ (§3d). **Open:** de kleinste herkenbare afronding per scan uit de gemeten onscherpte afleiden | M | M |
+| V13 | Maskerrand-bias en onscherpte per foto (deels gedaan in v0.3, v0.4.1 en v0.5) | Gedaan: de onscherpte per foto wordt aan de mat gemeten (`preflight.py`), staat in `diagnose.json`, en onscherpe foto's worden gemeld. De randbias hangt niet meer van het matpatroon af (§3b). De voorspelde mat wordt vervaagd tot de gemeten σ (§3d). De randfit legt de rand op 0,2 van de strook zonder bewijs (§3e). **Open:** de kleinste herkenbare afronding per scan uit de gemeten onscherpte afleiden (nu vast 4,5 px, afgesteld op gerenderde scans met weinig onscherpte) | M | M |
 | V14 | Kwaliteitspoort verfijnen (korte randen: gedaan in v0.3) | Residuclusters per foto: een gemist gat, een extra uitstulping. Snappen beoordelen op het energieverschil in plaats van het IoU-verschil, want 0,5 mm fout verandert de IoU maar ~0,005 | M | S |
 | V27 | Een klein duwtje herkennen (grote verplaatsing: gedaan in v0.4.1) | Een verschuiving van een paar millimeter valt in de consensus niet op (§3d). Na de fit per foto de verschuiving van het silhouet t.o.v. het model schatten; een groep opeenvolgende foto's met dezelfde verschuiving is een duwtje. Melden, of die groep apart fitten en de verschuiving meenemen | M | S |
 | V28 | Kalibratie op echte foto's | De eerste echte set haalde 1,6 px reprojectiefout, vooral door bewogen foto's en hoekruis. Foto's met σ > 3 px niet voor de kalibratie gebruiken (wel voor de maskers, als ze scherp genoeg zijn), hoeken wegen naar hun onscherpte, en in de fotocontrole waarschuwen als de camera dichter dan ~15 cm bij de mat is | M | S |
+| V29 | Exacte modelrenderer voor de pixelfit | `silhouette.render` krimpt elke polygoon 0,5 px om `cv2.fillPoly` exact te maken, maar in schuine aanzichten wordt het silhouet toch ~0,15 px te ruim (vermoedelijk klappen dunne wandvierhoeken om) en de pixelfit ~0,05 mm te klein (§3e). Wanden als één band tekenen, of dunne wanden overslaan als de boven- en onderrand het silhouet al dekken. Daarna de drempels van de pixelfit opnieuw toetsen | M | S |
 
 ### 4.3 Grotere objectklasse
 
@@ -288,7 +353,7 @@ Voor een project dat AGPL-3.0 wil worden, telt ook de licentie van de **gewichte
 1. **Fase 0 met echte foto's.** Het gereedschap is klaar in v0.3: V1-harnas, V5 (mat v2), V6 (fotocontrole), V7 (printschaal). Sinds v0.4 horen ook zwarte en witte onderdelen in de meetset. Nu de meetset zelf maken en meten volgens [FASE-0.md](FASE-0.md): meten is weten.
 2. **v0.4 (gedaan):** de eerste stap van V8 (zwart op zwart, wit op wit), hoekpunten weghalen uit V4, en de afrondingsproef in de fit (§3c).
    **v0.4.1 (gedaan):** na de eerste echte fotoset: een verplaatst onderdeel herkennen, en maskers die zich per foto aanpassen aan onscherpte, posefout en glans (§2c, §3d).
-3. **v0.5:** V2 (fit op randen), V3 (U95) en de rest van V4 (gaten toevoegen). Samen geven ze nauwkeurigheid en een eerlijke onzekerheid, afgesteld op de Fase 0-metingen.
+3. **v0.5 (gedaan):** V2 (fit op randen), V3 (U95 per maat) en de rest van V4 (gaten toevoegen), afgesteld op gerenderde scans (§3e). Het bijstellen op de Fase 0-metingen volgt met V1.
 4. **v0.6:** de objectklasse (V15–V19) en de rest van de segmentatiecascade (V8: GrabCut, kleur, schaduw; V10).
 5. **v0.7 en verder:** vrije vormen (V20), live begeleiding (V24–V25) en een installer (V23).
 
