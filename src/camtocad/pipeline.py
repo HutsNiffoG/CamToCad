@@ -346,8 +346,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     lig_of = {n: f"groep {k + 1}" for k, g in enumerate(lig.groups) for n in g}
     lig_of |= {n: "past nergens bij" for n in lig.outliers} | {n: "niet beoordeeld" for n in lig.unjudged}
     if lig.groups:
-        share = len(lig.groups[0]) / lig.judged
-        if share < 0.5 or (len(lig.groups) > 1 and share < 0.75):
+        if len(lig.groups[0]) < 0.75 * lig.judged:  # een kwart of meer past er niet bij: niet stilletjes weglaten
             write_overlays()
             write_debug()
             raise ScanError(placement.moved_message(lig, [n for n, _ in images]))

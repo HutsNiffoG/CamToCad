@@ -108,20 +108,20 @@ Gerenderde scans van 46 foto's (1600 × 1200 pixels, ~0,25 mm/pixel op het objec
 
 | Onderdeel | Maat | Waarheid | Gefit | Na snappen |
 |---|---|---|---|---|
-| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,95 × 39,95 × 12,05 | 80 × 40 × 12 |
-| | afrondingen (4x) | R3 | R2,85–R3,17 | R3 |
-| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,63 en Ø 6,61 op (9,93, 19,94) en (69,98, 20,00) | Ø 6,62 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact |
-| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,95 / 29,96 / 24,91 / 49,95, hoogte 8,07 | exact |
-| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,24, 2 × scherp | R2,24 (niet gesnapt, binnen U95) |
-| | gat | Ø 5,5 op (15, 12) | Ø 5,43 op (14,98, 11,96) | Ø 5,43 (niet gesnapt: 5,3 en 5,5 beide plausibel) op (15, 12) |
-| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,96 × 10,02 | Ø 50 × 10 |
-| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,43 op Ø 35,01 | 4 × Ø 4,5 (ISO 273 M4) op Ø 35, parametrisch patroon |
+| Beugel (op 17° gedraaid) | lengte × breedte × hoogte | 80 × 40 × 12 | 79,92 × 39,93 × 12,06 | 80 × 40 × 12 |
+| | afrondingen (4x) | R3 | R3,04–R3,15 | R3 |
+| | gaten (2x) | Ø 6,6 op (10, 20) en (70, 20) | Ø 6,64 en Ø 6,61 op (9,96, 19,88) en (69,98, 19,99) | Ø 6,62 (niet gesnapt: 6,5 en 6,6 beide plausibel); posities exact, behalve y = 19,88 (niet gesnapt) |
+| L-vorm (niet-convex) | maten | 60 / 30 / 25 / 50, hoogte 8 | 59,95 / 29,96 / 24,95 / 49,97, hoogte 8,05 | exact |
+| | afrondingen | 4 × R2, 2 scherpe hoeken | 4 × R2,17; van de scherpe hoeken krijgt er één R1,1 | R2,17 (niet gesnapt, binnen U95) |
+| | gat | Ø 5,5 op (15, 12) | Ø 5,44 op (14,96, 11,96) | Ø 5,44 (niet gesnapt: 5,3 en 5,5 beide plausibel) op (15, 12) |
+| Ronde flens | diameter × hoogte | Ø 50 × 10 | Ø 49,95 × 10,02 | Ø 50 × 10 |
+| | gatenpatroon | 4 × Ø 4,5 op steekcirkel Ø 35 | 4 × Ø 4,40 op Ø 35,02 | 4 × Ø 4,40 (niet gesnapt; in v0.4 met Ø 4,43 wel naar 4,5) op Ø 35, parametrisch patroon |
 
 Over alle stresstests die geen waarschuwing geven (ook een zwart en een wit onderdeel, zie [ROUTE-A-VERBETERPUNTEN.md §2b](ROUTE-A-VERBETERPUNTEN.md#2b-stresstests-v04)):
 
-- buitenmaten binnen ±0,08 mm van de waarheid, hoogtes 0 tot +0,09 mm;
-- gaten tot 0,07 mm te klein; bij het zwarte onderdeel één gat 0,2 mm;
-- afrondingen −0,1 tot +0,4 mm.
+- buitenmaten binnen ±0,08 mm van de waarheid, hoogtes 0 tot +0,08 mm;
+- gaten tot 0,1 mm te klein (de kleine gaatjes van de flens), meestal 0–0,07 mm;
+- afrondingen −0,05 tot +0,2 mm; soms krijgt een scherpe hoek een kleine afronding (R1,1 bij de L-vorm).
 
 Dat is binnen het Precisie-doel van ±(0,2 mm + 0,1% · L). **Let op:** dit zijn synthetische scans met mat v2. Echte foto's hebben schaduwen, autofocus, compressie en een niet perfect vlakke mat. Hoe dicht v0.4 daarbij in de buurt komt, moet Fase 0 uitwijzen ([FASE-0.md](FASE-0.md)).
 
@@ -136,7 +136,7 @@ De eerste echte fotoset (een zwarte accu op mat v1) is niet gelukt: het onderdee
   - Schaduwen op de gestructureerde delen van de mat worden herkend.
   - Een harde slagschaduw over een egaal vak kan nog als object meetellen. De kwaliteitspoort markeert het resultaat dan als onbetrouwbaar (in de stresstests: altijd).
   - Gebruik diffuus licht, en mat papier voor de mat.
-- **Zwarte en witte onderdelen:** op mat v2 lukken ze in de stresstests. Waar het onderdeel even donker (of licht) is als de mat, telt de foto niet mee; binnen het onderdeel wordt zo'n stuk opgevuld, en de fit gebruikt alleen echt bewijs. Het zwakste punt is een gat boven een groot zwart vlak van een marker: de rand is daar in de bovenaanzichten niet te zien, en in de stresstest kwam zo'n gat 0,2 mm te klein uit. Op een mat v1 (zonder stippen) mislukt een zwart onderdeel nog; het resultaat wordt dan gemarkeerd. Print mat v2.
+- **Zwarte en witte onderdelen:** op mat v2 lukken ze in de stresstests. Waar het onderdeel even donker (of licht) is als de mat, telt de foto niet mee; binnen het onderdeel wordt zo'n stuk opgevuld, en de fit gebruikt alleen echt bewijs. Het zwakste punt is een gat boven een groot zwart vlak van een marker: de rand is daar in de bovenaanzichten niet te zien. In de stresstest van v0.4 kwam zo'n gat 0,2 mm te klein uit, in v0.4.1 0,07 mm. Op een mat v1 (zonder stippen) mislukt een zwart onderdeel nog; het resultaat wordt dan gemarkeerd. Print mat v2.
 - **Onzekerheid (U95)** is een indicatie op basis van resolutie en aantal foto's, nog niet gekalibreerd op echte metingen. Meet het zelf met `camtocad valideer` ([FASE-0.md](FASE-0.md)).
 - **Afrondingen** zijn het minst nauwkeurig (−0,1 tot +0,4 mm): ze bepalen maar een klein stukje van het silhouet. Gelijke afrondingen worden gegroepeerd en alleen gesnapt als dat zeker is.
 - **Afrondingen kleiner dan ~3 pixels** (bij de demo ~0,8 mm) zijn niet te onderscheiden van scherpe hoeken en worden als scherp gemodelleerd; het rapport meldt dat.
