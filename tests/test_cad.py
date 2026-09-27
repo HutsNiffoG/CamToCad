@@ -107,15 +107,33 @@ def test_part_frame_puts_datum_at_origin():
 
 # ----------------------------------------------------------------------------- rasterisatie
 
-def test_shrink_makes_fillpoly_exact():
-    for lo, hi in [(10.25, 50.25), (10.5, 50.5), (3.3, 40.9)]:
-        m = np.zeros((64, 64), np.uint8)
+def _raster(polys, quads=False, size=64):
+    m = np.zeros((size, size), np.uint8)
+    runs = silhouette._scan_quads(np.array(polys), size, size) if quads else silhouette._scan_polys(polys, size, size)
+    silhouette._fill_runs(m, *runs)
+    return m
+
+
+def test_rasterisation_takes_exactly_the_pixel_centres_inside():
+    """V29: een pixel hoort bij een vlak als zijn midden erbinnen ligt (middens op gehele coördinaten)."""
+    yy, xx = np.mgrid[0:64, 0:64]
+    for lo, hi in [(10.25, 50.25), (10.5, 50.75), (3.3, 40.9)]:
         q = np.array([[lo, lo], [hi, lo], [hi, hi], [lo, hi]])
-        pts = silhouette._to_fixed(silhouette._shrink(q), 0, 0)
-        cv2.fillPoly(m, [pts], 1, cv2.LINE_8, silhouette.SHIFT)
-        inside = np.arange(64)
-        n = np.count_nonzero((inside > lo) & (inside < hi))
-        assert m.sum() == n * n
+        want = (xx >= lo) & (xx <= hi) & (yy >= lo) & (yy <= hi)
+        assert np.array_equal(_raster([q]).astype(bool), want)
+        assert np.array_equal(_raster([q], quads=True).astype(bool), want)
+    # een wand van 0,3 px breed, schuin: alleen de middens die er echt in liggen (cv2 tekende 1-2 px per rij)
+    thin = np.array([[10.0, 5.0], [10.3, 5.0], [30.3, 55.0], [30.0, 55.0]])
+    m = _raster([thin], quads=True)
+    t = (yy - 5.0) / 50.0
+    left = 10.0 + 20.0 * t
+    want = (yy >= 5) & (yy <= 55) & (xx >= left - 1e-9) & (xx <= left + 0.3 + 1e-9)
+    assert np.array_equal(m.astype(bool), want) and 10 < m.sum() < 30
+    # een L-vorm (hol): even-oneven per rij
+    L = np.array([[5.5, 5.5], [40.5, 5.5], [40.5, 20.5], [20.5, 20.5], [20.5, 50.5], [5.5, 50.5]])
+    want = (((xx >= 5.5) & (xx <= 40.5) & (yy >= 5.5) & (yy <= 20.5))
+            | ((xx >= 5.5) & (xx <= 20.5) & (yy >= 5.5) & (yy <= 50.5)))
+    assert np.array_equal(_raster([L]).astype(bool), want)
 
 
 @pytest.mark.parametrize("value, sigma", [(12.4, 0.05), (3.3, 0.02)])

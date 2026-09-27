@@ -23,8 +23,9 @@ def plate(hole: bool = True) -> Part2p5D:
 
 
 def exact_mask(part: Part2p5D, v: silhouette.ViewData, s: int = 5) -> np.ndarray:
-    """Silhouet met pixelmiddens binnen het model, via s x s supersampling (de snelle modelrenderer van
-    de pixelfit tekent in schuine aanzichten ~0,15 px te ruim: dunne wandvierhoeken)."""
+    """Silhouet als een gerenderd masker: een pixel is object als meer dan de helft ervan het model bedekt,
+    via s x s supersampling (de modelrenderer zelf neemt het pixelmidden; tot v0.7 tekende hij in schuine
+    aanzichten ~0,15 px te ruim, en daarom was dit het ijkpunt, V29)."""
     Ks = K.copy()
     Ks[:2, :2] *= s
     Ks[:2, 2] = s * K[:2, 2] + 0.5 * (s - 1)

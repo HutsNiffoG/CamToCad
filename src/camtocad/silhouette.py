@@ -12,17 +12,14 @@ zonder dat het object textuur nodig heeft. Een visual hull dient alleen als star
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
-import cv2
 import numpy as np
 
 from .calib import Pose, project
 from .masks import ViewMasks
 from .cadhelpers import afgeronde_hoeken
 from .profile import Hole, Part2p5D, Step, TopEdge, circle_polygon
-
-SHIFT = 4  # subpixel-coördinaten voor cv2.fillPoly (1/16 pixel)
 
 
 @dataclass
@@ -33,6 +30,20 @@ class ViewData:
     unk: np.ndarray  # onbekend (op de mat, maar zonder textuur)
     x0: int
     y0: int
+    _sums: tuple | None = field(default=None, repr=False, compare=False)  # zie sums()
+
+    def sums(self) -> tuple:
+        """Per rij de cumulatieve aantallen zekere-mat-, onbekende en objectpixels (met een 0-kolom vooraan),
+        en het totaal aantal objectpixels: zo telt de energie per reeks pixels in plaats van per pixel. Opnieuw
+        berekend als een van de maskers vervangen is."""
+        key = (id(self.fg), id(self.bg), id(self.unk))
+        if self._sums is None or self._sums[0] != key:
+            def cum(m):
+                out = np.zeros((m.shape[0], m.shape[1] + 1), np.int32)
+                np.cumsum(m, axis=1, dtype=np.int32, out=out[:, 1:])
+                return out
+            self._sums = (key, cum(self.bg), cum(self.unk), cum(self.fg), int(np.count_nonzero(self.fg)))
+        return self._sums
 
 
 def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, margin_mm: float = 8.0,
@@ -68,43 +79,176 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
     return out
 
 
-def _to_fixed(uv: np.ndarray, x0: int, y0: int) -> np.ndarray:
-    return np.round((uv - [x0, y0]) * (1 << SHIFT)).astype(np.int32)
+def _scan_quads(q: np.ndarray, h: int, w: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Pixelmiddens binnen convexe vierhoeken (Q, 4, 2), in pixelcoördinaten van de ROI (middens op gehele
+    getallen, zoals OpenCV): per vierhoek en rij de kolommen c0..c1. Exact, ook voor een vierhoek die smaller
+    is dan een pixel (V29)."""
+    empty = np.zeros(0, np.int64)
+    if not len(q):
+        return empty, empty, empty
+    ya, yb = q[..., 1], q[:, [1, 2, 3, 0], 1]
+    xa, xb = q[..., 0], q[:, [1, 2, 3, 0], 0]
+    dy = yb - ya
+    flat = dy == 0  # een horizontale rand snijdt geen rij (de andere randen dekken hem)
+    lo = np.where(flat, np.inf, np.minimum(ya, yb))
+    hi = np.where(flat, -np.inf, np.maximum(ya, yb))
+    slope = (xb - xa) / np.where(flat, 1.0, dy)
+    x0 = xa - ya * slope  # x op rij 0
+    r0 = np.maximum(np.ceil(ya.min(axis=1)), 0).astype(np.int64)
+    r1 = np.minimum(np.floor(ya.max(axis=1)), h - 1).astype(np.int64)
+    n = np.maximum(r1 - r0 + 1, 0)
+    total = int(n.sum())
+    if not total:
+        return empty, empty, empty
+    qi = np.repeat(np.arange(len(q)), n)
+    rows = np.repeat(r0, n) + (np.arange(total) - np.repeat(np.cumsum(n) - n, n))
+    y = rows[:, None].astype(float)
+    cross = (lo[qi] <= y) & (y <= hi[qi])
+    x = x0[qi] + y * slope[qi]
+    xl = np.where(cross, x, np.inf).min(axis=1)
+    xr = np.where(cross, x, -np.inf).max(axis=1)
+    c0 = np.maximum(np.ceil(xl - 1e-9), 0)
+    c1 = np.minimum(np.floor(xr + 1e-9), w - 1)
+    ok = c1 >= c0  # ook False als de rij geen rand snijdt (inf)
+    return rows[ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
 
 
-def _shrink(uv: np.ndarray, delta: float = 0.5) -> np.ndarray | None:
-    """Verkleint een gesloten polygoon (beeldcoördinaten) met `delta` pixel (miter-offset).
+def _scan_polys(polys: list[np.ndarray], h: int, w: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Als _scan_quads, voor willekeurige (ook holle) polygonen: per polygoon en rij de snijpunten met de rij
+    (halfopen regel op de hoekpunten), gesorteerd en per paar een reeks kolommen (even-oneven)."""
+    empty = np.zeros(0, np.int64)
+    polys = [p for p in polys if len(p) >= 3]
+    if not polys:
+        return empty, empty, empty
+    sizes = np.array([len(p) for p in polys])
+    P = np.vstack(polys).astype(float)
+    first = np.repeat(np.cumsum(sizes) - sizes, sizes)
+    nxt = np.arange(len(P)) + 1
+    nxt = np.where(nxt - first >= np.repeat(sizes, sizes), first, nxt)
+    ya, yb, xa, xb = P[:, 1], P[nxt, 1], P[:, 0], P[nxt, 0]
+    r0 = np.maximum(np.ceil(np.minimum(ya, yb)), 0).astype(np.int64)  # halfopen: laag <= r < hoog
+    r1 = np.minimum(np.ceil(np.maximum(ya, yb)) - 1, h - 1).astype(np.int64)
+    n = np.maximum(r1 - r0 + 1, 0)
+    total = int(n.sum())
+    if not total:
+        return empty, empty, empty
+    e = np.repeat(np.arange(len(P)), n)
+    rows = np.repeat(r0, n) + (np.arange(total) - np.repeat(np.cumsum(n) - n, n))
+    x = xa[e] + (rows - ya[e]) / (yb[e] - ya[e]) * (xb[e] - xa[e])
+    order = np.lexsort((x, rows, np.repeat(np.arange(len(polys)), sizes)[e]))
+    x, rows = x[order], rows[order]
+    c0 = np.maximum(np.ceil(x[0::2] - 1e-9), 0)
+    c1 = np.minimum(np.floor(x[1::2] + 1e-9), w - 1)
+    ok = c1 >= c0
+    return rows[0::2][ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
 
-    cv2.fillPoly vult ook de pixels waar de rand doorheen loopt: het resultaat is aan elke kant
-    0,5 px groter dan 'pixelmidden binnen de polygoon'. Zonder deze correctie zou de optimizer het
-    model 0,5 px te klein fitten. Geeft None voor (bijna) gedegenereerde polygonen.
-    """
-    nxt = np.concatenate([uv[1:], uv[:1]])
-    area = 0.5 * float(np.sum(uv[:, 0] * nxt[:, 1] - uv[:, 1] * nxt[:, 0]))
-    if abs(area) < 1.0:
-        return None
-    d = nxt - uv
-    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
-    s = 1.0 if area > 0 else -1.0
-    n = s * np.column_stack([-d[:, 1], d[:, 0]])  # naar binnen gerichte normaal van rand i (van i naar i+1)
-    n_prev = np.concatenate([n[-1:], n[:-1]])
-    denom = np.maximum(1.0 + np.sum(n * n_prev, axis=1), 0.25)  # miterlengte begrenzen
-    return uv + delta * (n + n_prev) / denom[:, None]
+
+def _fill_runs(mask: np.ndarray, rows: np.ndarray, c0: np.ndarray, c1: np.ndarray, value: int = 1) -> None:
+    """Zet de pixels (rij, c0..c1) op `value`: lange reeksen per rij (snel), korte in één keer."""
+    length = c1 - c0 + 1
+    long_ = length > 48
+    for r, a, b in zip(rows[long_].tolist(), c0[long_].tolist(), c1[long_].tolist()):
+        mask[r, a:b + 1] = value
+    rows, c0, length = rows[~long_], c0[~long_], length[~long_]
+    total = int(length.sum())
+    if total:
+        idx = np.repeat(rows * mask.shape[1] + c0 - (np.cumsum(length) - length), length) + np.arange(total)
+        mask.ravel()[idx] = value
 
 
-def _shrink_quads(q: np.ndarray, delta: float = 0.5) -> np.ndarray:
-    """Gevectoriseerde _shrink voor een stapel vierhoeken (Q, 4, 2); gedegenereerde vallen weg."""
-    x, y = q[..., 0], q[..., 1]
-    area = 0.5 * (np.sum(x * np.roll(y, -1, axis=1), axis=1) - np.sum(y * np.roll(x, -1, axis=1), axis=1))
-    keep = np.abs(area) >= 1.0
-    q, area = q[keep], area[keep]
-    d = np.roll(q, -1, axis=1) - q
-    d /= np.linalg.norm(d, axis=2, keepdims=True) + 1e-12
-    s = np.where(area > 0, 1.0, -1.0)[:, None]
-    n = np.stack([-d[..., 1] * s, d[..., 0] * s], axis=2)
-    n_prev = np.roll(n, 1, axis=1)
-    denom = np.maximum(1.0 + np.sum(n * n_prev, axis=2), 0.25)
-    return q + delta * (n + n_prev) / denom[..., None]
+_EMPTY = np.zeros(0, np.int64)
+
+
+def _cover(groups: list[tuple[np.ndarray, np.ndarray, np.ndarray]]):
+    """Reeksen (rij, c0, c1) van een paar groepen samengevoegd tot segmenten met per groep de dekking (hoeveel
+    reeksen van die groep het segment bedekken). Geeft (rij, c0, c1, dekking (S, groepen))."""
+    sizes = [len(g[0]) for g in groups]
+    total = sum(sizes)
+    if not total:
+        return _EMPTY, _EMPTY, _EMPTY, np.zeros((0, len(groups)), np.int32)
+    rows = np.concatenate([g[0] for g in groups])
+    c0 = np.concatenate([g[1] for g in groups])
+    c1 = np.concatenate([g[2] for g in groups])
+    gid = np.repeat(np.arange(len(groups)), sizes)
+    er = np.concatenate([rows, rows])
+    ec = np.concatenate([c0, c1 + 1])  # begin en einde (exclusief)
+    step = np.zeros((2 * total, len(groups)), np.int32)
+    step[np.arange(total), gid] = 1
+    step[total + np.arange(total), gid] = -1
+    order = np.lexsort((ec, er))
+    er, ec, step = er[order], ec[order], step[order]
+    cov = np.cumsum(step, axis=0)  # per rij telt alles op tot 0, dus de rijen storen elkaar niet
+    keep = (er[:-1] == er[1:]) & (ec[1:] > ec[:-1])
+    return er[:-1][keep], ec[:-1][keep], ec[1:][keep] - 1, cov[:-1][keep]
+
+
+def _union(rows: np.ndarray, c0: np.ndarray, c1: np.ndarray):
+    """Vereniging van reeksen per rij: gesorteerd per rij en begin, dan een lopend maximum van het einde;
+    een nieuwe reeks begint waar het begin voorbij dat maximum (+1) ligt."""
+    if not len(rows):
+        return rows, c0, c1
+    order = np.lexsort((c0, rows))
+    rows, c0, c1 = rows[order], c0[order], c1[order]
+    span = int(c1.max()) + 2
+    reach = np.maximum.accumulate(rows * span + c1) - rows * span  # lopend maximum binnen de rij
+    new = np.ones(len(rows), bool)
+    new[1:] = (rows[1:] != rows[:-1]) | (c0[1:] > reach[:-1] + 1)
+    first = np.flatnonzero(new)
+    last = np.r_[first[1:] - 1, len(rows) - 1]
+    return rows[first], c0[first], reach[last]
+
+
+def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np.ndarray]):
+    """Het silhouet als losse reeksen (rij, c0, c1) per rij: de vereniging van onder- en bovenvlak en de wanden,
+    min de doorkijk door gaten, sleuven en uitsparingen. Alles volgens de pixelmiddenregel (zie render)."""
+    h, w = v.fg.shape
+    off = np.array([v.x0, v.y0], float)
+    cam = v.pose.center
+    faces = []
+    for stack in geom:
+        # Alleen de vlakken die naar de camera kijken: de eerste snijding van een kijkstraal met het onderdeel
+        # ligt altijd op zo'n vlak, dus hun vereniging is precies het silhouet. Het ondervlak en de achterkant
+        # vallen zo weg. De wanden en de banden van een afschuining of afronding tussen twee niveaus zijn
+        # (vlakke) vierhoeken; de ringen lopen tegen de klok in, dus (C - A) x (D - B) wijst naar buiten.
+        n_lev, n = stack.shape[:2]
+        uv, _ = project(stack.reshape(-1, 3), v.pose, K)
+        uv = uv.reshape(n_lev, n, 2) - off
+        if cam[2] > stack[-1, 0, 2]:
+            faces.append(_scan_polys([uv[-1]], h, w))
+        nxt = np.r_[1:n, 0]
+        for j in range(n_lev - 1):
+            a, d = stack[j], stack[j + 1]
+            u, t = d[nxt] - a, d - a[nxt]  # diagonalen C - A en D - B
+            nrm = np.column_stack([u[:, 1] * t[:, 2] - u[:, 2] * t[:, 1], u[:, 2] * t[:, 0] - u[:, 0] * t[:, 2],
+                                   u[:, 0] * t[:, 1] - u[:, 1] * t[:, 0]])
+            front = np.flatnonzero(((cam - a) * nrm).sum(axis=1) > 0)
+            if len(front):
+                lo, hi = uv[j], uv[j + 1]
+                quads = np.stack([lo[front], lo[nxt[front]], hi[nxt[front]], hi[front]], axis=1)
+                faces.append(_scan_quads(quads, h, w))
+    if not faces:
+        return _EMPTY, _EMPTY, _EMPTY
+    solid = _union(*(np.concatenate(parts) for parts in zip(*faces)))
+    # doorkijk: binnen de projectie van zowel de boven- als de onderrand van een gat
+    rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
+    rings += list(part.cutouts)
+    rings += [s.outline() for s in part.slots]
+    through = []
+    for r2 in rings:
+        m2 = len(r2)
+        c2 = r2.mean(axis=0)
+        z_top = part.height_at(float(c2[0]), float(c2[1])) if part.steps else part.height
+        uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, z_top)]),
+                                    np.column_stack([r2, np.zeros(m2)])]), v.pose, K)
+        uv2 = uv2 - off
+        rt, a, b, cov = _cover([_scan_polys([uv2[:m2]], h, w), _scan_polys([uv2[m2:]], h, w)])
+        both = (cov[:, 0] > 0) & (cov[:, 1] > 0)
+        through.append((rt[both], a[both], b[both]))
+    if not through:
+        return solid
+    rt, a, b, cov = _cover([solid, tuple(np.concatenate(p) for p in zip(*through))])
+    keep = (cov[:, 0] > 0) & (cov[:, 1] == 0)
+    return rt[keep], a[keep], b[keep]
 
 
 def level_rings(prof, insets, max_step_deg: float = 12.0) -> list[np.ndarray]:
@@ -159,61 +303,30 @@ def solids(part: Part2p5D) -> list[np.ndarray]:
 
 
 def render(part: Part2p5D, K: np.ndarray, v: ViewData, geom: list[np.ndarray] | None = None) -> np.ndarray:
-    """Silhouet (uint8 0/1) van het model binnen de ROI van een foto. `geom`: solids(part), als die voor
-    meerdere foto's al berekend is."""
-    h, w = v.fg.shape
-    mask = np.zeros((h, w), np.uint8)
-    geom = solids(part) if geom is None else geom
+    """Silhouet (uint8 0/1) van het model binnen de ROI van een foto: een pixel hoort erbij als zijn midden
+    binnen de projectie van het onderdeel ligt. `geom`: solids(part), als die voor meerdere foto's al
+    berekend is.
 
-    def fill(poly, target, convex=False):
-        shrunk = _shrink(poly)
-        if shrunk is None:
-            return
-        pts = _to_fixed(shrunk, v.x0, v.y0)
-        if convex:
-            cv2.fillConvexPoly(target, pts, 1, cv2.LINE_8, SHIFT)
-        else:
-            cv2.fillPoly(target, [pts], 1, cv2.LINE_8, SHIFT)
-
-    for stack in geom:
-        n_lev, n = stack.shape[:2]
-        uv, _ = project(stack.reshape(-1, 3), v.pose, K)
-        uv = uv.reshape(n_lev, n, 2)
-        fill(uv[0], mask)
-        fill(uv[-1], mask)
-        # Wanden: vierhoeken van de onderrand naar elk niveau, niet van niveau naar niveau. De banden van een
-        # afschuining of afronding zijn in beeld vaak smaller dan een pixel; zo'n vierhoek kan niet 0,5 px
-        # kleiner (hij klapt om) en wordt dan te breed getekend. Een band ligt in doorsnede in de driehoek
-        # onderrand-niveau-volgend niveau, dus binnen de twee vierhoeken vanaf de onderrand; die liggen
-        # binnen het onderdeel (het profiel van de bovenrand is bol) en zijn zo breed als de wand.
-        lo = uv[0]
-        for hi in uv[1:]:
-            quads = np.stack([lo, np.roll(lo, -1, axis=0), np.roll(hi, -1, axis=0), hi], axis=1)
-            for q in _to_fixed(_shrink_quads(quads), v.x0, v.y0):
-                cv2.fillConvexPoly(mask, q, 1, cv2.LINE_8, SHIFT)
-    # doorkijk door gaten: binnen de projectie van zowel de boven- als de onderrand
-    tmp_t = np.zeros_like(mask)
-    tmp_b = np.zeros_like(mask)
-    rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
-    rings += list(part.cutouts)
-    rings += [s.outline() for s in part.slots]
-    for r2 in rings:
-        m2 = len(r2)
-        c2 = r2.mean(axis=0)
-        z_top = part.height_at(float(c2[0]), float(c2[1])) if part.steps else part.height
-        uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, z_top)]),
-                                    np.column_stack([r2, np.zeros(m2)])]), v.pose, K)
-        tmp_t[:] = 0
-        tmp_b[:] = 0
-        fill(uv2[:m2], tmp_t)
-        fill(uv2[m2:], tmp_b)
-        mask[(tmp_t & tmp_b) > 0] = 0
+    Het silhouet is de vereniging van de projecties van onder- en bovenvlak en de wanden, alles exact volgens
+    die pixelmiddenregel gerasterd (V29). Tot v0.7 deed cv2.fillPoly dat, met elke polygoon 0,5 px gekrompen:
+    gemiddeld goed voor een groot vlak (±0,15 px per vlak), maar een wand die in beeld smaller is dan een pixel
+    kan niet krimpen, en de vereniging van vlakken met afwijkingen naar beide kanten neemt alleen de te ruime
+    mee. Het silhouet werd zo in schuine foto's ~0,12 px te ruim, en de pixelfit ~0,05 mm te klein."""
+    mask = np.zeros(v.fg.shape, np.uint8)
+    _fill_runs(mask, *_silhouette_runs(part, K, v, solids(part) if geom is None else geom))
     return mask
 
 
 def _mismatch(part: Part2p5D, K: np.ndarray, v: ViewData, geom: list[np.ndarray]) -> tuple[int, int, int]:
-    P = render(part, K, v, geom).astype(bool)
-    return np.count_nonzero(P & v.bg), np.count_nonzero(P & v.unk), np.count_nonzero(~P & v.fg)
+    """(model ∩ zekere mat, model ∩ onbekend, object buiten het model) in pixels, geteld per reeks via de
+    cumulatieve sommen per rij: zonder masker."""
+    rows, c0, c1 = _silhouette_runs(part, K, v, geom)
+    _, s_bg, s_unk, s_fg, n_fg = v.sums()
+    e = c1 + 1
+    bg = int((s_bg[rows, e] - s_bg[rows, c0]).sum())
+    unk = int((s_unk[rows, e] - s_unk[rows, c0]).sum())
+    fg_in = int((s_fg[rows, e] - s_fg[rows, c0]).sum())
+    return bg, unk, n_fg - fg_in
 
 
 def energy(part: Part2p5D, K: np.ndarray, views: list[ViewData], w_unknown: float = 0.25) -> float:
