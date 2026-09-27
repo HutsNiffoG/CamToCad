@@ -175,22 +175,29 @@ def slot_names(part: Part2p5D) -> list[tuple[str, str]]:
 
 
 def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
-              imperial: bool = False, budget: Budget | None = None) -> tuple[Part2p5D, list[Snap]]:
+              imperial: bool = False, budget: Budget | None = None,
+              evidence: dict | None = None) -> tuple[Part2p5D, list[Snap]]:
     """Snapt hoogte, randposities, diameters, straal en gatposities (in het werkassenstelsel).
 
     Met een `budget` (uncertainty.py) krijgt elke maat zijn eigen σ uit de covariantie van de randfit
     plus systematiek; zonder budget de indicatieve σ per soort maat uit `unc`. Snappen gebeurt zonder
     de printschaal (een schaalfout verschuift alle maten samen; een ontwerp in hele mm blijft dan het
-    aannemelijkst), het rapport (U95) telt hem wel mee.
+    aannemelijkst), het rapport (U95) telt hem wel mee. `evidence`: het bewijs rond elk gat en elke sleuf
+    (edgefit.evidence); met bewijs aan maar een deel van de rand is het systematische deel groter.
     """
     out = part.copy()
     snaps: list[Snap] = []
     scale_rel = budget.scale_rel if budget is not None else unc.scale_rel
+    evidence = evidence or {}
 
-    def do_snap(name, value, base, candidates, fn=None, kind="lengte"):
+    def amps(kind: str, i: int) -> tuple[float, float]:
+        e = evidence.get((kind, i))
+        return (e.amp_size, e.amp_pos) if e is not None else (1.0, 1.0)
+
+    def do_snap(name, value, base, candidates, fn=None, kind="lengte", amp=1.0):
         """`base`: indicatieve σ zonder printschaal; `fn`: de maat als functie van het model (budget)."""
-        rel = budget.rel(fn, kind) if (budget is not None and fn is not None) else None
-        sigma = base if rel is None else rel
+        rel = budget.rel(fn, kind, amp) if (budget is not None and fn is not None) else None
+        sigma = base * amp if rel is None else rel
         s = snap(name, value, sigma, candidates, threshold=threshold)
         s.sigma = math.hypot(sigma, scale_rel * abs(value))
         return s
@@ -250,10 +257,14 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     diam = [h.d for h in part.holes]
     # 3σ: het verschil tussen een gat en het groepsgemiddelde is zelf ook onzeker (~1,15σ)
     for g in _groups(diam, 3.0 * unc.hole_d):
-        d = float(np.mean([diam[i] for i in g]))
+        # gewogen: een gat met bewijs aan maar een deel van de rand telt minder mee (1/vergroting²)
+        wts = np.array([1.0 / amps("gat", i)[0] ** 2 for i in g])
+        wts /= wts.sum()
+        d = float(wts @ [diam[i] for i in g])
+        amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[0] ** 2 for i in g])))
         label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
         s = do_snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
-                    lambda p, g=g: float(np.mean([p.holes[i].d for i in g])), "gat")
+                    lambda p, g=g, wts=wts: float(wts @ [p.holes[i].d for i in g]), "gat", amp)
         for i in g:
             out.holes[i] = Hole(out.holes[i].x, out.holes[i].y, s.value)
         snaps.append(s)
@@ -275,8 +286,9 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                 c = p.outer.center
                 return 2 * float(np.mean([math.hypot(h.x - c[0], h.y - c[1]) for h in p.holes]))
 
+            amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[1] ** 2 for i in range(len(part.holes))])))
             s = do_snap(f"steekcirkel Ø ({n}x)", 2 * r, unc.hole_xy / math.sqrt(n) + 0.02,
-                        length_candidates(2 * r, imperial), fn, "positie")
+                        length_candidates(2 * r, imperial), fn, "positie", amp)
             snaps.append(s)
             ang0 = 0.0 if abs(start) < math.radians(1.5) else start
             half = math.pi / n  # een gat op 359,8° hoort vooraan, bij 0°
@@ -288,10 +300,11 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     for i, h in enumerate(out.holes):
         if i in patterned:
             continue
+        amp = amps("gat", i)[1]
         sx = do_snap(f"gat {i + 1} x", h.x, unc.hole_xy, length_candidates(h.x, imperial),
-                     lambda p, i=i: p.holes[i].x - origin(p, "x", p.holes[i].y), "positie")
+                     lambda p, i=i: p.holes[i].x - origin(p, "x", p.holes[i].y), "positie", amp)
         sy = do_snap(f"gat {i + 1} y", h.y, unc.hole_xy, length_candidates(h.y, imperial),
-                     lambda p, i=i: p.holes[i].y - origin(p, "y", p.holes[i].x), "positie")
+                     lambda p, i=i: p.holes[i].y - origin(p, "y", p.holes[i].x), "positie", amp)
         out.holes[i] = Hole(sx.value, sy.value, h.d)
         snaps += [sx, sy]
 
@@ -302,30 +315,31 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         angle = a90 if abs(sl.angle - a90) < math.radians(2.0) else sl.angle  # haaks op de datum als het bijna zo is
         base = unc.hole_d + 0.02
         r = sl.r
+        a_size, a_pos = amps("sleuf", i)
         if sl.kind == "sleuf":
             sw = do_snap(f"{name} breedte", sl.width, base, hole_candidates(sl.width),
-                         lambda p, i=i: p.slots[i].width, "gat")
+                         lambda p, i=i: p.slots[i].width, "gat", a_size)
             c2c = sl.length - sl.width
             sc = do_snap(f"{name} hartafstand", c2c, base, length_candidates(c2c, imperial),
-                         lambda p, i=i: p.slots[i].length - p.slots[i].width, "gat")
+                         lambda p, i=i: p.slots[i].length - p.slots[i].width, "gat", a_size)
             width, length = sw.value, sc.value + sw.value
             snaps += [sw, sc]
         else:
             sL = do_snap(f"{name} lengte", sl.length, base, length_candidates(sl.length, imperial),
-                         lambda p, i=i: p.slots[i].length, "gat")
+                         lambda p, i=i: p.slots[i].length, "gat", a_size)
             sW = do_snap(f"{name} breedte", sl.width, base, length_candidates(sl.width, imperial),
-                         lambda p, i=i: p.slots[i].width, "gat")
+                         lambda p, i=i: p.slots[i].width, "gat", a_size)
             length, width = sL.value, sW.value
             snaps += [sL, sW]
             if sl.r > 0:
                 sr = do_snap(f"{name} hoekstraal", sl.r, unc.fillet, radius_candidates(sl.r),
-                             lambda p, i=i: p.slots[i].r, "afronding")
+                             lambda p, i=i: p.slots[i].r, "afronding", a_size)
                 r = min(sr.value, width / 2)
                 snaps.append(sr)
         sx = do_snap(f"{name} x", sl.x, unc.hole_xy, length_candidates(sl.x, imperial),
-                     lambda p, i=i: p.slots[i].x - origin(p, "x", p.slots[i].y), "positie")
+                     lambda p, i=i: p.slots[i].x - origin(p, "x", p.slots[i].y), "positie", a_pos)
         sy = do_snap(f"{name} y", sl.y, unc.hole_xy, length_candidates(sl.y, imperial),
-                     lambda p, i=i: p.slots[i].y - origin(p, "y", p.slots[i].x), "positie")
+                     lambda p, i=i: p.slots[i].y - origin(p, "y", p.slots[i].x), "positie", a_pos)
         out.slots[i] = replace(sl, x=sx.value, y=sy.value, length=max(length, width), width=width, angle=angle, r=r)
         snaps += [sx, sy]
 

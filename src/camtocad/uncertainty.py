@@ -7,7 +7,9 @@
   verschuiving, zodat de datum mee kan bewegen); σ² = gᵀ C g met g de numerieke gradiënt.
 * Systematisch deel, per soort maat, in pixels op het object: wat de fit op gerenderde scans met
   zuivere silhouetten nog verkeerd doet (maskerrand, restbias van BETA). Afgesteld zodat daar ~95% van
-  de fouten binnen U95 valt (ROUTE-A-VERBETERPUNTEN §3e); op echte foto's te toetsen met V1.
+  de fouten binnen U95 valt (ROUTE-A-VERBETERPUNTEN §3e); op echte foto's te toetsen met V1. Voor een gat
+  of sleuf met bewijs aan maar een deel van de rand groter (edgefit.evidence): een fout in de maskerrand
+  daar schuift dan ook de plaats en verandert de maat (v0.8, §3h).
 * Printschaal: relatief, 0,05% met gemeten meetlijnen, anders 0,3%. Die telt in de gerapporteerde U95,
   maar niet bij het snappen: een schaalfout verschuift alle maten samen, en een ontwerp in hele mm blijft
   dan het aannemelijkst.
@@ -83,11 +85,12 @@ class Budget:
     def sys(self, kind: str) -> float:
         return SYS_PX[kind] * self.mm_per_px
 
-    def rel(self, fn: Callable[[Part2p5D], float], kind: str) -> float | None:
-        """1σ voor snappen (zonder printschaal), of None als er geen covariantie is."""
+    def rel(self, fn: Callable[[Part2p5D], float], kind: str, amp: float = 1.0) -> float | None:
+        """1σ voor snappen (zonder printschaal), of None als er geen covariantie is. `amp`: vergroting van het
+        systematische deel voor een gat of sleuf met bewijs aan maar een deel van de rand (edgefit.evidence)."""
         if self.sens is None:
             return None
-        return math.hypot(self.sens.sigma(fn), self.sys(kind))
+        return math.hypot(self.sens.sigma(fn), amp * self.sys(kind))
 
     def total(self, sigma_rel: float, value: float) -> float:
         """1σ voor het rapport: met de printschaal."""

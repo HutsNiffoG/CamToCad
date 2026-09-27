@@ -2,11 +2,12 @@
 
 import math
 
+import cv2
 import numpy as np
 import pytest
 
 from camtocad import cadmodel, edgefit, holes, pipeline, silhouette, uncertainty
-from camtocad.calib import Pose
+from camtocad.calib import Pose, project
 from camtocad.masks import ViewMasks
 from camtocad.profile import Hole, Part2p5D, Profile
 from camtocad.render import look_at
@@ -105,6 +106,83 @@ def test_parameters_that_would_break_the_contour_stay_fixed():
     free = [p.name for p in edgefit._free_params(part, part.outer.angles)]
     assert "fil3" not in free
     assert {"h", "rot", "fil1", "hd0"} <= set(free)
+
+
+def without_mat_around_hole(vd, part: Part2p5D, sector=None, r_mm: float = 6.0) -> list[silhouette.ViewData]:
+    """Geen zekere mat meer rond het gat (binnen r_mm van het middelpunt, onder en boven), of alleen in de
+    hoeksector (graden, tegen de klok in vanaf +x): zoals een zwart onderdeel boven een zwart vak."""
+    h = part.holes[0]
+    a = np.radians(np.arange(0.0, 360.0, 0.5))
+    if sector is not None:
+        a = a[(np.degrees(a) - sector[0]) % 360 < (sector[1] - sector[0]) % 360]
+    rr = np.linspace(0.0, r_mm, 25)
+    disc = np.column_stack([h.x + np.outer(rr, np.cos(a)).ravel(), h.y + np.outer(rr, np.sin(a)).ravel()])
+    out = []
+    for v in vd:
+        hh, ww = v.fg.shape
+        blank = np.zeros((hh, ww), np.uint8)
+        for z in (0.0, part.height):
+            uv, _ = project(np.column_stack([disc, np.full(len(disc), z)]), v.pose, K)
+            uv = np.round(uv - [v.x0, v.y0]).astype(int)
+            ok = (uv[:, 0] >= 0) & (uv[:, 0] < ww) & (uv[:, 1] >= 0) & (uv[:, 1] < hh)
+            blank[uv[ok, 1], uv[ok, 0]] = 1
+        bg = v.bg & ~(cv2.dilate(blank, np.ones((5, 5), np.uint8)) > 0)
+        out.append(silhouette.ViewData(v.pose, v.fg, bg, ~(v.fg | bg), v.x0, v.y0))
+    return out
+
+
+def test_evidence_all_around_a_hole_and_on_half_of_it(plate_scan):
+    """Met zekere mat rondom telt het systematische deel gewoon; met bewijs aan één kant hangen plaats en maat
+    samen en is het ~2,3x zo groot; zonder bewijs is het gat 'zwak'."""
+    truth = plate()
+    for views, lo, hi in ((plate_scan, 1.0, 1.0), (without_mat_around_hole(plate_scan, truth, (0, 180)), 1.8, 3.0)):
+        prob = edgefit._Problem(truth, K, views)
+        prob.set_status(truth)
+        e = edgefit.evidence(prob, prob.x_of(truth))[("gat", 0)]
+        assert lo - 1e-6 <= e.amp_size <= hi + 1e-6 and lo - 1e-6 <= e.amp_pos <= hi + 1e-6 and not e.weak
+    prob = edgefit._Problem(truth, K, without_mat_around_hole(plate_scan, truth))
+    prob.set_status(truth)
+    e = edgefit.evidence(prob, prob.x_of(truth))[("gat", 0)]
+    assert e.weak and e.fraction < edgefit.EVIDENCE_MIN and e.amp_size == e.amp_pos == edgefit.AMP_MAX
+
+
+def test_a_hole_without_evidence_stays_put_and_gets_a_wide_u95(plate_scan):
+    """Zwart op zwart rond het gat: het gat blijft staan (anders drijft het naar de rand van het
+    vertrouwensgebied en blijft voor alles de pixelfit staan), de rest wordt gewoon gefit, en maat en plaats
+    van het gat krijgen een ruime U95 in plaats van alleen de systematiek van een gat met bewijs rondom."""
+    truth = plate()
+    views = without_mat_around_hole(plate_scan, truth)
+    start = truth.copy()
+    start.outer.offsets = start.outer.offsets + np.array([0.3, -0.2, 0.25, -0.3])
+    start.holes[0] = Hole(110.2, 79.8, 6.3)
+    ef = edgefit.fit(start, K, views)
+    assert ef.accepted, ef.note
+    assert ef.extra["evidence"][("gat", 0)].weak
+    assert (ef.part.holes[0].x, ef.part.holes[0].y, ef.part.holes[0].d) == (110.2, 79.8, 6.3)
+    assert np.allclose(ef.part.outer.offsets, truth.outer.offsets, atol=0.05)
+    part_pf, angle, shift = cadmodel.to_part_frame(ef.part)
+    budget = uncertainty.Budget(uncertainty.Sensitivity(ef.extra["problem"].build, ef.x, edgefit.jackknife(ef),
+                                                        angle, shift), 0.25, 0.0)
+    unc = cadmodel.estimate_uncertainty(0.25, len(views), 3)
+    _, snaps = cadmodel.snap_part(part_pf, unc, budget=budget, evidence=ef.extra["evidence"])
+    by = {s.name: s for s in snaps}
+    assert by["gat Ø (gat 1)"].sigma >= 0.99 * edgefit.AMP_MAX * uncertainty.SYS_PX["gat"] * 0.25
+    assert by["gat 1 x"].sigma >= 0.99 * edgefit.AMP_MAX * uncertainty.SYS_PX["positie"] * 0.25
+    assert not by["gat Ø (gat 1)"].snapped
+
+
+def test_equal_holes_are_averaged_by_how_well_each_is_seen():
+    """Twee gaten die even groot lijken: het gat met bewijs aan maar een deel van de rand telt minder mee."""
+    prof = Profile("polygon", np.array([40.0, 20.0]), np.array([-np.pi / 2, 0, np.pi / 2, np.pi]),
+                   np.array([20.0, 40.0, 20.0, 40.0]), np.zeros(4))
+    part = Part2p5D(12.0, prof, [Hole(10.0, 20.0, 6.6), Hole(70.0, 20.0, 6.45)])
+    unc = cadmodel.estimate_uncertainty(0.25, 40, 5)
+    ev = {("gat", 0): edgefit.Evidence(1.0, 1.0, 1.0), ("gat", 1): edgefit.Evidence(0.4, 4.0, 4.0)}
+    _, snaps = cadmodel.snap_part(part, unc, evidence=ev)
+    d = next(s for s in snaps if s.name == "gat Ø (2x)")
+    assert d.measured == pytest.approx((6.6 + 6.45 / 16) / (1 + 1 / 16))
+    by = {s.name: s for s in snaps}
+    assert by["gat 2 x"].sigma > 3.9 * by["gat 1 x"].sigma
 
 
 def test_jackknife_gives_a_small_positive_covariance(plate_fit):

@@ -62,6 +62,9 @@ TRUST_STEP_MM, STEP_VERT_DENSITY = 1.0, 4.0
 # 4,5 px daarna weer scherp)
 TRUST_FILLET_PX = 5.0
 FREEZE_PROBE_MM = 0.1
+# Bewijs rond een gat of sleuf (zie `evidence`): minder dan dit deel van de randpunten met zekere mat ernaast,
+# of een systematische fout die hierdoor minstens AMP_MAX keer groter is dan met bewijs rondom: 'zonder bewijs'
+EVIDENCE_MIN, AMP_MAX = 0.10, 8.0
 
 
 def signed_dist(mask: np.ndarray) -> np.ndarray:
@@ -309,6 +312,105 @@ class EdgeFit:
     extra: dict = field(default_factory=dict)
 
 
+@dataclass
+class Evidence:
+    """Bewijs rond een gat of sleuf. `fraction`: welk deel van de randpunten op de silhouetrand (over alle foto's)
+    zekere mat naast zich heeft. `amp_size`, `amp_pos`: hoeveel groter de systematische fout van de maat en van de
+    positie daardoor is dan met bewijs rondom (1 = rondom; zie `evidence`)."""
+
+    fraction: float
+    amp_size: float
+    amp_pos: float
+
+    @property
+    def weak(self) -> bool:
+        return max(self.amp_size, self.amp_pos) >= AMP_MAX
+
+
+def features(part: Part2p5D, lay: dict) -> list[tuple[str, int, np.ndarray, list[str], list[dict], list[dict]]]:
+    """Gaten en sleuven: (soort, index, hun punten in points2d, parameters, maatgrootheden, positiegrootheden). Een
+    grootheid is een lineaire combinatie van parameters, bijv. de hartafstand van een sleuf {sl: 1, sw: -1}."""
+    out, start = [], outer_count(lay)
+    for i, n in enumerate(lay["holes"]):
+        out.append(("gat", i, np.arange(start, start + n), [f"hx{i}", f"hy{i}", f"hd{i}"], [{f"hd{i}": 1.0}],
+                    [{f"hx{i}": 1.0}, {f"hy{i}": 1.0}]))
+        start += n
+    for i, (s, ls) in enumerate(zip(part.slots, lay["slots"])):
+        n = sum(ls["arcs"]) + sum(ls["edges"])
+        names = [f"sx{i}", f"sy{i}", f"sl{i}", f"sw{i}", f"sa{i}"] + ([f"sr{i}"] if s.kind == "rechthoek" else [])
+        sizes = [{f"sw{i}": 1.0}, {f"sl{i}": 1.0, f"sw{i}": -1.0} if s.kind == "sleuf" else {f"sl{i}": 1.0}]
+        out.append(("sleuf", i, np.arange(start, start + n), names, sizes, [{f"sx{i}": 1.0}, {f"sy{i}": 1.0}]))
+        start += n
+    return out
+
+
+def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]:
+    """Hoe goed is elk gat en elke sleuf bepaald? Per soort en index (zie `features`).
+
+    Een gat in een zwart onderdeel boven een zwart vak laat geen mat zien: de randfit heeft er dan geen bewijs,
+    en de maat en de plaats komen uit de pixelfit (analyse van de stresstest 'donker', v0.8). Ligt er alleen aan
+    één kant zekere mat naast de rand, dan hangen maat en plaats samen: een fout in de maskerrand daar schuift
+    het gat en verandert de maat. De jackknife ziet dat niet (alle foto's zien dezelfde mat onder het gat).
+
+    Maat: per randpunt het gewicht van het bewijs, opgeteld over de foto's (zoals in de residuen), en per punt de
+    verschuiving van de rand langs de normaal per eenheid van elke parameter van de vorm (in het vlak). Daarmee
+    de informatiematrix met bewijs en die met bewijs overal waar het punt op de silhouetrand ligt, elk per
+    randpunt genormeerd: de verhouding van de varianties van een maat is het kwadraat van de vergroting. Met
+    bewijs rondom is die 1; met een halve ring ongeveer 2,3."""
+    part = prob.build(x)
+    lay = prob.lay
+    p2, nrm, _ = points2d(part, lay)
+    rim = rims(part, lay)
+    n_pts = len(p2)
+    W, N, E = np.zeros(n_pts), np.zeros(n_pts), np.zeros(n_pts)
+    for i, v in enumerate(prob.vd):
+        on = prob.status[i] & (rim.point >= 0)
+        if not on.any():
+            continue
+        uv, _ = project(rim.P[on], v.pose, prob.K)
+        h, w = v.fg.shape
+        uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
+        wgt = np.clip((4.0 - _bilinear(prob.fields[i][1], uv)) / 2.0, 0.0, 1.0)
+        pt = rim.point[on]
+        np.add.at(W, pt, wgt ** 2)
+        np.add.at(N, pt, 1.0)
+        np.add.at(E, pt, (wgt > 0.5).astype(float))
+    out = {}
+    eps = 1e-4
+    for kind, i, idx, names, sizes, positions in features(part, lay):
+        names = [nm for nm in names if nm in {p.name for p in prob.params} or nm in prob.frozen]
+        cols = []
+        for nm in names:
+            q = silhouette._set(part, prob.base, nm, silhouette._get(part, prob.base, nm) + eps)
+            cols.append(np.sum((points2d(q, lay)[0][idx] - p2[idx]) * nrm[idx], axis=1) / eps)
+        D = np.column_stack(cols)
+        w_i, n_i = W[idx], N[idx]
+        frac = float(E[idx].sum() / n_i.sum()) if n_i.sum() > 0 else 0.0
+
+        def amp(qs: list[dict]) -> float:
+            if w_i.sum() <= 0 or n_i.sum() <= 0:
+                return AMP_MAX
+            Aw, Af = D.T @ (w_i[:, None] * D), D.T @ (n_i[:, None] * D)
+            worst = 1.0
+            for qd in qs:
+                g = np.array([qd.get(nm, 0.0) for nm in names])
+                try:
+                    sw = float(g @ np.linalg.solve(Aw, g)) * w_i.sum()
+                    sf = float(g @ np.linalg.solve(Af, g)) * n_i.sum()
+                except np.linalg.LinAlgError:
+                    return AMP_MAX
+                if not (np.isfinite(sw) and sf > 0) or sw < 0:
+                    return AMP_MAX
+                worst = max(worst, math.sqrt(sw / sf))
+            return min(worst, AMP_MAX)
+
+        if frac < EVIDENCE_MIN:  # een paar punten met bewijs zeggen niets over de vorm van het bewijs
+            out[(kind, i)] = Evidence(frac, AMP_MAX, AMP_MAX)
+        else:
+            out[(kind, i)] = Evidence(frac, amp(sizes), amp(positions))
+    return out
+
+
 def _free_params(part: Part2p5D, base: np.ndarray) -> list[silhouette.Param]:
     """De parameters die de fit mag verzetten (zie de moduletekst); rotatie is star en blijft altijd vrij."""
     free = []
@@ -344,6 +446,11 @@ class _Problem:
             sf, sb = signed_dist(v.fg), signed_dist(v.bg)
             self.fields.append((sf, sf + sb))  # afstand tot de maskerrand; breedte van de strook zonder bewijs
         self.status: list[np.ndarray] = []
+
+    def freeze(self, names: list[str]) -> None:
+        """Deze parameters niet meer fitten (ze houden de waarde van het startmodel)."""
+        self.params = [p for p in self.params if p.name not in names]
+        self.frozen += [n for n in names if n not in self.frozen]
 
     def build(self, x: np.ndarray) -> Part2p5D:
         p = self.template
@@ -405,6 +512,13 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     """Verfijnt de pixelfit `part` op de randafstanden (zie de moduletekst). `mm_per_px`: resolutie op het
     object, voor het vertrouwensgebied van de afrondingen (TRUST_FILLET_PX)."""
     prob = _Problem(part, K, vd, mm_per_px=mm_per_px)
+    # een gat of sleuf zonder bewijs rondom blijft staan: zijn parameters zouden anders wegdrijven tot de rand
+    # van het vertrouwensgebied, en dan bleef voor het hele onderdeel de pixelfit staan
+    prob.set_status(part)
+    ev = evidence(prob, prob.x_of(part))
+    frozen_invalid = list(prob.frozen)
+    weak = [(kind, i, names) for (kind, i, _, names, _, _) in features(part, prob.lay) if ev[(kind, i)].weak]
+    prob.freeze([nm for _, _, names in weak for nm in names])
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None
@@ -418,7 +532,7 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
                 break
     except (ValueError, np.linalg.LinAlgError, FloatingPointError) as e:
         return EdgeFit(part, [p.name for p in prob.params], x_pix, np.zeros((0, len(x_pix))), np.zeros(0),
-                       np.zeros(0, int), False, f"randfit mislukt: {e}")
+                       np.zeros(0, int), False, f"randfit mislukt: {e}", {"evidence": ev})
     at_edge = np.flatnonzero((np.abs(res.x - lb) < 1e-6) | (np.abs(res.x - ub) < 1e-6))
     # een ondergrens die al in de pixelfit gold (een afronding van 0) telt niet als 'weggedreven'
     at_edge = [i for i in at_edge if not (abs(res.x[i] - prob.params[i].lower) < 1e-6)]
@@ -428,8 +542,12 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     if at_edge:
         ef.part, ef.accepted = part, False
         ef.note = "randfit liep tegen de grens van het vertrouwensgebied (" + ", ".join(names[i] for i in at_edge) + ")"
+    # het bewijs bij het resultaat (voor de U95 per maat); zonder randfit dat bij de pixelfit
+    ef.extra["evidence"] = evidence(prob, res.x) if ef.accepted else ev
     if log:
-        frozen = f"; vast (contour anders ongeldig): {', '.join(prob.frozen)}" if prob.frozen else ""
+        frozen = f"; vast (contour anders ongeldig): {', '.join(frozen_invalid)}" if frozen_invalid else ""
+        if weak:
+            frozen += "; vast (geen bewijs rond de rand): " + ", ".join(f"{k} {i + 1}" for k, i, _ in weak)
         log(("randfit: " if ef.accepted else "randfit niet gebruikt: ") + (ef.note or
             f"{len(res.fun)} randpunten over {len(vd)} foto's") + frozen)
     return ef

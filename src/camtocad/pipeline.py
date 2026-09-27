@@ -743,8 +743,22 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             budget = uncertainty.Budget(uncertainty.Sensitivity(prob.build, ef.x, C, angle, shift), mm_per_px,
                                         unc.scale_rel)
             unc_method = "per maat: jackknife over groepen foto's (randfit), systematiek, " + scale_note
+    # bewijs rond gaten en sleuven (edgefit.evidence): zonder bewijs rondom zijn maat en plaats onzekerder
+    evidence = ef.extra.get("evidence") or {}
+    slot_label = [n for n, _ in cadmodel.slot_names(part_pf)]
+    ev_diag = {}
+    for (kind, i), e in sorted(evidence.items()):
+        label = f"gat {i + 1}" if kind == "gat" else slot_label[i]
+        ev_diag[label] = {"randpunten met bewijs": round(e.fraction, 3), "vergroting maat": round(e.amp_size, 2),
+                          "vergroting plaats": round(e.amp_pos, 2), "zonder bewijs": e.weak}
+        if e.weak:
+            warnings.append(f"{label}: te weinig bewijs rond de rand (zwart op zwart: langs de rand is bijna nergens "
+                            "mat te zien): maat en plaats komen uit de pixelfit, met een ruime U95. Controleer ze, of "
+                            "leg het onderdeel anders op de mat")
+    if ev_diag:
+        write_debug({"bewijs binnenvormen": ev_diag})
     snapped, snaps = cadmodel.snap_part(part_pf, unc, threshold=opts.snap_threshold, imperial=opts.imperial,
-                                        budget=budget)
+                                        budget=budget, evidence=evidence)
     if budget is not None:
         unc = _effective_uncertainty(unc, snaps, budget.scale_rel)
     if snapped.outer.kind == "polygon" and not snapped.outer.is_valid():
