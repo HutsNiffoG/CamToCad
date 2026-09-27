@@ -123,3 +123,67 @@ def test_a_blurred_photo_is_compared_with_an_equally_blurred_mat(empty_view, dar
     found = [np.count_nonzero(masks.classify(blurred, pred, valid, px_per_mm=ppm, **kw).fg & core)
              / np.count_nonzero(core) for kw in ({}, {"blur_px": 2.5})]
     assert found[1] > 0.97 and found[1] > found[0] + 0.05, found
+
+
+def color_top_view(albedo_rgb, tint=(1.0, 0.93, 0.80)):
+    """Hetzelfde bovenaanzicht in kleur (BGR, JPEG met 4:2:0-chroma zoals een telefoon): per kanaal gerenderd,
+    onder warm licht dat de witbalans niet helemaal wegwerkt."""
+    import cadquery as cq
+
+    spec = mat.PRESETS["A4"]
+    part = (cq.Workplane("XY").box(40, 25, 6, centered=(True, True, False)).edges("|Z").fillet(3)
+            .faces(">Z").workplane().pushPoints([(10, 0)]).hole(6.0))
+    mesh = render.tessellate(render.place(part, spec, angle_deg=12.0, offset=(10, -5)))
+    cam = render.default_camera(dist=(0, 0, 0, 0, 0))
+    raster = mat.rasterize_board(spec, 10.0, 3.0)
+    lo, hi = mesh[0].min(axis=0), mesh[0].max(axis=0)
+    c = (lo + hi) / 2
+    R, t = render.look_at([c[0] + 15, c[1] - 10, 330.0], [c[0], c[1], 0.0])
+    rng = np.random.default_rng(3)
+    chans = []
+    for a, k in zip(albedo_rgb, tint):
+        img, truth = render.render_view(raster, cam, R, t, mesh, albedo=a, rng=rng)
+        chans.append(img.astype(np.float32) * k)
+    bgr = np.clip(np.dstack(chans[::-1]), 0, 255).astype(np.uint8)
+    _, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    pred, valid = masks.predict_background(raster, cam.K, Pose("top", R, t), (cam.width, cam.height))
+    return bgr, pred, valid, truth, cam.K[0, 0] / 330.0
+
+
+def test_a_colored_part_as_dark_as_the_mat_is_found_by_its_color():
+    """Donkerblauw geanodiseerd (in grijs even donker als het zwarte onderdeel hierboven): met kleur is het object
+    overal zichtbaar, ook boven zwarte stukken mat, ligt de rand goed, blijft het gat open, en is de mat vlak
+    buiten de rand bewijs voor de fit."""
+    bgr, pred, valid, truth, ppm = color_top_view((0.04, 0.08, 0.30))
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    obj = truth & valid
+    core = obj & ~(ndimage.binary_dilation(~truth, iterations=3))
+    band = obj & ~core
+    plain = masks.classify(gray, pred, valid, px_per_mm=ppm)
+    color = masks.classify(bgr, pred, valid, px_per_mm=ppm)
+    assert np.count_nonzero(color.fg & core) > 0.995 * np.count_nonzero(core)
+    assert np.count_nonzero(color.fg & band) > 0.9 * np.count_nonzero(band)
+    assert np.count_nonzero(color.fg & band) > np.count_nonzero(plain.fg & band) + 0.1 * np.count_nonzero(band)
+    # de rand: hooguit een paar procent van de randpixels verkeerd, en niets los buiten het object
+    outline = truth & ~ndimage.binary_erosion(truth)
+    wrong = (color.fg ^ truth) & valid
+    assert np.count_nonzero(wrong) < 0.35 * np.count_nonzero(outline)
+    assert np.count_nonzero(color.fg & ~ndimage.binary_dilation(truth, iterations=2) & valid) == 0
+    hole = ndimage.binary_fill_holes(truth) & ~truth
+    assert np.count_nonzero(color.fg & hole) < 0.2 * np.count_nonzero(hole)
+    # dubbelzinnig is bijna niets meer; direct buiten de rand meer zekere mat voor de fit
+    assert np.count_nonzero(color.amb & obj) < 0.2 * np.count_nonzero(plain.amb & obj)
+    ring = ndimage.binary_dilation(truth, iterations=3) & ~ndimage.binary_dilation(truth, iterations=1) & valid
+    assert np.count_nonzero(color.edge_bg & ring) > np.count_nonzero(plain.edge_bg & ring) + 0.05 * ring.sum()
+    # kleur voegt binnen het object (bijna) geen zekere mat toe; op de rand ligt die er door de onscherpte al
+    assert np.count_nonzero(color.edge_bg & truth & ~plain.edge_bg) <= 0.01 * np.count_nonzero(outline)
+
+
+def test_a_grey_part_in_a_color_photo_gets_nothing_from_color():
+    """Een zwart onderdeel in een kleurenfoto onder warm licht: de kleurzweem van het licht is geen objectkleur."""
+    bgr, pred, valid, truth, ppm = color_top_view((0.08, 0.08, 0.08))
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    plain = masks.classify(gray, pred, valid, px_per_mm=ppm)
+    color = masks.classify(bgr, pred, valid, px_per_mm=ppm)
+    assert np.count_nonzero(color.fg ^ plain.fg) < 0.002 * np.count_nonzero(truth)

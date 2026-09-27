@@ -23,7 +23,7 @@ import numpy as np
 
 from . import (__version__, cadmodel, calib, debug, edgefit, holes, hull, initial, masks, placement, preflight,
                prismcheck, profile, report, silhouette, uncertainty)
-from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_gray, read_info
+from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
 WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
@@ -65,10 +65,11 @@ HEIC_HELP = ("HEIC-foto's (iPhone) zijn alleen te lezen met de extra 'heic': pip
              "Formaten).")
 
 
-def load_images(folder: str | Path, max_side: int = 2000, log=print,
-                infos: dict[str, PhotoInfo] | None = None) -> list[tuple[str, np.ndarray]]:
+def load_images(folder: str | Path, max_side: int = 2000, log=print, infos: dict[str, PhotoInfo] | None = None,
+                chroma: dict[str, np.ndarray] | None = None) -> list[tuple[str, np.ndarray]]:
     """Leest alle foto's als grijswaarden, zonder EXIF-rotatie (één consistent sensorformaat). `infos` krijgt
-    per foto de camera, lens en zoom uit de EXIF-gegevens (V10)."""
+    per foto de camera, lens en zoom uit de EXIF-gegevens (V10); `chroma` de kleur op halve resolutie, voor
+    foto's in kleur (V8, imgio.split_chroma)."""
     paths = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in IMAGE_EXT)
     heic = [p for p in paths if p.suffix.lower() in {".heic", ".heif"}]
     if heic and not heif_supported():
@@ -77,14 +78,18 @@ def load_images(folder: str | Path, max_side: int = 2000, log=print,
             raise ScanError("Alle foto's zijn HEIC en kunnen niet gelezen worden. " + HEIC_HELP)
     out = []
     for p in paths:
-        img = read_gray(p)  # ook met niet-ASCII-tekens in het pad (Windows)
+        img = read_gray(p) if chroma is None else read_color(p)  # ook met niet-ASCII-tekens in het pad (Windows)
         if img is None:
             if p not in heic or heif_supported():
                 log(f"  overgeslagen (onleesbaar): {p.name}")
             continue
-        scale = max_side / max(img.shape)
+        scale = max_side / max(img.shape[:2])
         if scale < 1.0:
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if chroma is not None:
+            img, ch = split_chroma(img)
+            if ch is not None:
+                chroma[p.name] = ch
         out.append((p.name, img))
         if infos is not None:
             infos[p.name] = read_info(p)
@@ -449,9 +454,16 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             raise ScanError(f"Meetlijn {axis} {100 * s:.1f} mm wijkt te veel af van 100 mm: print de mat opnieuw op "
                             "100% (werkelijke grootte)")
     infos: dict[str, PhotoInfo] = {}
+    chroma: dict[str, np.ndarray] = {}  # kleur op halve resolutie (V8), per foto in kleur
     if not isinstance(images, list):
         scan_name = scan_name or Path(images).name
-        images = load_images(images, opts.max_side, log, infos)
+        images = load_images(images, opts.max_side, log, infos, chroma)
+    else:  # een lijst mag ook kleurbeelden (BGR) bevatten
+        split = [(n, split_chroma(img)) for n, img in images]
+        chroma = {n: ch for n, (_, ch) in split if ch is not None}
+        images = [(n, gray) for n, (gray, _) in split]
+    if chroma:
+        log(f"{len(chroma)} foto('s) in kleur: kleur telt mee als bewijs voor het object")
     if len(images) < 6:
         raise ScanError(f"Te weinig foto's ({len(images)}); maak er minstens 20, rondom en recht van boven")
     warnings: list[str] = []
@@ -504,9 +516,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             d = calib.detect(turned, board, name, detector, bias)
             pose = calib.solve_pose(d, spec, cam) if d is not None and len(d.ids) >= 12 else None
             if pose is not None and (best is None or pose.rms_px < best[0].rms_px):
-                best = (pose, turned, d)
+                best = (pose, turned, d, code)
         if best is not None and best[0].rms_px < 1.5:
             cal.poses[name], lookup[name] = best[0], best[1]
+            if name in chroma:
+                chroma[name] = np.ascontiguousarray(np.rot90(chroma[name], -1 if best[3] == cv2.ROTATE_90_CLOCKWISE
+                                                             else 1))
             cal.rejected.pop(name, None)
             dets.append(best[2])
             n_turned += 1
@@ -535,8 +550,12 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         img = calib.undistort(lookup[pose.name], cam)
         pred, valid = masks.predict_background(raster, cam.K, pose, (cam.width, cam.height))
         depth = float((pose.R @ np.array([spec.size_mm[0] / 2, spec.size_mm[1] / 2, 0.0]) + pose.t)[2])
+        ch = chroma.get(pose.name)
+        if ch is not None:  # kleur (V8): terug naar volle resolutie en dezelfde ontvervorming als het grijsbeeld
+            ch = calib.undistort(cv2.resize(ch.astype(np.float32), (img.shape[1], img.shape[0]),
+                                            interpolation=cv2.INTER_LINEAR), cam)
         return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0),
-                                    blur_px=blur.get(pose.name))
+                                    blur_px=blur.get(pose.name), chroma=ch)
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:  # grote beeldbewerkingen: OpenCV en numpy geven de GIL vrij
         views = list(pool.map(view_masks, cal.poses.values()))
@@ -790,6 +809,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
+        "kleur": (f"{len(chroma)} foto('s) in kleur: kleur telt mee als bewijs voor het object" if chroma
+                  else "grijswaarden (geen kleur)"),
         "camera": (f"{camera_label}: " if camera_label else "") + f"f = {cam.K[0, 0]:.1f} px"
                   + (f" (σ {100 * cam.f_std_rel:.2f}%)" if np.isfinite(cam.f_std_rel) else "")
                   + f", reprojectiefout {cam.rms_px:.3f} px",

@@ -80,3 +80,20 @@ def test_load_images_collects_camera_data(tmp_path):
     assert [n for n, _ in images] == ["p0.jpg", "p1.jpg", "p2.jpg", "p9.jpg"] and len(infos) == 4
     _, other = pipeline.camera_groups([n for n, _ in images], infos)
     assert list(other) == ["p9.jpg"]
+
+
+def test_load_images_keeps_the_color_apart(tmp_path):
+    """Kleur (V8): de pijplijn rekent in grijs en krijgt de kleur apart, op halve resolutie; een foto zonder kleur
+    (hier een grijs verloop als JPEG, of de HEIC-testfoto) krijgt geen chroma."""
+    jpeg_with_exif(tmp_path / "a.jpg")
+    img = np.full((60, 80, 3), 120, np.uint8)
+    img[20:40, 30:60] = (160, 90, 30)  # BGR: blauw vlak
+    Image.fromarray(img[:, :, ::-1]).save(tmp_path / "b.jpg", quality=92)
+    chroma = {}
+    images = pipeline.load_images(tmp_path, log=lambda m: None, chroma=chroma)
+    assert [n for n, _ in images] == ["a.jpg", "b.jpg"] and all(g.ndim == 2 for _, g in images)
+    assert list(chroma) == ["b.jpg"] and chroma["b.jpg"].shape == (30, 40, 2)
+    rg, yb = chroma["b.jpg"][15, 22].astype(float)  # midden in het blauwe vlak: R - G < 0, (R + G)/2 - B < 0
+    assert rg < -40 and yb < -60 and np.abs(chroma["b.jpg"][2, 2].astype(float)).max() < 3
+    if imgio.heif_supported():
+        assert imgio.split_chroma(imgio.read_color(DATA / "klein.heic"))[1] is None

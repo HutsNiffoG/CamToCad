@@ -9,6 +9,10 @@ HEIC/HEIF (het standaardformaat van iPhones) leest OpenCV niet. Met de optionele
 Uit de EXIF-gegevens komt welke camera, lens en zoom een foto maakte (V10). Telefoons wisselen soms
 ongemerkt van lens (een iPhone schakelt dichtbij naar de macrostand van de ultragroothoek) of zoomen
 digitaal bij, met hetzelfde beeldformaat; zulke foto's passen niet in één cameramodel.
+
+Kleur (V8): de mat is zwart-wit, dus kleur is bewijs voor het object. De pijplijn rekent in grijswaarden en
+bewaart de kleur apart als chroma op halve resolutie (zoals JPEG: telefoons slaan kleur op halve resolutie
+op), zie `split_chroma`.
 """
 
 from __future__ import annotations
@@ -136,6 +140,49 @@ def read_gray(path: str | Path) -> np.ndarray | None:
     if data.size == 0:
         return None
     return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE | cv2.IMREAD_IGNORE_ORIENTATION)
+
+
+def read_color(path: str | Path) -> np.ndarray | None:
+    """Leest een foto in kleur (BGR, zoals OpenCV), zonder EXIF-rotatie; grijs (h, w) als het bestand geen kleur
+    heeft. None als de foto niet te lezen is."""
+    path = Path(path)
+    if path.suffix.lower() in HEIF_EXT:
+        if _heif_module() is None:
+            return None
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                if img.mode in ("L", "I;16", "I"):
+                    return np.asarray(img.convert("L"))
+                return np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        data = np.fromfile(str(path), np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    img = cv2.imdecode(data, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+    if img is not None and img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
+
+
+def split_chroma(img: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
+    """(grijswaarden, chroma). Chroma: (h/2, w/2, 2) float16 met R - G en (R + G)/2 - B in grijswaarden, op
+    halve resolutie (JPEG en HEIC bewaren kleur toch zo). None voor een grijs beeld, ook als het drie gelijke
+    kanalen heeft (een grijze foto, een render)."""
+    if img.ndim == 2:
+        return img, None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    half = cv2.resize(img, (max(w // 2, 1), max(h // 2, 1)), interpolation=cv2.INTER_AREA).astype(np.float32)
+    b, g, r = half[..., 0], half[..., 1], half[..., 2]
+    chroma = np.dstack([r - g, 0.5 * (r + g) - b])
+    if float(np.abs(chroma).max(initial=0.0)) < 0.5:
+        return gray, None
+    return gray, chroma.astype(np.float16)
 
 
 def imwrite(path: str | Path, img: np.ndarray, params: list[int] | None = None) -> bool:

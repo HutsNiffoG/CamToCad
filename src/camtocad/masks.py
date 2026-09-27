@@ -12,6 +12,9 @@ daarvan afwijken horen bij het object. Klassen per pixel:
 
 Alleen zekere mat-pixels mogen voxels wegsnijden (hull.py). Zo veroorzaakt een donker
 object op een zwart vak geen gat in het model: daar is het niet 'mat'.
+
+Kleur (V8): de mat is zwart-wit. Een gekleurd object (blauw geanodiseerd, rood kunststof) is ook
+zichtbaar waar het even donker of licht is als de mat eronder; zie `_chroma_evidence`.
 """
 
 from __future__ import annotations
@@ -71,12 +74,14 @@ def _robust_affine(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
     return float(a), float(b), sigma
 
 
-def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarray, tau: float) -> np.ndarray:
+def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarray, tau: float,
+                     color: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
     """Herclassificeert pixels vlak bij de objectrand met de 50%-regel.
 
     Een lage drempel op een (vervaagde) rand legt de grens te ver naar buiten. Hier telt een
     randpixel als object als hij dichter bij de lokale objectgrijswaarde ligt dan bij de
-    voorspelde mat: de grens ligt dan op het halve contrast, dus op de echte rand.
+    voorspelde mat: de grens ligt dan op het halve contrast, dus op de echte rand. Zonder bruikbaar
+    grijscontrast beslist de kleur, met dezelfde regel (`color`: bruikbaar, object; zie _chroma_evidence).
     """
     fg8 = fg.astype(np.uint8)
     k5 = np.ones((5, 5), np.uint8)
@@ -90,6 +95,10 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
     decision = np.abs(o - bgv) > 0.5 * contrast
     out = fg.copy()
     out[usable] = decision[usable]
+    if color is not None:
+        by_color = band & ~usable & color[0]
+        out[by_color] = color[1][by_color]
+        usable = usable | by_color
     # Randpixels zonder bruikbaar contrast (de voorspelde mat is daar toevallig even grijs als het
     # object, bijv. op een vervaagde stiprand) zeggen niets: die volgen de meerderheid van de
     # beslisbare pixels in een 5x5-omgeving, in plaats van standaard 'mat' te zijn.
@@ -101,6 +110,59 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
         fill = unsure & (n_sure > 0)
         out[fill] = (n_fg > 0.5 * n_sure)[fill]
     return out
+
+
+def _chroma_evidence(chroma: np.ndarray, lum: np.ndarray, ref: np.ndarray, valid: np.ndarray, radius: float,
+                     min_area: float, k_sigma: float = 6.0, tau_min: float = 6.0):
+    """Kleur als bewijs (V8): geeft (object, bruikbaar, beslissing) of None.
+
+    `chroma`: R - G en (R + G)/2 - B per pixel (imgio.split_chroma, terug op volle resolutie), `lum` de
+    grijswaarde, `ref` zekere mat. De mat is zwart-wit, maar het licht en de witbalans van de camera geven
+    haar een kleurzweem die met de helderheid meeschaalt: per kanaal chroma ≈ k·grijs, met k lokaal gemeten op
+    de mat (zo blijft een schaduw op de mat grijs: hij verlaagt beide evenveel). Wat daar boven uitsteekt is
+    kleur van het object. De drempel volgt de ruis op de mat, plus kleurranden bij scherpe grijsovergangen
+    (demosaicing, kleurschifting), evenredig met de gradiënt. Kleine stukjes tellen niet.
+
+    Rond het gevonden object de 50%-regel op kleur, zoals voor grijs in _refine_boundary: een pixel is
+    object als zijn kleur (langs die van het object in de buurt) meer dan half zo sterk is. Bruikbaar waar
+    het object duidelijk gekleurd is (twee keer de drempel). Een grijs of zwart object geeft geen kleur, en
+    dan verandert er niets."""
+    if np.count_nonzero(ref) < 1000:
+        return None
+    ch = chroma.astype(np.float32)  # al vaag genoeg: halve resolutie (en in JPEG of HEIC zelf ook)
+    lum = lum.astype(np.float32)
+    w = ref.astype(np.float32)
+    den = _normconv(lum * lum, w, 40.0, float(np.mean(lum[ref] ** 2)), min_weight=0.002)
+    d = np.empty_like(ch)
+    for c in range(2):
+        k_all = float(np.sum(ch[..., c][ref] * lum[ref]) / max(np.sum(lum[ref] ** 2), 1e-6))
+        k = _normconv(ch[..., c] * lum, w, 40.0, k_all * float(np.mean(lum[ref] ** 2)), min_weight=0.002) \
+            / np.maximum(den, 1e-6)
+        d[..., c] = ch[..., c] - k * lum
+    mag = np.sqrt(d[..., 0] ** 2 + d[..., 1] ** 2)
+    sig = max(1.4826 * float(np.median(np.abs(d[..., c][ref][::5] - np.median(d[..., c][ref][::5]))))
+              for c in range(2))
+    gx = cv2.Sobel(lum, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    grad = np.sqrt(gx * gx + gy * gy)
+    steep = ref & (grad > 15.0)
+    fringe = float(np.percentile(mag[steep] / grad[steep], 95)) if np.count_nonzero(steep) > 200 else 0.2
+    thr = max(k_sigma * sig, tau_min) + fringe * grad
+    # waar is kleur? (lage drempel: door de onscherpte van de kleur tot een paar pixels buiten de rand)
+    seen = (valid & (cv2.GaussianBlur(mag, (0, 0), 1.0) > thr)).astype(np.uint8)
+    seen = _drop_small(cv2.morphologyEx(seen, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)) > 0, min_area)
+    inner = cv2.erode(seen.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    if np.count_nonzero(inner) < 50:
+        return None
+    wi = inner.astype(np.float32)
+    level = np.dstack([_normconv(d[..., c], wi, max(4.0, radius), 0.0) for c in range(2)])
+    near = _normconv(wi, np.ones_like(wi), max(4.0, radius), 0.0) > 0.02
+    strength = np.sqrt(level[..., 0] ** 2 + level[..., 1] ** 2)
+    usable = valid & near & (strength > 2.0 * thr)
+    frac = (d[..., 0] * level[..., 0] + d[..., 1] * level[..., 1]) / np.maximum(strength ** 2, 1e-6)
+    # het object volgens de kleur: de 50%-regel (de rand op het halve kleurcontrast, dus op de echte rand)
+    obj = _drop_small(usable & (frac > 0.5) & (seen > 0), min_area)
+    return obj, usable, frac
 
 
 def _drop_small(mask: np.ndarray, min_area: float) -> np.ndarray:
@@ -180,7 +242,7 @@ def _fill_ambiguous(fg: np.ndarray, ambiguous: np.ndarray, evidence: np.ndarray,
 
 
 def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, radius: float, window: int,
-                       min_area: float, contrast: np.ndarray):
+                       min_area: float, contrast: np.ndarray, color_obj=None, color_mat=None):
     """Zwart op zwart, wit op wit: geeft (objectmasker, dubbelzinnig, zekere-mat-toegestaan), of None.
 
     Waar de mat dezelfde grijswaarde heeft als het object ernaast, is een pixel zelf geen bewijs, en ook
@@ -189,6 +251,9 @@ def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, rad
     buiten het object mist ze al ('textuur ontbreekt'). Daar telt alleen de kern van zo'n gebied: de rand
     ligt ertussen, en de fit bepaalt hem uit het bewijs rondom. De rest is dubbelzinnig: de fit negeert
     het, en binnen het object wordt het voor de startcontour opgevuld (_fill_ambiguous).
+
+    Kleur (V8) beslist waar grijs het niet kan: een pixel in de kleur van het object is geen lek, en een pixel
+    die duidelijk de kleur van de mat heeft (`color_mat`) is bewijs voor mat en wordt niet opgevuld.
     """
     found = _object_level(fg, o, radius)
     if found is None:
@@ -209,6 +274,10 @@ def _resolve_ambiguity(fg, specks, o, bgv, valid, res, mat_seen, tau: float, rad
     sure = free & mat_ok & (res <= tau)
     unseen = free & same & ~sure
     evidence = sure | (free & ~same & (np.abs(o - bgv) < 0.3 * diff))
+    if color_obj is not None:
+        leak &= ~color_obj
+        unseen &= ~color_mat
+        evidence |= free & color_mat
     filled, mat_like = _fill_ambiguous(support, unseen, evidence, domain, o, bgv, level)
     unseen &= ~mat_like  # als geheel duidelijk mat (schaduw, doorkijk): gewoon 'onbekend', geen opvulling
     # Wat binnen de sluiting nog open is, grenst aan matbewijs (bijv. een zwart vlak naast een echt gat):
@@ -272,7 +341,7 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
              tau_min: float = 14.0, texture_min: float = 10.0, min_area_frac: float = 2e-4,
              misreg_px: float = 0.4, ncc_mat: float = 0.75, window: int = 7, use_gain: bool = True,
              use_texture_missing: bool = True, px_per_mm: float = 4.0, fill_mm: float = 3.5,
-             blur_px: float | None = None) -> ViewMasks:
+             blur_px: float | None = None, chroma: np.ndarray | None = None) -> ViewMasks:
     """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend.
 
     Twee soorten bewijs:
@@ -289,10 +358,21 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     per foto op aan: onscherpte (`blur_px`, gemeten in preflight.py; de voorspelling wordt even
     onscherp gemaakt), een kleine posefout (de tolerantie aan patroonranden wordt gemeten aan de mat
     zelf, in plaats van vast 0,4 px) en glans (zwart dat lichter is dan de versterking zegt).
+
+    `chroma` (V8): de kleur van de foto (imgio.split_chroma, op volle resolutie en ontvervormd), of een
+    kleurbeeld als `observed`. Kleur is dan een derde soort bewijs (_chroma_evidence): voor het object, voor
+    de rand waar grijs geen contrast heeft, en direct buiten de buitenrand ook voor de mat.
     """
     if observed.ndim == 3:
+        if chroma is None:
+            from .imgio import split_chroma
+            _, half = split_chroma(observed)
+            if half is not None:
+                chroma = cv2.resize(half.astype(np.float32), (observed.shape[1], observed.shape[0]),
+                                    interpolation=cv2.INTER_LINEAR)
         observed = cv2.cvtColor(observed, cv2.COLOR_BGR2GRAY)
     o = cv2.GaussianBlur(observed.astype(np.float32), (0, 0), 0.8)
+    lum = o.copy()  # grijswaarde zonder belichtingscorrectie: de kleurzweem van de mat schaalt daarmee
     p = pred.astype(np.float32)
     if blur_px is not None and blur_px > 1.0:
         # een bewogen of onscherpe foto: de voorspelling (zelf ~0,5 px vaag) even vaag maken, anders geeft
@@ -386,21 +466,30 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     tau = max(k_sigma * sigma, tau_min)
     k3 = np.ones((3, 3), np.uint8)
     min_area = min_area_frac * observed.size
-    fg = (valid & ((res > tau) | texture_missing)).astype(np.uint8)
-    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k3)
+    radius = fill_mm * px_per_mm
+    color = None  # (object, bruikbaar, fractie objectkleur): kleur als bewijs (V8)
+    if chroma is not None:
+        color = _chroma_evidence(chroma, lum, mat_seen & valid, valid, radius, min_area)
+    fg = valid & ((res > tau) | texture_missing)
+    if color is not None:
+        fg |= color[0]
+    fg = cv2.morphologyEx(fg.astype(np.uint8), cv2.MORPH_OPEN, k3)
     fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k3) > 0
     large = _drop_small(fg, min_area)
     fg, specks = large, fg & ~large
-    fg = _refine_boundary(fg, o, bgv, valid, tau)
+    color_obj = color_mat = None
+    if color is not None:
+        color_obj, color_mat = color[1] & (color[2] > 0.5), color[1] & (color[2] < 0.3)
+    fg = _refine_boundary(fg, o, bgv, valid, tau, None if color is None else (color[1], color_obj))
     mat_ok, amb = mat_seen, None
-    radius = fill_mm * px_per_mm
     if fill_mm > 0 and fg.any():
         # alleen rond het object: daarbuiten verandert niets, en zo kost het weinig rekentijd
         x, y, w, h = cv2.boundingRect(fg.astype(np.uint8))
         m = int(radius) + window + 2
         sl = (slice(max(y - m, 0), y + h + m), slice(max(x - m, 0), x + w + m))
         out = _resolve_ambiguity(fg[sl], specks[sl], o[sl], bgv[sl], valid[sl], res[sl], mat_seen[sl], tau,
-                                 radius, window, min_area, contrast[sl])
+                                 radius, window, min_area, contrast[sl],
+                                 None if color is None else color_obj[sl], None if color is None else color_mat[sl])
         if out is not None:
             fg, amb, mat_ok = np.zeros_like(fg), np.zeros_like(fg), mat_seen.copy()
             fg[sl], amb[sl], mat_ok[sl] = out
@@ -424,5 +513,15 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     edge_bg = match & near_seen & (texture15 > 1.8 * texture_min) & clearly_mat
     if amb is not None:  # waar het object onzichtbaar zou zijn, zegt 'lijkt op de mat' niets
         edge_bg &= ~amb
+    if color is not None:
+        # Kleur (V8): een pixel direct buiten de buitenrand met duidelijk de kleur van de mat is zekere mat voor
+        # de fit, ook waar grijs en textuur niets zeggen (een blauw onderdeel naast een zwart vak). Niet
+        # binnen een ingesloten gebied: glans op het object is ook kleurloos, en een gat laat de mat alleen
+        # zien als grijs of textuur dat bevestigen.
+        n, lab = cv2.connectedComponents((~fg).astype(np.uint8), connectivity=4)
+        edge = np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]])
+        outside = np.isin(lab, np.unique(edge)) & ~fg
+        ring = (cv2.dilate(fg.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) & outside
+        edge_bg |= match & color_mat & ring
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
     return ViewMasks(fg=fg, bg=match & mat_ok & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma, amb=amb)
