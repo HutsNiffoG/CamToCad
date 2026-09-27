@@ -215,16 +215,21 @@ def _effective_uncertainty(unc, snaps: list, scale_rel: float):
     def is_position(n: str) -> bool:
         return n.startswith("steekcirkel") or (n.startswith(("gat ", "sleuf ", "uitsparing ")) and n.endswith((" x", " y")))
 
+    def is_step(n: str, what: str) -> bool:
+        return n.startswith("trede ") and n.endswith(what)
+
     def is_inner_size(n: str) -> bool:  # gaten, sleuven en uitsparingen: maat van een binnenvorm
         return n.startswith("gat Ø") or (n.startswith(("sleuf ", "uitsparing "))
                                          and n.endswith(("breedte", "hartafstand", "lengte")))
 
     return cadmodel.Uncertainty(
-        edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")), unc.edge * math.sqrt(2)) / math.sqrt(2),
-        height=worst(lambda n: n == "hoogte", unc.height),
+        edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")) or is_step(n, "positie"),
+                   unc.edge * math.sqrt(2)) / math.sqrt(2),
+        height=worst(lambda n: n == "hoogte" or is_step(n, "hoogte"), unc.height),
         hole_d=worst(is_inner_size, unc.hole_d),
         hole_xy=worst(is_position, unc.hole_xy),
-        fillet=worst(lambda n: n.startswith("afronding") or n.endswith("hoekstraal"), unc.fillet), scale_rel=scale_rel)
+        fillet=worst(lambda n: n.startswith("afronding") or n.endswith(("hoekstraal", "bovenrand")), unc.fillet),
+        scale_rel=scale_rel)
 
 
 def _slots_or_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
@@ -308,6 +313,49 @@ def _add_missed_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
                 f"zien (energie {energy:.0f} → {e_trial:.0f})")
             part, energy = trial, e_trial
     return part, energy
+
+
+# V17: een vorm die geen prisma is als model proberen, als de vormtoets (V19) erom vraagt
+TOP_TRY_MM = -0.02  # kijkhoekverschil (prismcheck) waaronder een afgeschuinde of afgeronde bovenrand geprobeerd wordt
+NON_PRISM_GAIN = 0.05  # zoveel lager moet de energie worden (een prisma past met een afschuining ~1% beter)
+
+
+def _prism_check(ef, part):
+    """V19 op de randfit (of de pixelfit, als de randfit niet gebruikt is)."""
+    _, angle, shift = cadmodel.to_part_frame(ef.part if ef.accepted else part)
+    return prismcheck.check(ef, angle, shift)
+
+
+def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: float, log=print):
+    """V17: past een prisma niet (de vormtoets vond een stuk bovenrand dat lager of hoger ligt, of een
+    kijkhoekverschil zoals bij een afschuining), dan een trede of een afgeschuinde of afgeronde bovenrand
+    rondom als model proberen, vanuit de pixelfit. Alleen als het model er duidelijk beter door past (energie
+    minstens 5% lager); geeft dan (model, energie), anders None."""
+    goal = energy * (1.0 - NON_PRISM_GAIN)
+    runs = shape.runs_mat
+    if runs and part.outer.kind == "polygon":
+        r = max(runs, key=lambda r: np.linalg.norm(np.asarray(r["tot"]) - np.asarray(r["van"])))
+        cand, e = silhouette.fit_step(part, K, vd, r["van"], r["tot"], r["midden"], lower=r["soort"] == "lager")
+        if cand is not None and e < goal:
+            st = cand.steps[0]
+            log(f"trede gemodelleerd: voorbij een rechte lijn is het deel {st.height:.2f} in plaats van "
+                f"{cand.height:.2f} mm hoog; het model past duidelijk beter (energie {energy:.0f} → {e:.0f})")
+            return cand, e
+        log("geen trede gemodelleerd: " + (
+            "geen geldige trede gevonden" if cand is None else
+            f"het model past er niet duidelijk beter door (energie {energy:.0f} → {e:.0f})"))
+    elif not runs and shape.trend is not None and shape.trend < TOP_TRY_MM:
+        cand, e = silhouette.fit_top_edge(part, K, vd)
+        if cand is not None and e < goal and cand.top_edge.size >= max(0.3, 2.0 * mm_per_px):
+            te = cand.top_edge
+            log(f"bovenrand gemodelleerd: {te.kind} van {te.size:.2f} mm rondom, hoogte {cand.height:.2f} mm; het "
+                f"model past duidelijk beter (energie {energy:.0f} → {e:.0f})")
+            return cand, e
+        log("geen afschuining of afronding van de bovenrand gemodelleerd: " + (
+            "geen geldige vorm gevonden" if cand is None else
+            f"het model past er niet duidelijk beter door (energie {energy:.0f} → {e:.0f}, "
+            f"{cand.top_edge.kind} {cand.top_edge.size:.2f} mm)"))
+    return None
 
 
 def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25) -> list[str]:
@@ -560,15 +608,29 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         part, energy = probed, e_probed
     part, energy, _ = _simplify_outline(part, cam.K, vd, energy, log=log)
     part, energy = _add_missed_holes(part, cam.K, vd, energy, log=log)
-    # randfit (V2): subpixel-verfijning op de randafstanden, met de covariantie voor de U95 (V3)
-    t_fit = time.time()
-    ef = edgefit.fit(part, cam.K, vd, log=lambda m: log(f"{m} ({time.time() - t_fit:.0f} s)"))
-    if ef.accepted:
-        part = ef.part
-        energy = silhouette.energy(part, cam.K, vd)
     oc = part.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, part.height / 2])
     mm_per_px = _object_distance(cal.poses.values(), center) / cam.K[0, 0]
+    # randfit (V2): subpixel-verfijning op de randafstanden, met de covariantie voor de U95 (V3)
+    t_fit = time.time()
+
+    def fit_log(m):
+        log(f"{m} ({time.time() - t_fit:.0f} s)")
+
+    ef = edgefit.fit(part, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+    # V19: past een prisma wel? Een trede of afschuining geeft anders een stil compromis (vooral in de hoogte).
+    # V17: zo'n vorm dan als model proberen, en de randfit en de toets opnieuw
+    shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
+    if shape is not None:
+        alt = _non_prism(part, cam.K, vd, energy, shape, mm_per_px, log=log)
+        if alt is not None:
+            part, energy = alt
+            t_fit = time.time()
+            ef = edgefit.fit(part, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
+    if ef.accepted:
+        part = ef.part
+        energy = silhouette.energy(part, cam.K, vd)
     # Onscherpte in de foto's en het masker ronden ook scherpe hoeken af (ARCHITECTURE.md §7.3): op
     # gerenderde scans komt een scherpe hoek uit de randfit als een afronding van 3,5-4 pixels
     # (ROUTE-A-VERBETERPUNTEN §3e). Afrondingen onder 4,5 pixels zijn dus niet te onderscheiden van scherp.
@@ -586,10 +648,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     log(f"model gefit: hoogte {part.height:.3f} mm, {len(part.holes)} gat(en), "
         f"silhouet-IoU mediaan {stats_fit['iou_median']:.4f}")
     issues = _quality_issues(part, stats_fit, evals, opts.max_evals, mm_per_px)
-    # V19: past een prisma wel? Een trede of afschuining geeft anders een stil compromis (vooral in de hoogte)
-    if ef.extra.get("problem") is not None:
-        _, angle0, shift0 = cadmodel.to_part_frame(part)
-        shape = prismcheck.check(ef, angle0, shift0)
+    if shape is not None:
         diag["prisma"] = shape.details
         issues += [f"geen 2,5D-vorm? {m}" for m in shape.issues]
     ghosts = unseen_holes(part, cam.K, top_views)
@@ -650,8 +709,11 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
 
     # 9. rapport
     elapsed = time.time() - t_start
+    te = snapped.top_edge
     summary = {
-        "objectklasse": "2,5D (extrusie met doorgaande gaten)",
+        "objectklasse": "2,5D (extrusie met doorgaande gaten)" + (
+            f", bovenrand rondom {'afgeschuind' if te.kind == 'afschuining' else 'afgerond'}" if te else "")
+        + (f", {len(snapped.steps)} trede" if snapped.steps else ""),
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",

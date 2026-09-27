@@ -24,7 +24,10 @@ import numpy as np
 from .profile import Part2p5D
 
 # systematische 1σ in pixels op het object (zie de moduletekst; ijking in ROUTE-A-VERBETERPUNTEN §3e)
-SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afronding": 0.80}
+SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afronding": 0.80,
+          # een afgeschuinde of afgeronde bovenrand (V17): alleen de lage foto's zien de bovenkant; de maat van de
+          # afschuining of afronding, en de hoogte die ervan afhangt (§3g)
+          "bovenrand": 0.40, "hoogte bovenrand": 0.40}
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 
 

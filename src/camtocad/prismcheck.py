@@ -41,17 +41,21 @@ MIN_VIEWS = 3
 class PrismCheck:
     issues: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)  # voor diagnose.json
+    # de afwijkende stukken in matcoördinaten (begin, midden, eind), als start voor een trede (V17)
+    runs_mat: list[dict] = field(default_factory=list)
 
-
-def _outer_count(lay: dict) -> int:
-    return lay["circle"] if "circle" in lay else sum(lay["arcs"]) + sum(lay["edges"])
+    @property
+    def trend(self) -> float | None:
+        return self.details.get("kijkhoek_verschil_mm")
 
 
 def _deviations(prob, x: np.ndarray):
-    """Per punt (index in points3d) en foto de afstand modelrand -> maskerrand in mm (+: het model steekt
-    buiten het object uit), en per foto de kijkhoek (graden boven de mat, vanuit het midden van het model)."""
+    """Per modelpunt (rij in edgefit.rims) en foto de afstand modelrand -> maskerrand in mm (+: het model
+    steekt buiten het object uit), en per foto de kijkhoek (graden boven de mat, vanuit het midden van het
+    model)."""
     p = prob.build(x)
-    P = edgefit.points3d(p, prob.lay)
+    rim = edgefit.rims(p, prob.lay)
+    P = rim.P
     oc = p.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, p.height / 2])
     f = float(prob.K[0, 0])
@@ -75,7 +79,7 @@ def _deviations(prob, x: np.ndarray):
         for j, val in zip(on[ok], mm[ok]):
             per_point[j].append(float(val))
         per_view.append((elev, on[ok], mm[ok]))
-    return p, per_point, per_view
+    return p, rim, per_point, per_view
 
 
 def _smooth(a: np.ndarray, k: int = 5) -> np.ndarray:
@@ -114,10 +118,15 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
     if prob is None or not prob.status:
         return out
     x = ef.x if ef.accepted else prob.x_of(ef.part)
-    part, per_point, per_view = _deviations(prob, x)
-    n2 = len(per_point) // 2
-    no = _outer_count(prob.lay)
-    top = np.array([np.median(v) if len(v) >= MIN_VIEWS else np.nan for v in per_point[n2:n2 + no]])
+    part, rim, per_point, per_view = _deviations(prob, x)
+    no = edgefit.outer_count(prob.lay)
+    # de bovenrand van de buitencontour: per contourpunt de hogere niveaus samen (per foto vormt er hooguit één
+    # de silhouetrand; bij een prisma is dat alleen de bovenrand)
+    upper = (rim.point >= 0) & (rim.point < no) & (rim.level > 0)
+    vals: list[list[float]] = [[] for _ in range(no)]
+    for r in np.flatnonzero(upper):
+        vals[rim.point[r]] += per_point[r]
+    top = np.array([np.median(v) if len(v) >= MIN_VIEWS else np.nan for v in vals])
     p2 = edgefit.points2d(part, prob.lay)[0][:no]
     c, s = math.cos(angle), math.sin(angle)
     q = p2 @ np.array([[c, s], [-s, c]]) + np.asarray(shift, float)  # werkcoördinaten
@@ -133,6 +142,8 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
             a, b = q[run[0]], q[run[-1]]
             runs.append({"soort": what, "van": a.round(1).tolist(), "tot": b.round(1).tolist(),
                          "lengte_mm": round(length, 1), "afwijking_mm": round(dev, 2)})
+            out.runs_mat.append({"soort": what, "van": p2[run[0]], "tot": p2[run[-1]],
+                                 "midden": p2[run[len(run) // 2]], "afwijking_mm": dev})
             if what == "lager":
                 out.issues.append(
                     f"langs de rand van ({a[0]:.0f}, {a[1]:.0f}) tot ({b[0]:.0f}, {b[1]:.0f}) (over {length:.0f} mm) ligt "
@@ -144,10 +155,9 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
                     f"steekt het onderdeel boven het model uit (tot {dev:.1f} mm in beeld): het is daar hoger of heeft "
                     "een ronde bovenkant")
     # kijkhoek: per foto de mediaan over de bovenrand van de buitencontour
-    top_idx = set(range(n2, n2 + no))
     rows = []
     for elev, idx, mm in per_view:
-        sel = np.array([j in top_idx for j in idx], bool)
+        sel = upper[idx]
         if sel.sum() >= 10:
             rows.append((elev, float(np.median(mm[sel]))))
     trend = None

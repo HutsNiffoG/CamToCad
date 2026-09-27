@@ -66,3 +66,23 @@ def bouw_contour(cq, punten, vlak="XY"):
             wp = wp.threePointArc(m, t2)
             huidig = t2
     return wp.close()
+
+
+def extrudeer(schets, hoogte, bovenrand=None, maat=0.0):
+    """Extrusie van een gesloten contour tot `hoogte`; `schets` is een functie die de contour (een
+    CadQuery-workplane) geeft. Bovenrand "afschuining": rondom een afschuining onder 45° met benen `maat`;
+    "afronding": een afronding met straal `maat`."""
+    if bovenrand == "afschuining":
+        onder = schets().extrude(hoogte - maat)
+        return onder.union(schets().extrude(maat, taper=45).translate((0, 0, hoogte - maat)))
+    model = schets().extrude(hoogte)
+    if bovenrand == "afronding":
+        model = model.faces(">Z").fillet(maat)
+    return model
+
+
+def trede(cq, model, x, y, hoek, hoogte, totaal):
+    """Trede: voorbij de lijn door (x, y), in de richting `hoek` (graden, 0 = +X), is het deel maar `hoogte`
+    hoog; `totaal` is de hoogte van het deel."""
+    blok = cq.Workplane("XY").box(2000, 2000, totaal - hoogte + 1, centered=(False, True, False))
+    return model.cut(blok.rotate((0, 0, 0), (0, 0, 1), hoek).translate((x, y, hoogte)))

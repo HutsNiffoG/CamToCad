@@ -30,9 +30,24 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
         x, y = tr(p)
         return "M " + " L ".join(f"{a:.1f},{b:.1f}" for a, b in zip(x, y)) + " Z"
 
+    a = np.linspace(0, 2 * np.pi, 72)
     body = [f'<path d="{path(outline)}" class="part"/>']
+    te = part.top_edge
+    if te is not None:  # binnenrand van een afschuining of afronding rondom (V17)
+        inner = part.outer.inset(te.size)
+        ring = inner.outline(3.0) if inner.kind == "polygon" else np.column_stack(
+            [inner.center[0] + inner.radius * np.cos(a), inner.center[1] + inner.radius * np.sin(a)])
+        body.append(f'<path d="{path(ring)}" class="edge"/>')
+    for st in part.steps:  # lijn van een trede, met de hoogte aan de lage kant
+        q = part.step_crossings(st)
+        if q is None:
+            continue
+        x, y = tr(q)
+        body.append(f'<path d="M {x[0]:.1f},{y[0]:.1f} L {x[1]:.1f},{y[1]:.1f}" class="edge"/>')
+        m = q.mean(axis=0) + 6.0 / scale * st.normal()
+        lx, ly = tr(m[None, :])
+        body.append(f'<text x="{lx[0]:.1f}" y="{ly[0]:.1f}" class="lbl">h {st.height:.2f}</text>')
     for h in part.holes:
-        a = np.linspace(0, 2 * np.pi, 72)
         body.append(f'<path d="{path(np.column_stack([h.x + h.d / 2 * np.cos(a), h.y + h.d / 2 * np.sin(a)]))}" '
                     f'class="hole"/>')
         x, y = tr(np.array([[h.x, h.y]]))
@@ -87,6 +102,7 @@ th, td {{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
 .wrap {{ overflow-x:auto; }}
 svg .part {{ fill:var(--part); stroke:var(--stroke); stroke-width:1.5; }}
 svg .hole {{ fill:var(--bg); stroke:var(--stroke); stroke-width:1.2; }}
+svg .edge {{ fill:none; stroke:var(--stroke); stroke-width:1; stroke-dasharray:4 3; }}
 svg .lbl {{ fill:var(--fg); font-size:12px; text-anchor:middle; }}
 svg .datum {{ fill:#d9534f; }}
 </style></head><body><main>

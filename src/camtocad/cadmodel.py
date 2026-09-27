@@ -18,7 +18,7 @@ import cadquery as cq
 import numpy as np
 
 from . import __version__, cadhelpers
-from .profile import Hole, Part2p5D, Profile, dominant_angle
+from .profile import Hole, Part2p5D, Profile, Step, dominant_angle
 from .snapping import Snap, hole_candidates, length_candidates, radius_candidates, snap
 from .uncertainty import Budget, edge_position
 
@@ -147,6 +147,23 @@ def _groups(values: list[float], tol: float) -> list[list[int]]:
     return groups
 
 
+def step_axis(st) -> str | None:
+    """'x' voor een trede langs een verticale lijn (x = ...), 'y' voor een horizontale, anders None."""
+    c, s = abs(math.cos(st.angle)), abs(math.sin(st.angle))
+    return "x" if c > 1 - 1e-9 else "y" if s > 1 - 1e-9 else None
+
+
+def step_point(st) -> tuple[float, float]:
+    """Het punt van de lijn van een trede het dichtst bij de oorsprong."""
+    x, y = st.offset * st.normal()
+    return float(x), float(y)
+
+
+def top_edge_name(te) -> str:
+    """Naam van de maat van de bovenrand in het rapport."""
+    return "afschuining bovenrand" if te.kind == "afschuining" else "afronding bovenrand"
+
+
 def slot_names(part: Part2p5D) -> list[tuple[str, str]]:
     """(naam in het rapport, variabele in het script) per sleuf of uitsparing, per soort genummerd."""
     out, count = [], {"sleuf": 0, "rechthoek": 0}
@@ -178,10 +195,17 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         s.sigma = math.hypot(sigma, scale_rel * abs(value))
         return s
 
+    # met een afgeschuinde of afgeronde bovenrand zien alleen de lage foto's de bovenkant (V17)
     s = do_snap("hoogte", part.height, unc.height, length_candidates(part.height, imperial),
-                lambda p: p.height, "hoogte")
+                lambda p: p.height, "hoogte" if part.top_edge is None else "hoogte bovenrand")
     out.height = s.value
     snaps.append(s)
+    if part.top_edge is not None:
+        te = part.top_edge
+        s = do_snap(top_edge_name(te), te.size, unc.fillet, radius_candidates(te.size),
+                    lambda p: p.top_edge.size, "bovenrand")
+        out.top_edge = replace(te, size=min(s.value, 0.75 * out.height))
+        snaps.append(s)
 
     o = out.outer
     datum: dict[str, int] = {}
@@ -303,18 +327,56 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                      lambda p, i=i: p.slots[i].y - origin(p, "y", p.slots[i].x), "positie")
         out.slots[i] = replace(sl, x=sx.value, y=sy.value, length=max(length, width), width=width, angle=angle, r=r)
         snaps += [sx, sy]
+
+    # treden (V17): hoogte, en de plaats van de lijn vanaf de datum; haaks op de datum als het bijna zo is
+    for k, st in enumerate(part.steps):
+        a90 = round(st.angle / (math.pi / 2)) * (math.pi / 2)
+        angle = a90 if abs(st.angle - a90) < math.radians(2.0) else st.angle
+        sh = do_snap(f"trede {k + 1} hoogte", st.height, unc.height, length_candidates(st.height, imperial),
+                     lambda p, k=k: p.steps[k].height, "hoogte")
+        n = np.array([math.cos(angle), math.sin(angle)])
+        axis = "x" if abs(n[0]) > 0.99 else "y" if abs(n[1]) > 0.99 else None
+        if axis is None:
+            sp = do_snap(f"trede {k + 1} positie", st.offset, unc.edge * math.sqrt(2),
+                         length_candidates(st.offset, imperial), lambda p, k=k: p.steps[k].offset, "lengte")
+            offset = sp.value
+        else:
+            j = 0 if axis == "x" else 1
+
+            def coord(p: Part2p5D, k=k, j=j, axis=axis) -> float:
+                """Plaats van de lijn langs de as, vanaf de datumrand (op de hoogte van de oorsprong)."""
+                s_ = p.steps[k]
+                c = s_.offset / s_.normal()[j]
+                return c - (edge_position(p, datum[axis], axis) if axis in datum else 0.0)
+
+            pos = st.offset / n[j]
+            sp = do_snap(f"trede {k + 1} positie", pos, unc.edge * math.sqrt(2), length_candidates(pos, imperial),
+                         coord, "lengte")
+            offset = sp.value * n[j]
+        out.steps[k] = Step.from_line(angle, float(offset), min(sh.value, out.height - 0.3), st.pivot)
+        snaps += [sp, sh]
     return out, snaps
 
 
 # ----------------------------------------------------------------------------- bouwen
 
 def build(part: Part2p5D) -> cq.Workplane:
-    """CadQuery-solid: extrusie van de contour, doorgaande gaten en uitsparingen."""
+    """CadQuery-solid: extrusie van de contour (met een afgeschuinde of afgeronde bovenrand en treden, V17),
+    doorgaande gaten en uitsparingen."""
     o = part.outer
     if o.kind == "circle":
-        model = cq.Workplane("XY").center(*o.center).circle(o.radius).extrude(part.height)
+        def sketch():
+            return cq.Workplane("XY").center(*o.center).circle(o.radius)
     else:
-        model = cadhelpers.bouw_contour(cq, o.corner_table()).extrude(part.height)
+        table = o.corner_table()
+
+        def sketch():
+            return cadhelpers.bouw_contour(cq, table)
+    te = part.top_edge
+    model = cadhelpers.extrudeer(sketch, part.height, te.kind if te else None, te.size if te else 0.0)
+    for st in part.steps:
+        x, y = st.offset * st.normal()
+        model = cadhelpers.trede(cq, model, x, y, math.degrees(st.angle), st.height, part.height)
     for h in part.holes:
         cutter = cq.Workplane("XY").workplane(offset=-1).center(h.x, h.y).circle(h.d / 2).extrude(part.height + 2)
         model = model.cut(cutter)
@@ -408,6 +470,32 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
             lines.append(f"    ({xs}, {ys}, {rs}),{note}")
         lines.append("]")
 
+    te = part.top_edge
+    if te is not None:
+        var = "afschuining" if te.kind == "afschuining" else "afronding_boven"
+        lines += ["", "# Bovenrand, rondom: " + ("afschuining onder 45° (benen)" if te.kind == "afschuining"
+                                                  else "afronding (straal)"),
+                  f"{var} = {_fmt(te.size)}{_comment(by_name.get(top_edge_name(te)))}"]
+    if part.steps:
+        lines += ["", "# Treden: voorbij de lijn door (x, y), in de richting 'hoek' (graden, 0 = +X), is het deel "
+                  "lager"]
+        rows = []
+        for k, st in enumerate(part.steps, start=1):
+            x, y = step_point(st)
+            axis = step_axis(st)
+            lines.append(f"trede{k}_{axis or 'positie'} = {_fmt(x if axis != 'y' else y) if axis else _fmt(st.offset)}"
+                         f"{_comment(by_name.get(f'trede {k} positie'))}")
+            lines.append(f"trede{k}_hoogte = {_fmt(st.height)}{_comment(by_name.get(f'trede {k} hoogte'))}")
+            if axis == "x":
+                px, py = f"trede{k}_x", "0.0"
+            elif axis == "y":
+                px, py = "0.0", f"trede{k}_y"
+            else:
+                px = f"trede{k}_positie * math.cos(math.radians({_fmt(math.degrees(st.angle))}))"
+                py = f"trede{k}_positie * math.sin(math.radians({_fmt(math.degrees(st.angle))}))"
+            rows.append(f"    ({px}, {py}, {_fmt(math.degrees(st.angle))}, trede{k}_hoogte),")
+        lines += ["treden = [  # (x, y) op de lijn, hoek naar het lage deel, hoogte"] + rows + ["]"]
+
     pattern = bolt_circle(part.holes) if o.kind == "circle" else None
     if pattern and abs(pattern[1]) < 1e-6:
         r, _, n = pattern
@@ -465,10 +553,15 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
     helper = inspect.getsource(cadhelpers).split("\n", 2)[2]  # zonder 'import math'
     lines += ["", "", "# --- Bouwfuncties (identiek aan camtocad.cadhelpers) ---", helper.strip(), "", "",
               "# --- Model ---"]
-    if o.kind == "circle":
-        lines.append("model = cq.Workplane(\"XY\").circle(diameter / 2).extrude(hoogte)")
+    sketch = ("lambda: cq.Workplane(\"XY\").circle(diameter / 2)" if o.kind == "circle"
+              else "lambda: bouw_contour(cq, contour)")
+    if te is not None:
+        lines.append(f"model = extrudeer({sketch}, hoogte, \"{te.kind}\", "
+                     f"{'afschuining' if te.kind == 'afschuining' else 'afronding_boven'})")
     else:
-        lines.append("model = bouw_contour(cq, contour).extrude(hoogte)")
+        lines.append(f"model = extrudeer({sketch}, hoogte)")
+    if part.steps:
+        lines += ["for x, y, hoek, h in treden:", "    model = trede(cq, model, x, y, hoek, h, hoogte)"]
     if part.holes:
         lines += ["for x, y, d in gaten:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).center(x, y)"

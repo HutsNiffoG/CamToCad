@@ -78,6 +78,55 @@ class Slot:
 
 
 @dataclass
+class TopEdge:
+    """Afschuining (45°) of afronding van de bovenrand van de buitencontour, rondom (V17)."""
+
+    kind: str  # "afschuining" of "afronding"
+    size: float  # mm: de afschuining (beide benen) of de straal
+
+    def levels(self, height: float, n_arc: int = 4) -> list[tuple[float, float]]:
+        """(z, inset) van de buitencontour, van onder naar boven."""
+        s = self.size
+        if self.kind == "afschuining":
+            return [(0.0, 0.0), (height - s, 0.0), (height, s)]
+        out = [(0.0, 0.0), (height - s, 0.0)]
+        for j in range(1, n_arc + 1):
+            t = math.pi / 2 * j / n_arc
+            out.append((height - s + s * math.sin(t), s * (1.0 - math.cos(t))))
+        return out
+
+
+@dataclass
+class Step:
+    """Trede langs een rechte lijn (V17): voorbij de lijn (n·p > offset, n = (cos angle, sin angle)) is het
+    onderdeel maar `height` hoog.
+
+    De lijn ligt vast als afstand `dist` tot een draaipunt `pivot` bij het midden van de lijn. Zo draait de lijn
+    bij een andere hoek om dat punt, niet om de oorsprong van de mat: anders verschuift hij bij een tiende graad
+    al een kwart millimeter en liggen hoek en plaats in de fit in een smal dal."""
+
+    angle: float
+    dist: float
+    height: float
+    pivot: tuple[float, float] = (0.0, 0.0)
+
+    @classmethod
+    def from_line(cls, angle: float, offset: float, height: float, near=(0.0, 0.0)) -> "Step":
+        """Trede met lijn n·p = offset; draaipunt: het punt van de lijn het dichtst bij `near`."""
+        n = np.array([math.cos(angle), math.sin(angle)])
+        q = np.asarray(near, float)
+        foot = q - (n @ q - offset) * n
+        return cls(float(angle), 0.0, float(height), (float(foot[0]), float(foot[1])))
+
+    def normal(self) -> np.ndarray:
+        return np.array([math.cos(self.angle), math.sin(self.angle)])
+
+    @property
+    def offset(self) -> float:
+        return float(self.normal() @ np.asarray(self.pivot, float)) + self.dist
+
+
+@dataclass
 class Profile:
     kind: str = "polygon"  # "polygon" of "circle"
     center: np.ndarray = field(default_factory=lambda: np.zeros(2))
@@ -163,6 +212,54 @@ class Profile:
     def area(self) -> float:
         return abs(_signed_area(self.outline()))
 
+    def convex_corners(self) -> np.ndarray:
+        """Per hoek (tussen rand k-1 en k): bol (True) of hol."""
+        nrm = self.normals()
+        prev = np.roll(nrm, 1, axis=0)
+        return prev[:, 0] * nrm[:, 1] - prev[:, 1] * nrm[:, 0] > 0
+
+    def inset(self, d: float) -> "Profile":
+        """De contour d mm naar binnen: randen evenwijdig, afronding van een bolle hoek d kleiner (tot scherp),
+        van een holle hoek d groter. Hoekpunten blijven overeenkomen met die van het origineel."""
+        out = self.copy()
+        if self.kind == "circle":
+            out.radius = self.radius - d
+            return out
+        out.offsets = self.offsets - d
+        convex = self.convex_corners()
+        out.fillets = np.where(convex, np.maximum(self.fillets - d, 0.0),
+                               np.where(self.fillets > 0, self.fillets + d, 0.0))
+        return out
+
+    def clipped(self, angle: float, offset: float) -> "Profile | None":
+        """Het deel aan de kant n·p ≤ offset (n = (cos angle, sin angle)) als nieuwe polygoon. Hoeken die de lijn
+        maakt zijn scherp; de overige houden hun afronding. None als er (bijna) niets overblijft."""
+        if self.kind != "polygon":
+            return None
+        V, F = self.vertices(), self.fillets
+        n = np.array([math.cos(angle), math.sin(angle)])
+        s = V @ n - offset
+        pts, fil = [], []
+        for i in range(len(V)):
+            j = (i + 1) % len(V)
+            if s[i] <= 0:
+                pts.append(V[i])
+                fil.append(float(F[i]))
+            if (s[i] <= 0) != (s[j] <= 0):
+                t = s[i] / (s[i] - s[j])
+                pts.append(V[i] + t * (V[j] - V[i]))
+                fil.append(0.0)
+        W = np.array(pts)
+        if len(W) < 3 or abs(_signed_area(W)) < 1.0:
+            return None
+        d = np.roll(W, -1, axis=0) - W
+        length = np.linalg.norm(d, axis=1)
+        keep = length > 1e-6
+        W, d, length, fil = W[keep], d[keep], length[keep], np.array(fil)[keep]
+        nrm = np.column_stack([d[:, 1], -d[:, 0]]) / length[:, None]  # buitennormaal (tegen de klok in)
+        return Profile("polygon", self.center.copy(), np.arctan2(nrm[:, 1], nrm[:, 0]),
+                       np.einsum("ij,ij->i", nrm, W - self.center), fil)
+
 
 @dataclass
 class Part2p5D:
@@ -171,13 +268,77 @@ class Part2p5D:
     holes: list[Hole] = field(default_factory=list)
     cutouts: list[np.ndarray] = field(default_factory=list)  # overige doorgaande uitsparingen (polygonen)
     slots: list[Slot] = field(default_factory=list)  # sleuven en rechthoekige uitsparingen
+    top_edge: TopEdge | None = None  # afschuining of afronding van de bovenrand (V17)
+    steps: list[Step] = field(default_factory=list)  # treden: voorbij een lijn lager (V17)
 
     def copy(self) -> "Part2p5D":
         return Part2p5D(self.height, self.outer.copy(), [Hole(h.x, h.y, h.d) for h in self.holes],
-                        [c.copy() for c in self.cutouts], [replace(s) for s in self.slots])
+                        [c.copy() for c in self.cutouts], [replace(s) for s in self.slots],
+                        replace(self.top_edge) if self.top_edge is not None else None, [replace(s) for s in self.steps])
+
+    def outer_levels(self) -> list[tuple[float, float]]:
+        """(z, inset) van de buitencontour van onder naar boven: een prisma heeft er twee."""
+        return self.top_edge.levels(self.height) if self.top_edge is not None else [(0.0, 0.0), (self.height, 0.0)]
+
+    def cells(self) -> list[tuple[Profile, float]]:
+        """De contour in stukken van één hoogte: zonder treden de hele contour; met treden het hoge deel en per
+        trede het deel voorbij de lijn."""
+        if not self.steps:
+            return [(self.outer, self.height)]
+        main = self.outer
+        for st in self.steps:
+            main = main.clipped(st.angle, st.offset) if main is not None else None
+        out = [(main, self.height)] if main is not None else []
+        for st in self.steps:
+            cell = self.outer.clipped(st.angle + math.pi, -st.offset)
+            if cell is not None:
+                out.append((cell, st.height))
+        return out
+
+    def step_crossings(self, st: Step) -> np.ndarray | None:
+        """De twee punten waar de lijn van een trede de buitencontour snijdt, gesorteerd langs de lijn."""
+        ring = self.outer.outline(12.0)
+        n = st.normal()
+        s = ring @ n - st.offset
+        nxt, s2 = np.roll(ring, -1, axis=0), np.roll(s, -1)
+        cross = (s > 0) != (s2 > 0)
+        if int(cross.sum()) != 2:
+            return None
+        t = s[cross] / (s[cross] - s2[cross])
+        q = ring[cross] + t[:, None] * (nxt[cross] - ring[cross])
+        return q[np.argsort(q @ np.array([-n[1], n[0]]))]
+
+    def height_at(self, x: float, y: float) -> float:
+        """Hoogte van de bovenkant op (x, y): die van een trede als het punt voorbij haar lijn ligt."""
+        h = self.height
+        for st in self.steps:
+            if st.normal() @ [x, y] > st.offset:
+                h = min(h, st.height)
+        return h
 
     def is_valid(self) -> bool:
-        return (self.outer.kind != "polygon" or self.outer.is_valid()) and all(s.is_valid() for s in self.slots)
+        if not ((self.outer.kind != "polygon" or self.outer.is_valid()) and all(s.is_valid() for s in self.slots)):
+            return False
+        if self.top_edge is not None:
+            s = self.top_edge.size
+            if self.steps or not 0.0 < s < 0.8 * self.height:
+                return False
+            top = self.outer.inset(s)
+            if (top.kind == "circle" and top.radius <= 0.5) or (top.kind == "polygon" and not top.is_valid()):
+                return False
+        if self.steps:
+            if self.outer.kind != "polygon" or any(not 0.3 < st.height < self.height - 0.2 for st in self.steps):
+                return False
+            # de lijn snijdt de contour precies twee keer (een rechte trede dwars over het deel)
+            if any(self.step_crossings(st) is None for st in self.steps):
+                return False
+            cells = self.cells()
+            if len(cells) != len(self.steps) + 1 or not all(c.is_valid() for c, _ in cells):
+                return False
+            # de treden mogen elkaar binnen de contour niet overlappen
+            if abs(sum(c.area() for c, _ in cells) - self.outer.area()) > 0.01 * self.outer.area() + 1.0:
+                return False
+        return True
 
     def scaled(self, factor: float) -> "Part2p5D":
         """Alle maten x factor (om de oorsprong), bijv. voor een mat die niet op 100% is geprint."""
@@ -189,6 +350,10 @@ class Part2p5D:
         out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor) for h in self.holes]
         out.cutouts = [c * factor for c in self.cutouts]
         out.slots = [s.scaled(factor) for s in self.slots]
+        if self.top_edge is not None:
+            out.top_edge = replace(self.top_edge, size=self.top_edge.size * factor)
+        out.steps = [replace(st, dist=st.dist * factor, height=st.height * factor,
+                             pivot=(st.pivot[0] * factor, st.pivot[1] * factor)) for st in self.steps]
         return out
 
     def transformed(self, angle: float, shift) -> "Part2p5D":
@@ -205,6 +370,10 @@ class Part2p5D:
         for s in self.slots:
             x, y = R @ [s.x, s.y] + shift
             out.slots.append(replace(s, x=float(x), y=float(y), angle=s.angle + angle))
+        out.steps = []
+        for st in self.steps:  # de afstand tot het draaipunt verandert niet
+            q = R @ np.asarray(st.pivot, float) + shift
+            out.steps.append(replace(st, angle=st.angle + angle, pivot=(float(q[0]), float(q[1]))))
         return out
 
     def to_dict(self) -> dict:
@@ -218,7 +387,13 @@ class Part2p5D:
         return {"hoogte": float(self.height), "contour": contour,
                 "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d)} for h in self.holes],
                 "sleuven": [s.to_dict() for s in self.slots],
-                "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts]}
+                "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts],
+                "bovenrand": None if self.top_edge is None else {"soort": self.top_edge.kind,
+                                                                  "maat": float(self.top_edge.size)},
+                "treden": [{"hoek_graden": math.degrees(st.angle), "positie": float(st.offset),
+                            "hoogte": float(st.height),
+                            "toelichting": "voorbij de lijn x·cos(hoek) + y·sin(hoek) = positie is het deel lager"}
+                           for st in self.steps]}
 
 
 def dominant_angle(profile: Profile, window_deg: float = 3.0) -> float:

@@ -46,6 +46,16 @@ LOSS, F_SCALE = "cauchy", 0.5  # px
 DENSITY = 1.0  # punten per mm contour
 TRUST_MM, TRUST_DEG = 0.5, 0.3
 TRUST_SLOT_DEG = 2.0  # de as van een korte sleuf is in de pixelfit minder precies dan de hele contour
+# de maat van een afschuining of afronding van de bovenrand (V17): alleen de lage foto's zien haar, en de
+# pixelfit laat haar samen met de schouderhoogte schuiven (vooral bij een afronding)
+TRUST_TOP_MM = 1.0
+# een trede (V17): de plaats van de lijn is in de pixelfit onnauwkeuriger (alleen de verticale randen van de
+# trede in zijaanzichten zeggen er iets over); punten per mm op die randen
+TRUST_STEP_MM, STEP_VERT_DENSITY = 1.0, 4.0
+# een scherpe hoek komt door onscherpte als een afronding van 3,5-4 px uit de randfit (§3e), vaak meer dan
+# TRUST_MM boven de pixelfit; afrondingen mogen daarom tot zoveel pixels groeien (de pijplijn maakt alles onder
+# 4,5 px daarna weer scherp)
+TRUST_FILLET_PX = 5.0
 FREEZE_PROBE_MM = 0.1
 
 
@@ -95,6 +105,22 @@ def layout(part: Part2p5D, density: float = DENSITY) -> dict:
         out["circle"] = max(48, int(2 * math.pi * o.radius * density))
     else:
         out.update(_polygon_layout(o.corner_table(), density, 4))
+    if part.steps:  # treden (V17): punten langs de lijn en op de twee verticale randen van de trede
+        out["steps"] = []
+        for st in part.steps:
+            q = part.step_crossings(st)
+            length = float(np.linalg.norm(q[1] - q[0])) if q is not None else 0.0
+            out["steps"].append({"line": max(4, int(length * density)),
+                                 "vert": max(4, int(STEP_VERT_DENSITY * (part.height - st.height)))})
+    return out
+
+
+def cell_of(part: Part2p5D, p2: np.ndarray) -> np.ndarray:
+    """Per punt de trede waar het boven ligt (index), of -1 voor het hoge deel."""
+    out = np.full(len(p2), -1)
+    for k in reversed(range(len(part.steps))):
+        st = part.steps[k]
+        out[p2 @ st.normal() > st.offset] = k
     return out
 
 
@@ -150,29 +176,117 @@ def points2d(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndar
     return np.vstack(pts), np.vstack(nrm), np.concatenate(use)
 
 
+def outer_count(lay: dict) -> int:
+    """Aantal punten op de buitencontour (de eerste in points2d)."""
+    return lay["circle"] if "circle" in lay else sum(lay["arcs"]) + sum(lay["edges"])
+
+
+def _outer_points(part: Part2p5D, lay: dict, d: float) -> tuple[np.ndarray, np.ndarray]:
+    """Punten van de buitencontour d mm naar binnen, met dezelfde opbouw als bij d = 0 (een afronding die
+    daar scherp wordt, geeft herhaalde hoekpunten); en per punt of het meetelt."""
+    o = part.outer
+    if o.kind == "circle":
+        a = (np.arange(lay["circle"]) + 0.5) / lay["circle"] * 2 * math.pi
+        return o.center + (o.radius - d) * np.column_stack([np.cos(a), np.sin(a)]), np.ones(len(a), bool)
+    pts, nrm, use = [], [], []
+    _polygon_points(o.inset(d).corner_table(), o.normals(), lay, 1.0, pts, nrm, use)
+    return np.vstack(pts), np.concatenate(use)
+
+
+@dataclass
+class Rims:
+    """Alle modelpunten in 3D. Per contourpunt (index in points2d) een onderrand (niveau 0) en een bovenrand;
+    een afgeschuinde of afgeronde bovenrand (V17) geeft de buitencontour er niveaus tussen: de schouder en de
+    boog, elk naar binnen verschoven."""
+
+    P: np.ndarray  # (R, 3)
+    point: np.ndarray  # (R,) contourpunt
+    level: np.ndarray  # (R,) 0 = onderrand
+    use: np.ndarray  # (R,) False: scherp hoekpunt (ligt op twee randen tegelijk)
+
+
+def rims(part: Part2p5D, lay: dict) -> Rims:
+    """Rij voor rij: de onderrand van alle contouren, de tussenniveaus van de buitencontour en de bovenrand van
+    alle contouren. Een prisma geeft dus eerst alle onder- en dan alle bovenranden.
+
+    Met treden ligt de bovenrand per punt op de hoogte van het stuk waar het bij hoort; die indeling staat per
+    ronde van de fit vast (`lay["cells"]`), anders springt de hoogte van een punt als de lijn eroverheen
+    schuift. Daarna per trede punten langs de lijn (bovenrand van het hoge deel) en op de twee verticale randen
+    waar de trede de contour snijdt: die vormen in zijaanzichten de silhouetrand en leggen de lijn vast."""
+    p2, _, use = points2d(part, lay)
+    n, no = len(p2), outer_count(lay)
+    levels = part.outer_levels()
+    P, point, level, us = [np.column_stack([p2, np.zeros(n)])], [np.arange(n)], [np.zeros(n, int)], [use]
+    for j, (z, d) in enumerate(levels[1:], start=1):
+        q, u = (p2[:no], use[:no]) if d == 0 else _outer_points(part, lay, d)
+        if j < len(levels) - 1:  # tussenniveau: alleen de buitencontour
+            P.append(np.column_stack([q, np.full(no, z)]))
+            point.append(np.arange(no))
+            level.append(np.full(no, j))
+            us.append(u)
+        else:
+            zt = np.full(n, z)
+            if part.steps:
+                cells = lay.get("cells")
+                cells = cell_of(part, p2) if cells is None or len(cells) != n else cells
+                for k, st in enumerate(part.steps):
+                    zt[cells == k] = st.height
+            P.append(np.column_stack([np.vstack([q, p2[no:]]), zt]))
+            point.append(np.arange(n))
+            level.append(np.full(n, j))
+            us.append(np.concatenate([u, use[no:]]))
+    for st, ls in zip(part.steps, lay.get("steps", [])):
+        q = part.step_crossings(st)
+        if q is None:  # ongeldig model (de fit geeft dan een strafwaarde): punten op één plek
+            q = np.repeat([st.offset * st.normal()], 2, axis=0)
+        t = (np.arange(ls["line"]) + 0.5) / ls["line"]
+        zs = st.height + (np.arange(ls["vert"]) + 0.5) / ls["vert"] * (part.height - st.height)
+        extra = [np.column_stack([q[0] + t[:, None] * (q[1] - q[0]), np.full(len(t), part.height)])]
+        extra += [np.column_stack([np.repeat([q[i]], len(zs), axis=0), zs]) for i in (0, 1)]
+        e = np.vstack(extra)
+        P.append(e)
+        point.append(np.full(len(e), -1))
+        level.append(np.full(len(e), -1))
+        us.append(np.ones(len(e), bool))
+    return Rims(np.vstack(P), np.concatenate(point), np.concatenate(level), np.concatenate(us))
+
+
 def points3d(part: Part2p5D, lay: dict) -> np.ndarray:
-    """Onderrand (z = 0) en daarna bovenrand (z = hoogte) van alle contouren."""
-    p2, _, _ = points2d(part, lay)
-    return np.vstack([np.column_stack([p2, np.zeros(len(p2))]),
-                      np.column_stack([p2, np.full(len(p2), part.height)])])
+    """De modelpunten in 3D (zie rims)."""
+    return rims(part, lay).P
 
 
 def boundary_status(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, tol: float = 1.0) -> list[np.ndarray]:
-    """Per foto welke modelpunten de silhouetrand vormen (zie de moduletekst)."""
-    p2, nrm, use = points2d(part, lay)
-    n = len(p2)
-    P = points3d(part, lay)
+    """Per foto welke modelpunten de silhouetrand vormen (zie de moduletekst). Kijkt de wand bij een punt van
+    de camera weg, dan vormt een van de hogere niveaus de rand: het niveau dat in beeld het verst naar buiten
+    ligt (bij een afschuining in lage foto's de bovenrand, in hoge de schouder)."""
+    p2, nrm, _ = points2d(part, lay)
+    rim = rims(part, lay)
+    n, R = len(p2), len(rim.P)
+    n_lev = int(rim.level.max()) + 1
+    idx = np.full((n, n_lev), -1)
+    contour = rim.point >= 0  # de punten van een trede hebben geen keuze: ze doen altijd mee
+    idx[rim.point[contour], rim.level[contour]] = np.flatnonzero(contour)
+    upper = idx[:, 1:]
     out = []
     for v in vd:
         facing = np.sum((v.pose.center[:2] - p2) * nrm, axis=1) > 0
-        pick = np.concatenate([facing & use, ~facing & use])
         sd = signed_dist(silhouette.render(part, K, v).astype(bool))
-        uv, z = project(P, v.pose, K)
+        uv, z = project(rim.P, v.pose, K)
         uv = uv - [v.x0, v.y0]
         h, w = v.fg.shape
-        ok = pick & (z > 0) & (uv[:, 0] >= 0) & (uv[:, 0] <= w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h - 1)
-        on = np.zeros(2 * n, bool)
-        on[ok] = np.abs(_bilinear(sd, uv[ok])) < tol
+        ok = (z > 0) & (uv[:, 0] >= 0) & (uv[:, 0] <= w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h - 1)
+        d = np.full(R, -np.inf)
+        d[ok] = _bilinear(sd, uv[ok])
+        if upper.shape[1] == 1:
+            top = upper[:, 0]
+        else:
+            du = np.where(upper >= 0, d[np.maximum(upper, 0)], -np.inf)
+            top = upper[np.arange(n), np.argmax(du, axis=1)]
+        pick = ~contour
+        pick[np.where(facing, idx[:, 0], top)] = True
+        on = pick & rim.use & ok
+        on[on] = np.abs(d[on]) < tol
         out.append(on)
     return out
 
@@ -211,8 +325,10 @@ def _free_params(part: Part2p5D, base: np.ndarray) -> list[silhouette.Param]:
 class _Problem:
     """De residuen als functie van de parametervector, met vaste punten en vaste randstatus."""
 
-    def __init__(self, part: Part2p5D, K: np.ndarray, vd: list, density: float = DENSITY):
+    def __init__(self, part: Part2p5D, K: np.ndarray, vd: list, density: float = DENSITY,
+                 mm_per_px: float | None = None):
         self.K, self.vd = K, vd
+        self.fillet_trust = max(TRUST_MM, TRUST_FILLET_PX * mm_per_px) if mm_per_px else TRUST_MM
         self.base = part.outer.angles.copy()
         self.params = _free_params(part, self.base)
         self.frozen = [p.name for p in silhouette._params(part) if p.name not in {q.name for q in self.params}]
@@ -234,6 +350,8 @@ class _Problem:
         return np.array([silhouette._get(part, self.base, p.name) for p in self.params])
 
     def set_status(self, part: Part2p5D) -> None:
+        if part.steps:  # welk punt bij welk stuk hoort, ligt per ronde vast (zie rims)
+            self.lay["cells"] = cell_of(part, points2d(part, self.lay)[0])
         self.status = boundary_status(part, self.K, self.vd, self.lay)
 
     def view_index(self, views: list[int] | None = None) -> np.ndarray:
@@ -263,10 +381,12 @@ class _Problem:
     def bounds(self, x0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         lo, hi = [], []
         for p, v in zip(self.params, x0):
-            d = (math.radians(TRUST_DEG) if p.name == "rot" else math.radians(TRUST_SLOT_DEG) if p.name.startswith("sa")
-                 else TRUST_MM)
+            d = (math.radians(TRUST_DEG) if p.name == "rot"
+                 else math.radians(TRUST_SLOT_DEG) if p.name.startswith(("sa", "ta"))
+                 else TRUST_TOP_MM if p.name == "top" else TRUST_STEP_MM if p.name.startswith("to") else TRUST_MM)
+            up = self.fillet_trust if p.name.startswith(("fil", "sr")) else d
             lo.append(max(v - d, p.lower))
-            hi.append(v + d)
+            hi.append(v + up)
         return np.array(lo), np.array(hi)
 
 
@@ -276,9 +396,10 @@ def _solve(prob: _Problem, x0: np.ndarray, lb, ub, views=None, max_nfev: int = 6
                          f_scale=F_SCALE, diff_step=2e-4, x_scale="jac", max_nfev=max_nfev)
 
 
-def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None) -> EdgeFit:
-    """Verfijnt de pixelfit `part` op de randafstanden (zie de moduletekst)."""
-    prob = _Problem(part, K, vd)
+def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_per_px: float | None = None) -> EdgeFit:
+    """Verfijnt de pixelfit `part` op de randafstanden (zie de moduletekst). `mm_per_px`: resolutie op het
+    object, voor het vertrouwensgebied van de afrondingen (TRUST_FILLET_PX)."""
+    prob = _Problem(part, K, vd, mm_per_px=mm_per_px)
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None

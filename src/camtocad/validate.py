@@ -28,7 +28,9 @@ misgaat, zoals een printschaal die niet klopt.
         "diameter": 25.0,              (ronde onderdelen)
         "gaten": [6.62, 6.60],         (diameters)
         "hartafstanden": [60.01],      (tussen gatmiddens)
-        "afrondingen": [3.0]           (stralen van afgeronde hoeken)
+        "afrondingen": [3.0],          (stralen van afgeronde hoeken)
+        "afschuining": 2.0,            (afschuining of afronding van de bovenrand, rondom)
+        "treden": [6.0]                (hoogte van een trede)
       }
     }
 """
@@ -51,11 +53,12 @@ REFERENCE = "maten.json"
 KINDS = {  # soort → (enkelvoud/meervoud in maten.json, lengte-achtig voor de schaalcontrole)
     "lengte": ("lengte", True), "breedte": ("breedte", True), "hoogte": ("hoogte", False),
     "diameter": ("diameter", True), "gat": ("gaten", False), "hartafstand": ("hartafstanden", True),
-    "afronding": ("afrondingen", False),
+    "afronding": ("afrondingen", False), "bovenrand": ("afschuining", False), "trede": ("treden", False),
 }
 ALIASES = {"gat": "gat", "gaten": "gat", "hartafstand": "hartafstand", "hartafstanden": "hartafstand",
            "afronding": "afronding", "afrondingen": "afronding", "lengte": "lengte", "breedte": "breedte",
-           "hoogte": "hoogte", "diameter": "diameter"}
+           "hoogte": "hoogte", "diameter": "diameter", "afschuining": "bovenrand", "bovenrand": "bovenrand",
+           "trede": "trede", "treden": "trede"}
 
 
 @dataclass
@@ -169,6 +172,11 @@ def model_measures(geometry: dict, unc: dict) -> dict[str, list[tuple[float, flo
     big, small = float(max(ext)), float(min(ext))
     out["lengte"].append((big, u95(unc["edge"] * math.sqrt(2), big)))
     out["breedte"].append((small, u95(unc["edge"] * math.sqrt(2), small)))
+    top = geometry.get("bovenrand")
+    if top:
+        out["bovenrand"].append((float(top["maat"]), 2.0 * float(unc["fillet"])))
+    for st in geometry.get("treden", []):
+        out["trede"].append((float(st["hoogte"]), u95(unc["height"], st["hoogte"])))
     holes = geometry.get("gaten", [])
     for g in holes:
         out["gat"].append((float(g["d"]), u95(unc["hole_d"], g["d"])))
@@ -200,7 +208,9 @@ def compare(reference: dict, report: dict) -> tuple[list[Comparison], int]:
         for r, m in zip(refs, _assign(refs, model_vals)):
             if m is None:
                 note = {"gat": "gat ontbreekt in het model", "diameter": "model is niet rond",
-                        "afronding": "hoek is scherp in het model"}.get(kind, "niet in het model")
+                        "afronding": "hoek is scherp in het model",
+                        "bovenrand": "bovenrand is in het model niet afgeschuind of afgerond",
+                        "trede": "geen trede in het model"}.get(kind, "niet in het model")
                 rows.append(Comparison(kind, r, opmerking=note))
                 continue
             snap_val = snapped[kind][m][0] if m < len(snapped[kind]) else None
