@@ -209,10 +209,11 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
 
     o = out.outer
     datum: dict[str, int] = {}
+    length_kind = "lengte" if part.top_edge is None else "lengte bovenrand"
     if o.kind == "circle":
         d = 2 * o.radius
         s = do_snap("diameter", d, unc.edge * math.sqrt(2), length_candidates(d, imperial),
-                    lambda p: 2 * p.outer.radius, "lengte")
+                    lambda p: 2 * p.outer.radius, length_kind)
         o.radius = s.value / 2
         snaps.append(s)
     else:
@@ -231,7 +232,7 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                 fn = (lambda p, k=k, axis=axis: edge_position(p, k, axis) - edge_position(p, datum[axis], axis)) \
                     if axis in datum else None
                 s = do_snap(f"{axis}-maat rand {k + 1}", pos, unc.edge * math.sqrt(2),
-                            length_candidates(pos, imperial), fn, "lengte")
+                            length_candidates(pos, imperial), fn, length_kind)
                 _set_edge_position(o, k, axis, s.value)
                 snaps.append(s)
         radii = [float(r) for r in o.fillets]

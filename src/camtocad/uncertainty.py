@@ -26,8 +26,9 @@ from .profile import Part2p5D
 # systematische 1σ in pixels op het object (zie de moduletekst; ijking in ROUTE-A-VERBETERPUNTEN §3e)
 SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afronding": 0.80,
           # een afgeschuinde of afgeronde bovenrand (V17): alleen de lage foto's zien de bovenkant; de maat van de
-          # afschuining of afronding, en de hoogte die ervan afhangt (§3g)
-          "bovenrand": 0.40, "hoogte bovenrand": 0.40}
+          # afschuining of afronding, en de hoogte die ervan afhangt. Het masker ligt bij zo'n schuin belichte rand
+          # net iets anders, en dat trekt ook de buitenmaten mee: tot 0,08 mm in de stresstests (§3g)
+          "bovenrand": 0.40, "hoogte bovenrand": 0.40, "lengte bovenrand": 0.20}
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 
 

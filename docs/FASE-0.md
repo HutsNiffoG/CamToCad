@@ -16,7 +16,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - formaat: van ~20 mm (klein plaatje) tot 100–150 mm;
   - vorm: rechthoekig met afgeronde hoeken, een L- of U-vorm, een ring of flens;
   - dikte 3–20 mm, met doorgaande gaten van verschillende diameters.
-  Alleen 2,5D-onderdelen: plat, overal even dik, met doorgaande gaten.
+  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee.
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
 
 ## 2. Meten met de schuifmaat
@@ -28,6 +28,8 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 - **Hartafstand** tussen twee gaten: meet de binnenmaat tussen de gaten en tel de halve diameters erbij op (of de buitenmaat over beide gaten min de halve diameters).
 - **Diameter** van een rond onderdeel: de buitendiameter.
 - **Afrondingen:** alleen als je een radiusmal hebt; anders weglaten.
+- **Afschuining of afronding van de bovenrand** (`afschuining` in `maten.json`): bij een afschuining het been (hoogteverschil tussen bovenkant en onderkant van de afschuining, met de diepte-uitsteker), bij een afronding de straal met een radiusmal.
+- **Trede** (`treden`): de hoogte van het lage deel, met de diepte-uitsteker of de schuifmaat vanaf de onderkant.
 
 ## 3. Fotograferen
 
@@ -71,10 +73,11 @@ Een `maten.json`:
 
 | Veld | Betekenis |
 |---|---|
-| `meetlijn` | De gemeten meetlijnen X en Y van de geprinte mat, in mm. Eén getal geldt voor beide. Laat je hem weg, dan wordt 100,0 aangenomen |
+| `meetlijn` | De gemeten meetlijnen X en Y van de geprinte mat, in mm. Eén getal geldt voor beide. Laat je hem weg, dan wordt 100,0 aangenomen, met de onzekerheid van een ongemeten print (0,3%) in de U95 |
 | `mat` | Optioneel: `A4`, `A3`, `Letter`, `A4-v1` of `A3-v1`. Standaard wordt de mat herkend aan de markers |
-| `lengte`, `breedte`, `hoogte`, `diameter` | Eén waarde |
-| `gaten`, `hartafstanden`, `afrondingen` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model |
+| `lengte`, `breedte`, `hoogte`, `diameter` | Eén waarde. De hoogte is de totale hoogte, ook bij een afschuining of trede |
+| `afschuining` | Eén waarde: het been van een afschuining, of de straal van een afronding, van de bovenrand rondom |
+| `gaten`, `hartafstanden`, `afrondingen`, `treden` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen |
 
 ## 5. Draaien
 
