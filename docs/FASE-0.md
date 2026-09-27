@@ -16,7 +16,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - formaat: van ~20 mm (klein plaatje) tot 100–150 mm;
   - vorm: rechthoekig met afgeronde hoeken, een L- of U-vorm, een ring of flens;
   - dikte 3–20 mm, met doorgaande gaten van verschillende diameters.
-  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee.
+  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak.
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
 
 ## 2. Meten met de schuifmaat
@@ -36,7 +36,9 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 - Leg het onderdeel plat in het midden van de mat, bij diffuus licht (bewolkt daglicht, of een lamp tegen het plafond).
 - Maak 30–60 foto's met dezelfde telefoon, zonder zoom:
   - 4–6 recht van boven, met de hele mat in beeld;
-  - rondom op ongeveer 35° en 60° boven de mat, om de ~45°.
+  - rondom op ongeveer 35° en 60° boven de mat, om de ~45°;
+  - in kleur, zonder filter: kleur is bewijs voor het object (v0.8). JPG en HEIC (iPhone) werken allebei; voor HEIC is de extra `heic` nodig (`pip install -e ".[server]"` heeft hem al);
+  - met één lens: een iPhone schakelt dichtbij vanzelf naar de macrolens (ultragroothoek). Blijf op 25–35 cm, of zet Macrobesturing aan en de macrostand uit. Foto's van een andere lens of met digitale zoom worden aan de EXIF-gegevens herkend en niet gebruikt; de fotocontrole meldt het.
 - **Controleer de set direct**, vóór je het onderdeel weghaalt:
   - Via de telefoonpagina (`camtocad server`) gebeurt dat vanzelf. Elke foto krijgt een oordeel (goed, matig of onbruikbaar), en een dekkingskaart toont in het rood welke richtingen nog ontbreken.
   - Via de opdrachtregel draai je `camtocad controleer <map-met-fotos>`. Dat kost ongeveer 0,1 s per foto.
