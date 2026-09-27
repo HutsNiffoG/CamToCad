@@ -38,6 +38,15 @@ def test_heic_is_read_with_its_camera_data():
     assert info.label() == "Apple iPhone 14 Pro, 6,9 mm (24 mm-equivalent)"
 
 
+def test_heic_is_read_in_sensor_layout_like_jpeg():
+    """libheif zet een HEIC-foto bij het lezen rechtop; de pijplijn wil het sensorformaat, zoals bij JPEG (zonder
+    EXIF-rotatie): staand opgeslagen foto's draait ze zelf terug, en ondersteboven geen andere camera-as."""
+    pytest.importorskip("pi_heif")
+    path = DATA / "gedraaid.heic"  # 90 x 60 met links een lichte strook, opgeslagen met EXIF-oriëntatie 6
+    for img in (imgio.read_gray(path), imgio.read_color(path)):
+        assert img.shape[:2] == (60, 90) and img[:, :10].mean() > 100 and img[:, 40:].mean() < 60
+
+
 def test_heic_without_decoder_gives_a_clear_message(tmp_path, monkeypatch):
     monkeypatch.setattr(imgio, "_heif_module", lambda: None)
     for k in range(3):

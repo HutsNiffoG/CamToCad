@@ -120,19 +120,36 @@ def read_info(path: str | Path) -> PhotoInfo:
                      focal_mm=_num(sub.get(_FOCAL)), focal35_mm=_num(sub.get(_FOCAL35)), zoom=_num(sub.get(_ZOOM)))
 
 
+# libheif zet een HEIC-foto bij het lezen rechtop (irot/imir) en bewaart de EXIF-oriëntatie in
+# info["original_orientation"]; terug naar het sensorformaat, zoals bij JPEG (de inverse van elke oriëntatie)
+_UNDO_ORIENTATION = {2: np.fliplr, 3: lambda a: np.rot90(a, 2), 4: np.flipud, 5: lambda a: a.swapaxes(0, 1),
+                     6: lambda a: np.rot90(a, 1), 7: lambda a: a[::-1, ::-1].swapaxes(0, 1),
+                     8: lambda a: np.rot90(a, -1)}
+
+
+def _read_heif(path: Path, mode: str) -> np.ndarray | None:
+    if _heif_module() is None:
+        return None
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            if mode == "RGB" and img.mode in ("L", "I;16", "I"):
+                mode = "L"
+            a = np.asarray(img.convert(mode))
+            undo = _UNDO_ORIENTATION.get(img.info.get("original_orientation"))
+    except Exception:  # noqa: BLE001
+        return None
+    if mode == "RGB":
+        a = a[:, :, ::-1]
+    return np.ascontiguousarray(undo(a) if undo else a)
+
+
 def read_gray(path: str | Path) -> np.ndarray | None:
     """Leest een foto als grijswaarden, zonder EXIF-rotatie (sensorformaat, zoals de pipeline). HEIC via
     pi-heif, als dat geïnstalleerd is; None als de foto niet te lezen is."""
     path = Path(path)
     if path.suffix.lower() in HEIF_EXT:
-        if _heif_module() is None:
-            return None
-        try:
-            from PIL import Image
-            with Image.open(path) as img:
-                return np.asarray(img.convert("L"))
-        except Exception:  # noqa: BLE001
-            return None
+        return _read_heif(path, "L")
     try:
         data = np.fromfile(str(path), np.uint8)
     except OSError:
@@ -147,16 +164,7 @@ def read_color(path: str | Path) -> np.ndarray | None:
     heeft. None als de foto niet te lezen is."""
     path = Path(path)
     if path.suffix.lower() in HEIF_EXT:
-        if _heif_module() is None:
-            return None
-        try:
-            from PIL import Image
-            with Image.open(path) as img:
-                if img.mode in ("L", "I;16", "I"):
-                    return np.asarray(img.convert("L"))
-                return np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])
-        except Exception:  # noqa: BLE001
-            return None
+        return _read_heif(path, "RGB")
     try:
         data = np.fromfile(str(path), np.uint8)
     except OSError:
