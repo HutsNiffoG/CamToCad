@@ -21,6 +21,9 @@ def test_self_calibration_and_poses(mat_scan):
     res = calib.calibrate(dets, spec)
     assert res.camera.rms_px < 0.3
     assert abs(res.camera.K[0, 0] / cam.K[0, 0] - 1) < 0.003
+    # V10: de onzekerheid van de brandpuntsafstand uit de kalibratie; ruim onder de waarschuwingsgrens
+    assert 0 < res.camera.f_std_rel < 0.001
+    assert calib.CameraModel.from_dict(res.camera.to_dict()).f_std_rel == pytest.approx(res.camera.f_std_rel)
     assert np.allclose(res.camera.K[:2, 2], cam.K[:2, 2], atol=3.0)
     for v in views:
         p = res.poses[v.name]

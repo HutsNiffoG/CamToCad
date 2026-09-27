@@ -6,6 +6,7 @@ dist/
 .pytest_cache/
 # lokale scans en resultaten
 data/
+!tests/data/
 out/
 camtocad-demo/
 *_cad/

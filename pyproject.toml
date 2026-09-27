@@ -13,10 +13,15 @@ dependencies = [
     "scipy>=1.10",
     "opencv-python-headless>=4.10",
     "cadquery>=2.4",
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]
+heic = [
+    "pi-heif>=1.0",
+]
 server = [
+    "pi-heif>=1.0",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
@@ -25,6 +30,7 @@ dev = [
     "pytest>=8",
     "httpx>=0.27",
     "pypdfium2>=4",
+    "pi-heif>=1.0",
 ]
 
 [project.scripts]

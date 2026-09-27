@@ -23,11 +23,9 @@ import numpy as np
 
 from . import (__version__, cadmodel, calib, debug, edgefit, holes, hull, initial, masks, placement, preflight,
                prismcheck, profile, report, silhouette, uncertainty)
-from .imgio import imwrite, read_gray
+from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_gray, read_info
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
-
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
 
 
@@ -62,24 +60,58 @@ class ScanOptions:
         return self.mat_scale is not None
 
 
-def load_images(folder: str | Path, max_side: int = 2000, log=print) -> list[tuple[str, np.ndarray]]:
-    """Leest alle foto's als grijswaarden, zonder EXIF-rotatie (één consistent sensorformaat)."""
+HEIC_HELP = ("HEIC-foto's (iPhone) zijn alleen te lezen met de extra 'heic': pip install \"camtocad[heic]\". "
+             "Of zet de foto's om naar JPG, of stel de iPhone in op 'Meest compatibel' (Instellingen > Camera > "
+             "Formaten).")
+
+
+def load_images(folder: str | Path, max_side: int = 2000, log=print,
+                infos: dict[str, PhotoInfo] | None = None) -> list[tuple[str, np.ndarray]]:
+    """Leest alle foto's als grijswaarden, zonder EXIF-rotatie (één consistent sensorformaat). `infos` krijgt
+    per foto de camera, lens en zoom uit de EXIF-gegevens (V10)."""
     paths = sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in IMAGE_EXT)
+    heic = [p for p in paths if p.suffix.lower() in {".heic", ".heif"}]
+    if heic and not heif_supported():
+        log(f"  {len(heic)} HEIC-foto('s) overgeslagen: " + HEIC_HELP)
+        if len(heic) == len(paths):
+            raise ScanError("Alle foto's zijn HEIC en kunnen niet gelezen worden. " + HEIC_HELP)
     out = []
     for p in paths:
         img = read_gray(p)  # ook met niet-ASCII-tekens in het pad (Windows)
         if img is None:
-            log(f"  overgeslagen (onleesbaar): {p.name}")
+            if p not in heic or heif_supported():
+                log(f"  overgeslagen (onleesbaar): {p.name}")
             continue
         scale = max_side / max(img.shape)
         if scale < 1.0:
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         out.append((p.name, img))
+        if infos is not None:
+            infos[p.name] = read_info(p)
     return out
+
+
+def camera_groups(names: list[str], infos: dict[str, PhotoInfo]) -> tuple[tuple | None, dict[str, str]]:
+    """Welke foto's horen bij het meest gebruikte toestel, lens en zoom (V10)? Geeft (sleutel van die groep,
+    {foto: reden} voor de foto's die er niet bij horen). Foto's zonder cameragegevens horen er altijd bij:
+    daarover zegt de EXIF niets, en de kalibratie gooit een foto die niet past er zelf uit."""
+    keys = {n: infos[n].key() for n in names if n in infos and infos[n].key() is not None}
+    if not keys:
+        return None, {}
+    counts: dict[tuple, int] = {}
+    for k in keys.values():
+        counts[k] = counts.get(k, 0) + 1
+    main = max(counts, key=counts.get)
+    label = {k: infos[next(n for n, kk in keys.items() if kk == k)].label() for k in counts}
+    return main, {n: f"andere camera, lens of zoom ({label[k]}; de meeste foto's: {label[main]})"
+                  for n, k in keys.items() if k != main}
 
 
 def _object_distance(poses, center) -> float:
     return float(np.median([np.linalg.norm(p.center - center) for p in poses]))
+
+
+F_STD_WARN = 0.003  # relatieve onzekerheid (1σ) van de brandpuntsafstand waarboven de scan waarschuwt
 
 
 NO_CONTOUR_HELP = (
@@ -416,9 +448,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if not 0.9 < s < 1.1:
             raise ScanError(f"Meetlijn {axis} {100 * s:.1f} mm wijkt te veel af van 100 mm: print de mat opnieuw op "
                             "100% (werkelijke grootte)")
+    infos: dict[str, PhotoInfo] = {}
     if not isinstance(images, list):
         scan_name = scan_name or Path(images).name
-        images = load_images(images, opts.max_side, log)
+        images = load_images(images, opts.max_side, log, infos)
     if len(images) < 6:
         raise ScanError(f"Te weinig foto's ({len(images)}); maak er minstens 20, rondom en recht van boven")
     warnings: list[str] = []
@@ -444,16 +477,26 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         else:
             dets.append(d)
     log(f"mat gevonden in {len(dets)} van {len(images)} foto's")
+    # V10: één cameramodel per toestel, lens en zoom; foto's van een andere lens (bijv. de macrostand van een
+    # iPhone, die dichtbij vanzelf inschakelt) of met digitale zoom horen er niet bij
+    _, other_lens = camera_groups([d.name for d in dets], infos)
+    if other_lens:
+        dets = [d for d in dets if d.name not in other_lens]
+        log(f"{len(other_lens)} foto('s) van een andere camera, lens of zoom niet gebruikt: "
+            + next(iter(other_lens.values())))
     try:
         cal = calib.calibrate(dets, spec)
     except ValueError as e:
         raise ScanError(str(e)) from e
+    cal.rejected.update(other_lens)
     cam = cal.camera
+    used = [infos[n] for n in cal.poses if n in infos and infos[n].key() is not None]
+    camera_label = used[0].label() if used else ""
     # foto's die staand in plaats van liggend (of andersom) zijn opgeslagen: terugdraaien naar het
     # sensorformaat; de draairichting is die waarbij de pose met deze camera het best klopt
     n_turned = 0
     for name, img in images:
-        if name in cal.poses or img.shape != (cam.width, cam.height):
+        if name in cal.poses or name in other_lens or img.shape != (cam.width, cam.height):
             continue
         best = None
         for code in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
@@ -475,6 +518,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append(f"{name}: niet gebruikt ({reason})")
     log(f"camera gekalibreerd: f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px, "
         f"{len(cal.poses)} poses")
+    if cam.f_std_rel > F_STD_WARN:  # V10: de brandpuntsafstand is slecht bepaald (weinig verschillende hoeken)
+        warnings.append(f"brandpuntsafstand onzeker (σ {100 * cam.f_std_rel:.2f}%, goed is < {100 * F_STD_WARN:.1f}%): "
+                        "maak foto's van meer verschillende hoeken en hoogtes, met de mat steeds grotendeels in beeld")
     # onscherpte per foto, gemeten aan de mat (preflight.py)
     blur = {d.name: preflight.measure_blur(lookup[d.name], d, spec) for d in dets if d.name in cal.poses}
     blurry = sorted(n for n, b in blur.items() if b is not None and b > preflight.BLUR_WARN)
@@ -504,7 +550,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             return
         diag.update(extra or {})
         diag["fotos"] = debug.view_table(all_views, {d.name: d for d in dets}, {p.name for p, _ in top_views}, blur,
-                                         lig_of)
+                                         lig_of, {n: i.label() for n, i in infos.items() if i.key() is not None})
         debug.write_json(dbg / "diagnose.json", diag)
 
     def write_overlays() -> None:
@@ -730,7 +776,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
-        "camera": f"f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px",
+        "camera": (f"{camera_label}: " if camera_label else "") + f"f = {cam.K[0, 0]:.1f} px"
+                  + (f" (σ {100 * cam.f_std_rel:.2f}%)" if np.isfinite(cam.f_std_rel) else "")
+                  + f", reprojectiefout {cam.rms_px:.3f} px",
         "betrouwbaarheid": "laag: " + "; ".join(issues) if issues else "normaal",
         "resolutie op het object": f"{mm_per_px:.3f} mm/pixel",
         "schaalbron": f"kalibratiemat {spec.label} ({spec.mat_id})" + (

@@ -28,13 +28,12 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 from . import calib
-from .imgio import read_gray
+from .imgio import IMAGE_EXT, read_gray, read_info
 from .mat import MatSpec, board_to_mat, get_spec, make_board, rasterize_board
 
 WORK_SIDE = 2000  # dezelfde werkresolutie als de pipeline
 MIN_CORNERS = 12
 BLUR_WARN, BLUR_BAD = 1.8, 3.0  # onscherpte σ in pixels
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 # richting van de camera gezien vanaf het onderdeel; boven = kant met de titel, onder = meetlijn X
 SECTORS = ("rechts", "rechtsboven", "boven", "linksboven", "links", "linksonder", "onder", "rechtsonder")
 BANDS = (("hoog", 50.0, 80.0, 60), ("laag", 20.0, 50.0, 35))  # naam, elevatie van-tot, richtwaarde (graden)
@@ -58,6 +57,7 @@ class PhotoCheck:
     verdict: str = "onbruikbaar"  # goed | matig | onbruikbaar
     notes: list[str] = field(default_factory=list)
     ids: list[int] = field(default_factory=list)
+    camera: dict = field(default_factory=dict)  # toestel, lens en zoom uit de EXIF-gegevens (V10)
     points: list[list[float]] = field(default_factory=list)
     marker_ids: list[int] = field(default_factory=list)
 
@@ -306,8 +306,12 @@ def check_image(name: str, img: np.ndarray, spec: MatSpec | None = None) -> Phot
 def check_file(path: str | Path, spec: MatSpec | None = None) -> PhotoCheck:
     img = read_gray(path)
     if img is None:
-        return PhotoCheck(Path(path).name, notes=["geen leesbare foto (JPG of PNG)"])
-    return check_image(Path(path).name, img, spec)
+        note = ("HEIC-foto: installeer de extra 'heic' of lever JPG aan" if Path(path).suffix.lower() in
+                {".heic", ".heif"} else "geen leesbare foto (JPG, PNG of HEIC)")
+        return PhotoCheck(Path(path).name, notes=[note])
+    chk = check_image(Path(path).name, img, spec)
+    chk.camera = read_info(path).to_dict()
+    return chk
 
 
 def check_folder(folder: str | Path, mat: str | None = None, workers: int = 4) -> list[PhotoCheck]:
@@ -457,6 +461,13 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
                           "en recht van boven of schuin in beeld is.")
         return out
     found = [c for c in found if c.mat == spec.name]
+    # V10: foto's van een andere lens of met digitale zoom gebruikt de verwerking niet (pipeline.camera_groups)
+    from .imgio import PhotoInfo
+    from .pipeline import camera_groups
+    _, other_lens = camera_groups([c.name for c in found], {c.name: PhotoInfo(**c.camera) for c in found})
+    found = [c for c in found if c.name not in other_lens]
+    if not found:
+        return out
     sizes = Counter((c.width, c.height) for c in found)
     size = sizes.most_common(1)[0][0]
     other_size = [c for c in found if (c.width, c.height) not in (size, size[::-1])]
@@ -501,6 +512,12 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
         verb = "heeft" if len(other_size) == 1 else "hebben"
         advice.append(f"{_photos(len(other_size))} {verb} een ander beeldformaat (andere camera, zoom of bijgesneden) "
                       "en worden niet gebruikt: gebruik één camera zonder zoom.")
+    if other_lens:
+        verb = "is" if len(other_lens) == 1 else "zijn"
+        advice.append(f"{_photos(len(other_lens))} {verb} met een andere camera, lens of zoom gemaakt en worden niet "
+                      f"gebruikt ({next(iter(other_lens.values()))}). Gebruik één lens zonder zoom; een iPhone schakelt "
+                      "dichtbij vanzelf naar de macrolens: blijf op 25-35 cm, of zet Macrobesturing aan en de macrostand "
+                      "uit.")
     if out["klaar"] and not advice:
         advice.append("Deze fotoset ziet er goed uit: klaar om te verwerken.")
     return out

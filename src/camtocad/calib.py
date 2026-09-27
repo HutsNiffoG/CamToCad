@@ -35,6 +35,7 @@ class CameraModel:
     width: int
     height: int
     rms_px: float = float("nan")
+    f_std_rel: float = float("nan")  # 1σ van de brandpuntsafstand, relatief (uit de kalibratie, V10)
 
     def to_dict(self) -> dict:
         return {
@@ -43,19 +44,20 @@ class CameraModel:
             "width": self.width,
             "height": self.height,
             "rms_px": self.rms_px,
+            "f_std_rel": self.f_std_rel,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CameraModel":
         return cls(np.array(d["K"], float), np.array(d["dist"], float), int(d["width"]), int(d["height"]),
-                   float(d.get("rms_px", float("nan"))))
+                   float(d.get("rms_px", float("nan"))), float(d.get("f_std_rel", float("nan"))))
 
     def scaled(self, factor: float) -> "CameraModel":
         """Model voor een beeld dat met `factor` is geschaald (vervormingscoëfficiënten blijven gelijk)."""
         K = self.K.copy()
         K[:2] *= factor
         return CameraModel(K, self.dist.copy(), int(round(self.width * factor)), int(round(self.height * factor)),
-                           self.rms_px * factor)
+                           self.rms_px * factor, self.f_std_rel)
 
 
 @dataclass
@@ -264,7 +266,8 @@ def calibrate(
         for round_ in range(4):  # opnieuw zonder uitschieters, tot er geen meer zijn
             objs = [u[1] for u in usable]
             imgs = [u[2] for u in usable]
-            rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(objs, imgs, (w, h), None, None, flags=flags)
+            rms, K, dist, rvecs, tvecs, std_in, _, _ = cv2.calibrateCameraExtended(objs, imgs, (w, h), None, None,
+                                                                                  flags=flags)
             errs = [_view_rms(o, i, r, t, K, dist) for o, i, r, t in zip(objs, imgs, rvecs, tvecs)]
             limit = max(3.0 * float(np.median(errs)), 2.0)
             keep = [k for k, e in enumerate(errs) if e <= limit]
@@ -276,7 +279,7 @@ def calibrate(
                 if e > limit:
                     rejected[usable[k][0].name] = f"reprojectiefout {e:.2f} px"
             usable = [usable[k] for k in keep]
-        cam = CameraModel(K, dist.ravel(), w, h, float(rms))
+        cam = CameraModel(K, dist.ravel(), w, h, float(rms), float(std_in.ravel()[0] / K[0, 0]))
         poses = {
             u[0].name: _to_mat_pose(u[0].name, r, t, spec, e, len(u[0].ids))
             for u, r, t, e in zip(usable, rvecs, tvecs, errs)

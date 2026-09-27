@@ -88,3 +88,17 @@ def test_photos_in_paths_with_non_ascii_characters(tmp_path):
     assert imwrite(folder / "foto.png", img)
     assert np.array_equal(read_gray(folder / "foto.png"), img)
     assert read_gray(folder / "bestaat-niet.jpg") is None
+
+
+def test_summary_warns_about_photos_from_another_lens(box_scan):
+    """V10: foto's met een andere lens of zoom (EXIF) worden apart gezet, met een aanwijzing."""
+    spec, views = box_scan
+    checks = [preflight.check_image(v.name, v.image, spec) for v in views]
+    main = {"make": "Apple", "model": "iPhone 14 Pro", "focal_mm": 6.86, "lens": "back camera 6.86mm"}
+    macro = {"make": "Apple", "model": "iPhone 14 Pro", "focal_mm": 2.22, "lens": "back camera 2.22mm"}
+    for k, c in enumerate(checks):
+        c.camera = dict(macro if k in (1, 2) else main)
+    s = preflight.summarize(checks)
+    advice = [a for a in s["advies"] if "andere camera, lens of zoom" in a]
+    assert len(advice) == 1 and advice[0].startswith("2 foto's zijn") and "macrolens" in advice[0]
+    assert s["bruikbaar"] == len(views) - 2  # die twee tellen niet mee in de dekking
