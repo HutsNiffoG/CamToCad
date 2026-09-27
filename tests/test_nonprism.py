@@ -166,11 +166,16 @@ def test_a_step_is_modelled():
 
 def test_a_small_high_part_is_a_step_too():
     """Alleen de rechter 15 mm is 6 mm hoog, de rest 3 mm. Het prisma komt dan tussenin uit, en de vormtoets vindt
-    het lage deel rond drie zijden als één stuk (ook waar een hoek even geen bewijs heeft): de trede ligt links."""
+    het lage deel rond drie zijden: als één stuk, of als meer stukken als een deel van de linkerzijde bij dit
+    compromis net niet afwijkt (op de ene machine een gat van 9 mm, op een andere van 11). Samen geven ze de start
+    van de trede: van boven tot onder langs x = 130, en de trede ligt links."""
     vd = scan([block(95, 145, 65, 95, 3.0), block(130, 145, 65, 95, 6.0)])
     part, energy, ef = _prism_fit(vd, 4.0)
     shape = pipeline._prism_check(ef, part)
-    assert len(shape.runs_mat) == 1
+    assert shape.runs_mat and all(r["soort"] == "lager" for r in shape.runs_mat)
+    start = shape.start
+    assert start["soort"] == "lager" and abs(start["van"][0] - 130) < 2 and abs(start["tot"][0] - 130) < 2
+    assert abs(start["van"][1] - start["tot"][1]) > 25
     alt = pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None)
     assert alt is not None
     ef2 = edgefit.fit(alt[0], K, vd, mm_per_px=0.23)

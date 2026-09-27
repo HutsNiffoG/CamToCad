@@ -372,7 +372,7 @@ def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: f
     runs = shape.runs_mat
     info.update({"kijkhoek_verschil_mm": shape.trend, "energie_prisma": round(float(energy), 1)})
     if runs and part.outer.kind == "polygon":
-        r = max(runs, key=lambda r: np.linalg.norm(np.asarray(r["tot"]) - np.asarray(r["van"])))
+        r = shape.start or max(runs, key=lambda r: np.linalg.norm(np.asarray(r["tot"]) - np.asarray(r["van"])))
         cand, e = silhouette.fit_step(part, K, vd, r["van"], r["tot"], r["midden"], lower=r["soort"] == "lager")
         info.update({"geprobeerd": "trede", "energie": None if cand is None else round(float(e), 1),
                      "aangenomen": bool(cand is not None and e < goal)})

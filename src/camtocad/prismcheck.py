@@ -22,6 +22,10 @@ bewijs al in zekere mat (dan steekt het model zeker uit). Twee stukken van dezel
 
 Wat de toets vindt, is ook de start voor V17: de pijplijn probeert dan een rechte trede (door de uiteinden
 van het stuk) of een afschuining of afronding van de bovenrand rondom als model, en toetst daarna opnieuw.
+Vindt de toets meer stukken van dezelfde soort, dan begint de trede bij het kleinste deel van de contour dat
+ze allemaal bevat (`PrismCheck.start`): een rechte trede heeft één aaneengesloten laag deel, en een stuk
+daarvan kan in de fit met een compromis-prisma net niet afwijken (v0.8: op de ene machine een gat van 9 mm,
+op een andere van 11 mm, en dan begon de trede schuin).
 """
 
 from __future__ import annotations
@@ -48,6 +52,8 @@ class PrismCheck:
     details: dict = field(default_factory=dict)  # voor diagnose.json
     # de afwijkende stukken in matcoördinaten (begin, midden, eind), als start voor een trede (V17)
     runs_mat: list[dict] = field(default_factory=list)
+    # de start voor een trede: de stukken van de soort met de meeste lengte samen (zie de moduletekst)
+    start: dict | None = None
 
     @property
     def trend(self) -> float | None:
@@ -126,6 +132,18 @@ def _runs(mask: np.ndarray) -> list[np.ndarray]:
     return out
 
 
+def _span(runs: list[np.ndarray], n: int) -> np.ndarray:
+    """Het kleinste stuk van de gesloten rij (n punten) dat alle stukken bevat: alles behalve het grootste gat."""
+    keep = np.zeros(n, bool)
+    for r in runs:
+        keep[r] = True
+    gaps = _runs(~keep)
+    if gaps:
+        keep[:] = True
+        keep[max(gaps, key=len)] = False
+    return _runs(keep)[0]
+
+
 def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismCheck:
     """Toetst of het gefitte prisma bij de foto's past (zie de moduletekst). `angle`, `shift`: het
     werkassenstelsel (cadmodel.to_part_frame), voor de plaatsaanduiding in de melding."""
@@ -149,12 +167,14 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
     step = np.linalg.norm(np.roll(p2, -1, axis=0) - p2, axis=1)
     sm = _smooth(top)
     runs = []
+    found: dict[str, list[tuple[np.ndarray, float]]] = {"lager": [], "hoger": []}
     for sign, what in ((1.0, "lager"), (-1.0, "hoger")):
         # een stuk dat bij een hoek even geen bewijs heeft (of net onder de drempel komt), blijft één stuk
         for run in _runs(_close_gaps(np.nan_to_num(sign * sm, nan=-1.0) > LOCAL_MM, step, MERGE_GAP_MM)):
             length = float(step[run[:-1]].sum()) if len(run) > 1 else 0.0
             if length < MIN_RUN_MM:
                 continue
+            found[what].append((run, length))
             dev = float(np.nanmax(np.where(np.isnan(sm[run]), -np.inf, sign * sm[run])))
             a, b = q[run[0]], q[run[-1]]
             runs.append({"soort": what, "van": a.round(1).tolist(), "tot": b.round(1).tolist(),
@@ -171,6 +191,12 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
                     f"langs de rand van ({a[0]:.0f}, {a[1]:.0f}) tot ({b[0]:.0f}, {b[1]:.0f}) (over {length:.0f} mm) "
                     f"steekt het onderdeel boven het model uit (tot {dev:.1f} mm in beeld): het is daar hoger of heeft "
                     "een ronde bovenkant")
+    kind = max(found, key=lambda k: sum(length for _, length in found[k]))
+    if found[kind]:
+        span = _span([r for r, _ in found[kind]], no)
+        dev = float(max(out_run["afwijking_mm"] for out_run in out.runs_mat if out_run["soort"] == kind))
+        out.start = {"soort": kind, "van": p2[span[0]], "tot": p2[span[-1]], "midden": p2[span[len(span) // 2]],
+                     "afwijking_mm": dev, "stukken": len(found[kind])}
     # kijkhoek: per foto de mediaan over de bovenrand van de buitencontour
     rows = []
     for elev, idx, mm in per_view:

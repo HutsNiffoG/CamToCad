@@ -80,3 +80,11 @@ def test_a_chamfer_all_round_shows_in_the_low_photos():
     res = run_check(layers, block(95, 145, 65, 95, 4.2), accepted=True)
     assert res.details["kijkhoek_verschil_mm"] < prismcheck.TREND_LOW_MM
     assert any("afgeschuind of afgerond" in m for m in res.issues)
+
+
+def test_the_span_of_several_runs_skips_only_the_largest_gap():
+    """De start van een trede (V17) bij meer stukken van dezelfde soort: alles behalve het grootste gat, ook als
+    het stuk over het begin van de gesloten rij loopt."""
+    assert prismcheck._span([np.arange(2, 6), np.arange(10, 13)], 20).tolist() == list(range(2, 13))
+    assert prismcheck._span([np.array([18, 19, 0, 1]), np.array([5, 6])], 20).tolist() == [18, 19, 0, 1, 2, 3, 4, 5, 6]
+    assert prismcheck._span([np.arange(3, 9)], 20).tolist() == list(range(3, 9))
