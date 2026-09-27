@@ -190,7 +190,7 @@ def _turns_deg(outer) -> np.ndarray:
 
 
 def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg: float = 10.0,
-                      max_edge_mm: float = 5.0, max_tries: int = 8, log=print):
+                      max_edge_mm: float = 5.0, max_failures: int = 6, log=print):
     """Haalt hoekpunten weg die het model niet nodig heeft: een knik van een paar graden in een rechte
     rand, of een korte rand (bijv. een afschuining) op een hoek.
 
@@ -200,9 +200,15 @@ def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg
     0,5% of één pixel per foto), dan blijft het weg. Een echt kenmerk, of een schaduw die het masker
     verkeerd laat lopen, heeft bewijs in de foto's: dan blijft het staan (en markeert de
     kwaliteitspoort een schaduw). Geeft (model, energie, aantal weggehaalde hoekpunten).
+
+    Alleen mislukte pogingen zijn beperkt (`max_failures`): een rommelige contour bij een hoek zonder bewijs
+    kan tien hoekpunten te veel hebben, en tot v0.8 stopte het na acht pogingen, geslaagd of niet. Elke
+    kandidaat krijgt 400 evaluaties: met 200 was hij bij zo'n contour vaak nog niet uitgefit, en bleef er een
+    cluster korte randen staan waarop geen afschuining van de bovenrand meer paste (v0.8,
+    ROUTE-A-VERBETERPUNTEN §3h). Een schone contour heeft geen kandidaten en kost dus niets extra.
     """
-    removed, tries = 0, 0
-    while part.outer.kind == "polygon" and part.outer.n > 3 and tries < max_tries:
+    removed, failures = 0, 0
+    while part.outer.kind == "polygon" and part.outer.n > 3 and failures < max_failures:
         o = part.outer
         turn = _turns_deg(o)
         V = o.vertices()
@@ -224,11 +230,12 @@ def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg
         for e_raw, what, k, cand in sorted(cands, key=lambda c: c[0]):
             # Zonder bijstellen past een samengevoegde rand nog niet (hij ligt op het gemiddelde); kansloos
             # is een kandidaat pas als hij veel slechter past: dan is er bewijs voor dit hoekpunt.
-            if e_raw > energy + max(20 * tol, 0.5 * energy) or tries >= max_tries:
+            if e_raw > energy + max(20 * tol, 0.5 * energy) or failures >= max_failures:
                 break
-            tries += 1
-            cand, e_cand, _ = silhouette.refine(cand, K, vd, max_evals=200)
-            if e_cand <= energy + tol:
+            cand, e_cand, _ = silhouette.refine(cand, K, vd, max_evals=400)
+            if e_cand > energy + tol:
+                failures += 1
+            else:
                 detail = f"knik van {turn[k]:.1f}°" if what == "knik" else f"korte rand van {lengths[k]:.1f} mm"
                 log(f"{detail} uit de contour gehaald: het model past zonder even goed (energie {energy:.0f} → "
                     f"{e_cand:.0f})")
@@ -354,8 +361,10 @@ def _add_missed_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
 
 # V17: een vorm die geen prisma is als model proberen, als de vormtoets (V19) erom vraagt
 # kijkhoekverschil (prismcheck) waaronder een afgeschuinde of afgeronde bovenrand geprobeerd wordt; prisma's gaven
-# +0,003 tot +0,10 mm, een afschuining van 1,5 mm op een zwart onderdeel −0,013 mm (de meldgrens is −0,04 mm)
+# +0,003 tot +0,10 mm, een afschuining van 1,5 mm op een zwart onderdeel −0,013 mm (de meldgrens is −0,04 mm). Dat
+# laatste hangt van de pixelfit af (v0.8: +0,002 of +0,034): daarom ook een proef zonder fit (TOP_PROBE_GAIN)
 TOP_TRY_MM = 0.0
+TOP_PROBE_GAIN = 0.01  # of: de proef met een afschuining of afronding past zonder fit al 1% beter (§3h)
 NON_PRISM_GAIN = 0.05  # zoveel lager moet de energie worden (een prisma past met een afschuining 1-3% beter)
 
 
@@ -363,6 +372,22 @@ def _prism_check(ef, part):
     """V19 op de randfit (of de pixelfit, als de randfit niet gebruikt is)."""
     _, angle, shift = cadmodel.to_part_frame(ef.part if ef.accepted else part)
     return prismcheck.check(ef, angle, shift)
+
+
+def _trend_asks(shape) -> bool:
+    """Vraagt het kijkhoekverschil van de vormtoets om een afschuining of afronding van de bovenrand?"""
+    return shape.trend is not None and shape.trend < TOP_TRY_MM
+
+
+def _probe_asks(part, K: np.ndarray, vd: list, info: dict, log=print) -> bool:
+    """Past het prisma met een afschuining of afronding van de bovenrand al zonder fit merkbaar beter? Bij een zwart
+    onderdeel zegt het kijkhoekverschil te weinig: een afschuining van 1,5 mm gaf −0,013, +0,002 of +0,034 mm (per
+    versie van de pixelfit), gewone prisma's +0,010 tot +0,051 (ROUTE-A-VERBETERPUNTEN §3h)."""
+    gain = silhouette.top_edge_probe(part, K, vd)
+    info["proef_bovenrand"] = round(gain, 4)
+    if gain >= TOP_PROBE_GAIN:
+        log(f"proef: met een afschuining of afronding van de bovenrand past het prisma {100 * gain:.1f}% beter")
+    return gain >= TOP_PROBE_GAIN
 
 
 def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: float, log=print,
@@ -389,7 +414,7 @@ def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: f
         log("geen trede gemodelleerd: " + (
             "geen geldige trede gevonden" if cand is None else
             f"het model past er niet duidelijk beter door (energie {energy:.0f} → {e:.0f})"))
-    elif not runs and shape.trend is not None and shape.trend < TOP_TRY_MM:
+    elif not runs and (_trend_asks(shape) or _probe_asks(part, K, vd, info, log)):
         cand, e = silhouette.fit_top_edge(part, K, vd, log=log)
         ok = cand is not None and e < goal and cand.top_edge.size >= max(0.3, 2.0 * mm_per_px)
         info.update({"geprobeerd": "bovenrand", "energie": None if cand is None else round(float(e), 1),

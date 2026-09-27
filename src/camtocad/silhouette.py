@@ -574,6 +574,33 @@ def probe_fillets(part: Part2p5D, K: np.ndarray, views: list[ViewData], e_part: 
     return part, e_best, changed
 
 
+def _top_edge_grid(part: Part2p5D, K: np.ndarray, views: list[ViewData], kind: str,
+                   sizes) -> tuple[Part2p5D | None, float]:
+    """Het prisma met een afschuining of afronding van de bovenrand, over een raster van maat en schouderhoogte
+    (zie fit_top_edge): het beste model en zijn energie."""
+    best, e_best = None, math.inf
+    for s in sizes:
+        for below in (0.0, 0.25, 0.5):
+            cand = part.copy()
+            cand.top_edge = TopEdge(kind, float(s))
+            cand.height = part.height + (1.0 - below) * s
+            if not cand.is_valid():
+                continue
+            e = energy(cand, K, views)
+            if e < e_best:
+                best, e_best = cand, e
+    return best, e_best
+
+
+def top_edge_probe(part: Part2p5D, K: np.ndarray, views: list[ViewData], sizes=(0.5, 1.0, 1.5, 2.0, 3.0)) -> float:
+    """Hoeveel beter past het prisma `part` met een afschuining of afronding van de bovenrand, zonder te fitten?
+    Relatieve energiewinst van het beste rastermodel (negatief: slechter). Goedkoop (~30 energieën): de vormtoets
+    kan een afschuining bij een zwart onderdeel missen (v0.8, ROUTE-A-VERBETERPUNTEN §3h)."""
+    e0 = energy(part, K, views)
+    e = min(_top_edge_grid(part, K, views, kind, sizes)[1] for kind in ("afschuining", "afronding"))
+    return (e0 - e) / e0 if math.isfinite(e) and e0 > 0 else -math.inf
+
+
 def fit_top_edge(part: Part2p5D, K: np.ndarray, views: list[ViewData], log=None,
                  sizes=(0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0)) -> tuple[Part2p5D | None, float]:
     """Het prisma `part` met een afschuining of afronding van de bovenrand (V17); geeft (model, energie), of
@@ -582,17 +609,7 @@ def fit_top_edge(part: Part2p5D, K: np.ndarray, views: list[ViewData], log=None,
     van maat en schouderhoogte, dan kort alleen die twee verfijnen; de beste soort daarna helemaal."""
     per_kind = []
     for kind in ("afschuining", "afronding"):
-        best, e_best = None, math.inf
-        for s in sizes:
-            for below in (0.0, 0.25, 0.5):
-                cand = part.copy()
-                cand.top_edge = TopEdge(kind, float(s))
-                cand.height = part.height + (1.0 - below) * s
-                if not cand.is_valid():
-                    continue
-                e = energy(cand, K, views)
-                if e < e_best:
-                    best, e_best = cand, e
+        best, e_best = _top_edge_grid(part, K, views, kind, sizes)
         if best is not None:
             best, e_best, _ = refine(best, K, views, max_evals=100, only={"h", "top"}, abort_iou=0.0)
             per_kind.append((e_best, best))

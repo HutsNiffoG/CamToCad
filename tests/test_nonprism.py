@@ -122,6 +122,8 @@ def test_chamfer_all_round_is_modelled(chamfer_scan):
     part, energy, ef = _prism_fit(vd, 7.0)
     shape = pipeline._prism_check(ef, part)
     assert shape.trend < prismcheck.TREND_LOW_MM and part.height < 6.6
+    # ook de proef zonder fit ziet de afschuining (voor een zwart onderdeel, waar het kijkhoekverschil weinig zegt)
+    assert silhouette.top_edge_probe(part, K, vd) > pipeline.TOP_PROBE_GAIN
     alt = pipeline._non_prism(part, K, vd, energy, shape, mm_per_px=0.23, log=lambda m: None)
     assert alt is not None and alt[0].top_edge.kind == "afschuining"
     ef2 = edgefit.fit(alt[0], K, vd, mm_per_px=0.23)
@@ -132,12 +134,13 @@ def test_chamfer_all_round_is_modelled(chamfer_scan):
 
 
 def test_a_prism_gets_no_chamfer():
-    """Een prisma: geen afwijkend stuk bovenrand, en een afschuining levert te weinig op (hier ~3%, door de
-    renderer, V29; een afschuining van 1 mm gaf 10%) en is kleiner dan 2 px."""
+    """Een prisma: geen afwijkend stuk bovenrand, de proef zonder fit past met een afschuining slechter, en een
+    gefitte afschuining levert te weinig op en is kleiner dan 2 px."""
     vd = scan([block(95, 145, 65, 95, 8.0, 2.0)])
     part, energy, ef = _prism_fit(vd, 7.5)
     shape = pipeline._prism_check(ef, part)
     assert not shape.runs_mat and abs(shape.trend) < 0.03
+    assert silhouette.top_edge_probe(part, K, vd) < pipeline.TOP_PROBE_GAIN
     info = {}
     assert pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None, info=info) is None
     cand, e = silhouette.fit_top_edge(part, K, vd)

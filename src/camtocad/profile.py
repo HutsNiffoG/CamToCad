@@ -461,8 +461,10 @@ def regularize_angles(profile: Profile, tol_deg: float = 3.0) -> tuple[Profile, 
 def drop_edge(profile: Profile, k: int) -> Profile | None:
     """Laat rand k weg: de buren lopen door tot hun snijpunt, of worden één rand als ze evenwijdig zijn.
 
-    De afronding van het nieuwe hoekpunt is de grootste van de twee hoekpunten van rand k. Geeft None
-    als dat geen geldige contour oplevert.
+    De afronding van het nieuwe hoekpunt is de grootste van de twee hoekpunten van rand k. Past die niet
+    (een cluster korte randen met grote afrondingen, bij een hoek zonder bewijs), dan de kleinste, dan
+    scherp, en dan ook de buurhoeken scherp: de verfijning daarna laat ze weer groeien. Geeft None als dat
+    geen geldige contour oplevert.
     """
     n = profile.n
     if profile.kind != "polygon" or n <= 3:
@@ -482,8 +484,16 @@ def drop_edge(profile: Profile, k: int) -> Profile | None:
         drop = [1, 2]
         out.angles, out.offsets, out.fillets = np.delete(a, drop), np.delete(off, drop), np.delete(fil, drop)
     else:
-        fil[2] = max(fil[1], fil[2])
-        out.angles, out.offsets, out.fillets = np.delete(a, 1), np.delete(off, 1), np.delete(fil, 1)
+        big, small = max(fil[1], fil[2]), min(fil[1], fil[2])
+        for f, sharp_neighbours in ((big, False), (small, False), (0.0, False), (0.0, True)):
+            f2 = fil.copy()
+            f2[2] = f
+            if sharp_neighbours:
+                f2[0] = f2[3 % n] = 0.0
+            out.angles, out.offsets, out.fillets = np.delete(a, 1), np.delete(off, 1), np.delete(f2, 1)
+            if out.n >= 3 and out.is_valid():
+                return out
+        return None
     return out if out.n >= 3 and out.is_valid() else None
 
 

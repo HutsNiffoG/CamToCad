@@ -181,6 +181,19 @@ def test_short_edges_are_removed():
     assert np.allclose(V.min(axis=0), [0.0, 0.0], atol=0.02) and np.allclose(V.max(axis=0), [30.0, 20.0], atol=0.02)
 
 
+def test_dropping_a_short_edge_falls_back_to_a_smaller_fillet():
+    """Een korte schuine rand met een grote afronding ernaast (zoals een cluster korte randen bij een hoek zonder
+    bewijs): met die afronding op het nieuwe hoekpunt past de contour niet meer, met de kleinste wel (v0.8)."""
+    angles = np.array([-np.pi / 2, 0.0, np.pi / 4, np.pi / 2, np.pi])
+    # 30 x 6, rechtsboven afgesneden van (27, 6) tot (30, 3)
+    offsets = np.array([0.0, 30.0, 33.0 / math.sqrt(2), 6.0, 0.0])
+    p = Profile("polygon", np.zeros(2), angles, offsets, np.array([0.0, 0.0, 7.0, 0.5, 0.0]))
+    assert p.is_valid()
+    q = profile.drop_edge(p, 2)
+    assert q is not None and q.n == 4 and q.is_valid()
+    assert np.allclose(q.vertices().max(axis=0), [30.0, 6.0], atol=1e-6) and q.fillets.max() == pytest.approx(0.5)
+
+
 def test_slightly_slanted_edge_does_not_bias_the_frame():
     """Een korte rand die maar ~6° afwijkt (binnen het zoekvenster) mag de hoofdrichting niet verschuiven."""
     corners = [(0, 0), (80, 0), (80, 20), (79, 30), (79, 40), (0, 40)]
