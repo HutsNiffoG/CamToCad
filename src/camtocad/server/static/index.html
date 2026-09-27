@@ -130,6 +130,31 @@ async function api(method, url, body) {
   return data;
 }
 
+// EXIF-gegevens (toestel, lens, zoom) van een JPEG: het APP1-segment, met de oriëntatie op 1, want het canvas
+// zet de foto al rechtop. De scan herkent daaraan foto's van een andere lens (V10); een canvas laat ze weg.
+async function exifSegment(file) {
+  try {
+    const b = new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer());
+    if (b[0] !== 0xFF || b[1] !== 0xD8) return null;
+    for (let i = 2; i + 10 <= b.length && b[i] === 0xFF && b[i + 1] !== 0xDA;) {
+      const len = (b[i + 2] << 8) | b[i + 3];
+      if (b[i + 1] === 0xE1 && String.fromCharCode(...b.slice(i + 4, i + 8)) === "Exif") {
+        const seg = b.slice(i, i + 2 + len), t = 10, le = seg[t] === 0x49;
+        const u16 = (o) => le ? seg[o] | (seg[o + 1] << 8) : (seg[o] << 8) | seg[o + 1];
+        const u32 = (o) => le ? (u16(o) + u16(o + 2) * 65536) : (u16(o) * 65536 + u16(o + 2));
+        const ifd = t + u32(t + 4);
+        for (let k = 0; k < u16(ifd) && ifd + 14 + 12 * k <= seg.length; k++) {
+          const e = ifd + 2 + 12 * k;
+          if (u16(e) === 0x0112) { seg[e + 8] = le ? 1 : 0; seg[e + 9] = le ? 0 : 1; }
+        }
+        return seg;
+      }
+      i += 2 + len;
+    }
+  } catch (e) {}
+  return null;
+}
+
 // Verkleinen op de telefoon: de pipeline werkt toch op ≤ 2000 px; de upload wordt ~5x kleiner.
 async function shrink(file) {
   if (!$("verklein").checked || !window.createImageBitmap || !/^image\/(jpeg|png|webp)/.test(file.type)) return file;
@@ -141,7 +166,13 @@ async function shrink(file) {
     c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
     c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
     bmp.close && bmp.close();
-    const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
+    let blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
+    const exif = blob && await exifSegment(file);
+    if (exif) {  // na SOI en het JFIF-segment van het canvas
+      const h = new Uint8Array(await blob.slice(0, 6).arrayBuffer());
+      const at = h[2] === 0xFF && h[3] === 0xE0 ? 4 + ((h[4] << 8) | h[5]) : 2;
+      blob = new Blob([blob.slice(0, at), exif, blob.slice(at)], { type: "image/jpeg" });
+    }
     return blob ? new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
   } catch (e) { return file; }
 }
