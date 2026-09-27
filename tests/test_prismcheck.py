@@ -42,9 +42,13 @@ def scan(pieces: list[Part2p5D], elevations=(35.0, 55.0, 72.0), n_ring: int = 8,
     return vd
 
 
-def run_check(pieces, start):
+def run_check(pieces, start, accepted: bool | None = None):
+    """De randfit zoals in de pijplijn (0,23 mm per pixel), dan de vormtoets. Wordt de randfit niet aangenomen,
+    dan toetst de vormtoets het startmodel (zoals de pijplijn de pixelfit); `accepted` eist het een of het ander."""
     vd = scan(pieces)
-    ef = edgefit.fit(start, K, vd)
+    ef = edgefit.fit(start, K, vd, mm_per_px=0.23)
+    if accepted is not None:
+        assert ef.accepted == accepted, ef.note
     _, angle, shift = cadmodel.to_part_frame(ef.part)
     return prismcheck.check(ef, angle, shift)
 
@@ -71,6 +75,8 @@ def test_a_chamfer_all_round_shows_in_the_low_photos():
     """Rondom een afschuining van 2 mm (vier lagen): het silhouet past op een prisma van ~4 mm, maar de
     lage foto's zien de afschuining boven het model uitsteken."""
     layers = [block(95 + d, 145 - d, 65 + d, 95 - d, 4.0 + d) for d in (0.0, 0.5, 1.0, 1.5, 2.0)]
-    res = run_check(layers, block(95, 145, 65, 95, 4.5))
+    # De randfit komt op ~4,04 uit. Vanuit 4,5 lag dat 0,04 mm binnen het vertrouwensgebied; op sommige
+    # CI-machines net erbuiten, en dan gaf het startmodel +0,02 in plaats van -0,18.
+    res = run_check(layers, block(95, 145, 65, 95, 4.2), accepted=True)
     assert res.details["kijkhoek_verschil_mm"] < prismcheck.TREND_LOW_MM
     assert any("afgeschuind of afgerond" in m for m in res.issues)

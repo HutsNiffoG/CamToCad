@@ -112,7 +112,7 @@ def chamfer_scan():
 def _prism_fit(vd, h0):
     start = block(95.3, 144.8, 65.2, 95.3, h0, 2.0)
     part, energy, _ = silhouette.refine(start, K, vd, max_evals=800)
-    return part, energy, edgefit.fit(part, K, vd)
+    return part, energy, edgefit.fit(part, K, vd, mm_per_px=0.23)
 
 
 def test_chamfer_all_round_is_modelled(chamfer_scan):
@@ -124,7 +124,7 @@ def test_chamfer_all_round_is_modelled(chamfer_scan):
     assert shape.trend < prismcheck.TREND_LOW_MM and part.height < 6.6
     alt = pipeline._non_prism(part, K, vd, energy, shape, mm_per_px=0.23, log=lambda m: None)
     assert alt is not None and alt[0].top_edge.kind == "afschuining"
-    ef2 = edgefit.fit(alt[0], K, vd)
+    ef2 = edgefit.fit(alt[0], K, vd, mm_per_px=0.23)
     assert ef2.accepted
     fitted = ef2.part
     assert fitted.height == pytest.approx(8.0, abs=0.12) and fitted.top_edge.size == pytest.approx(2.0, abs=0.15)
@@ -153,7 +153,7 @@ def test_a_step_is_modelled():
     assert [r["soort"] for r in shape.runs_mat] == ["lager"]
     alt = pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None)
     assert alt is not None and len(alt[0].steps) == 1 and alt[1] < 0.3 * energy
-    ef2 = edgefit.fit(alt[0], K, vd)
+    ef2 = edgefit.fit(alt[0], K, vd, mm_per_px=0.23)
     assert ef2.accepted
     p = ef2.part
     st = p.steps[0]
