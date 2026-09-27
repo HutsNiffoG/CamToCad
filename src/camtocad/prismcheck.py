@@ -17,7 +17,11 @@ fout moet een melding worden. Twee toetsen op de afstanden tussen modelrand en m
   afschuining van ~1 mm valt hierbinnen en wordt niet herkend. Zonder foto's onder 45° geen toets.
 
 Een punt telt mee waar er bewijs is: zekere mat vlakbij, of het punt ligt voorbij de strook zonder
-bewijs al in zekere mat (dan steekt het model zeker uit).
+bewijs al in zekere mat (dan steekt het model zeker uit). Twee stukken van dezelfde soort met minder dan
+10 mm ertussen (vaak een hoek zonder bewijs) zijn één stuk.
+
+Wat de toets vindt, is ook de start voor V17: de pijplijn probeert dan een rechte trede (door de uiteinden
+van het stuk) of een afschuining of afronding van de bovenrand rondom als model, en toetst daarna opnieuw.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from .calib import project
 
 LOCAL_MM = 0.3  # plaatselijke afwijking van de bovenrand
 MIN_RUN_MM = 8.0  # over minstens zoveel contour
+MERGE_GAP_MM = 10.0  # twee stukken met een kleiner gat ertussen (vaak een hoek zonder bewijs) zijn één stuk
 TREND_LOW_MM, TREND_HIGH_MM = -0.04, 0.10  # verschil tussen lage en hoge foto's (prisma's: 0,00 tot +0,04)
 LOW_DEG, HIGH_DEG = 45.0, 60.0
 MIN_VIEWS = 3
@@ -91,6 +96,17 @@ def _smooth(a: np.ndarray, k: int = 5) -> np.ndarray:
     return np.where(den >= 3, num / np.maximum(den, 1.0), np.nan)
 
 
+def _close_gaps(mask: np.ndarray, step: np.ndarray, max_gap: float) -> np.ndarray:
+    """Vult in een gesloten rij korte stukken False tussen twee stukken True op (lengte langs de contour)."""
+    if mask.all() or not mask.any():
+        return mask
+    out = mask.copy()
+    for gap in _runs(~mask):
+        if float(step[gap].sum()) < max_gap:
+            out[gap] = True
+    return out
+
+
 def _runs(mask: np.ndarray) -> list[np.ndarray]:
     """Aaneengesloten stukken True in een gesloten rij, als indexlijsten in volgorde."""
     n = len(mask)
@@ -134,11 +150,12 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
     sm = _smooth(top)
     runs = []
     for sign, what in ((1.0, "lager"), (-1.0, "hoger")):
-        for run in _runs(np.nan_to_num(sign * sm, nan=-1.0) > LOCAL_MM):
+        # een stuk dat bij een hoek even geen bewijs heeft (of net onder de drempel komt), blijft één stuk
+        for run in _runs(_close_gaps(np.nan_to_num(sign * sm, nan=-1.0) > LOCAL_MM, step, MERGE_GAP_MM)):
             length = float(step[run[:-1]].sum()) if len(run) > 1 else 0.0
             if length < MIN_RUN_MM:
                 continue
-            dev = float(np.nanmax(sign * sm[run]))
+            dev = float(np.nanmax(np.where(np.isnan(sm[run]), -np.inf, sign * sm[run])))
             a, b = q[run[0]], q[run[-1]]
             runs.append({"soort": what, "van": a.round(1).tolist(), "tot": b.round(1).tolist(),
                          "lengte_mm": round(length, 1), "afwijking_mm": round(dev, 2)})

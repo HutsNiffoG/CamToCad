@@ -425,8 +425,12 @@ def coverage(poses: dict, point, verdicts: dict | None = None) -> dict:
     for band, _, _, deg in BANDS:
         missing = [SECTORS[k] for k in range(8) if out["dekking"][band][k] == 0]
         if len(missing) == 8:
+            # zonder lage foto's is een afgeschuinde of afgeronde bovenrand niet te zien (V17): de hoogte is dan stil
+            # die van de onderkant ervan
+            why = (" Zonder lage foto's is een afgeschuinde of afgeronde bovenrand niet te zien." if band == "laag"
+                   else "")
             advice.append(f"Nog geen foto's {band} rondom (~{deg}° boven de mat): loop rond het onderdeel en maak om "
-                          "de ~45° een foto.")
+                          f"de ~45° een foto.{why}")
         elif missing:
             advice.append(f"{band.capitalize()} rondom (~{deg}°) ontbreken nog foto's van: {', '.join(missing)} "
                           "(boven = kant met de titel van de mat).")

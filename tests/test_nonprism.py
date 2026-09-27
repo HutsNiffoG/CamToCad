@@ -6,7 +6,7 @@ import runpy
 import numpy as np
 import pytest
 
-from camtocad import cadmodel, edgefit, pipeline, prismcheck, silhouette, validate
+from camtocad import cadmodel, edgefit, pipeline, prismcheck, report, silhouette, validate
 from camtocad.profile import Hole, Part2p5D, Profile, Step, TopEdge
 
 from test_edgefit import K
@@ -132,14 +132,16 @@ def test_chamfer_all_round_is_modelled(chamfer_scan):
 
 
 def test_a_prism_gets_no_chamfer():
-    """Een prisma: de vormtoets vraagt niets, en ook geforceerd levert een afschuining te weinig op."""
+    """Een prisma: geen afwijkend stuk bovenrand, en een afschuining levert te weinig op (hier ~3%, door de
+    renderer, V29; een afschuining van 1 mm gaf 10%) en is kleiner dan 2 px."""
     vd = scan([block(95, 145, 65, 95, 8.0, 2.0)])
     part, energy, ef = _prism_fit(vd, 7.5)
     shape = pipeline._prism_check(ef, part)
-    assert shape.trend > pipeline.TOP_TRY_MM and not shape.runs_mat
-    assert pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None) is None
+    assert not shape.runs_mat and abs(shape.trend) < 0.03
+    info = {}
+    assert pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None, info=info) is None
     cand, e = silhouette.fit_top_edge(part, K, vd)
-    assert e > energy * (1 - pipeline.NON_PRISM_GAIN)
+    assert e > energy * (1 - pipeline.NON_PRISM_GAIN) and cand.top_edge.size < 2 * 0.23
 
 
 def test_a_step_is_modelled():
@@ -160,6 +162,21 @@ def test_a_step_is_modelled():
     check = pipeline._prism_check(ef2, p)
     assert check.issues == [] and check.details["stukken"] == []
     assert edgefit.jackknife(ef2) is not None
+
+
+def test_a_small_high_part_is_a_step_too():
+    """Alleen de rechter 15 mm is 6 mm hoog, de rest 3 mm. Het prisma komt dan tussenin uit, en de vormtoets vindt
+    het lage deel rond drie zijden als één stuk (ook waar een hoek even geen bewijs heeft): de trede ligt links."""
+    vd = scan([block(95, 145, 65, 95, 3.0), block(130, 145, 65, 95, 6.0)])
+    part, energy, ef = _prism_fit(vd, 4.0)
+    shape = pipeline._prism_check(ef, part)
+    assert len(shape.runs_mat) == 1
+    alt = pipeline._non_prism(part, K, vd, energy, shape, 0.23, log=lambda m: None)
+    assert alt is not None
+    ef2 = edgefit.fit(alt[0], K, vd, mm_per_px=0.23)
+    st = ef2.part.steps[0]
+    assert st.normal() @ [-1.0, 0.0] > 0.9999 and -st.offset == pytest.approx(130.0, abs=0.2)
+    assert st.height == pytest.approx(3.0, abs=0.1) and ef2.part.height == pytest.approx(6.0, abs=0.1)
 
 
 # ----------------------------------------------------------------------------- CAD, rapport, validatie
@@ -210,6 +227,16 @@ def test_step_is_dimensioned_from_the_datum_and_built(tmp_path):
     assert runpy.run_path(str(path))["model"].val().Volume() == pytest.approx(volume, rel=1e-6)
     geo = snapped.to_dict()
     assert geo["treden"][0]["hoogte"] == 6.0 and geo["bovenrand"] is None
+
+
+def test_report_draws_the_top_edge_and_the_step():
+    prof = Profile("polygon", np.array([40.0, 20.0]), np.array([-np.pi / 2, 0, np.pi / 2, np.pi]),
+                   np.array([20.0, 40.0, 20.0, 40.0]), np.full(4, 3.0))
+    chamfered = Part2p5D(12.0, prof, top_edge=TopEdge("afschuining", 1.5))
+    stepped = Part2p5D(12.0, prof, steps=[Step.from_line(0.0, 60.0, 6.0, (60.0, 20.0))])
+    assert report._svg_top_view(chamfered).count('class="edge"') == 1  # binnenrand van de afschuining
+    svg = report._svg_top_view(stepped)
+    assert svg.count('class="edge"') == 1 and "trede 6.00" in svg
 
 
 def test_validation_compares_top_edge_and_step():

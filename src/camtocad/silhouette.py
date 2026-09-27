@@ -484,12 +484,20 @@ def fit_top_edge(part: Part2p5D, K: np.ndarray, views: list[ViewData], log=None,
             best, e_best, _ = refine(best, K, views, max_evals=100, only={"h", "top"}, abort_iou=0.0)
             per_kind.append((e_best, best))
             if log:
-                log(f"bovenrand als {kind}: {best.top_edge.size:.2f} mm, energie {e_best:.0f}")
+                log(f"bovenrand als {kind} geprobeerd: {best.top_edge.size:.2f} mm, energie {e_best:.0f}")
     if not per_kind:
         return None, math.inf
     _, best = min(per_kind, key=lambda t: t[0])
-    best, e_best, _ = refine(best, K, views, max_evals=300, abort_iou=0.0)
+    best, e_best, _ = refine(best, K, views, max_evals=300, abort_iou=0.0, only=_shape_params(best))
     return best, e_best
+
+
+def _shape_params(part: Part2p5D) -> set[str]:
+    """De parameters van de buitenvorm (hoogte, contour, bovenrand, treden), zonder gaten en sleuven: die liggen
+    al goed uit de pixelfit, en een gat zonder bewijs rondom (zwart op zwart) dwaalt anders af, waarna de randfit
+    tegen zijn vertrouwensgebied loopt."""
+    return {p.name for p in _params(part) if not p.name.startswith(("hx", "hy", "hd", "sx", "sy", "sl", "sw", "sa",
+                                                                     "sr"))}
 
 
 def fit_step(part: Part2p5D, K: np.ndarray, views: list[ViewData], a, b, mid, lower: bool = True,
@@ -526,7 +534,7 @@ def fit_step(part: Part2p5D, K: np.ndarray, views: list[ViewData], a, b, mid, lo
     if best is None:
         return None, math.inf
     best, e_best, _ = refine(best, K, views, max_evals=150, only={"h", "to0", "ta0", "th0"}, abort_iou=0.0)
-    best, e_best, _ = refine(best, K, views, max_evals=300, abort_iou=0.0)
+    best, e_best, _ = refine(best, K, views, max_evals=300, abort_iou=0.0, only=_shape_params(best))
     if log:
         st = best.steps[0]
         log(f"trede: hoogte {st.height:.2f} van {best.height:.2f} mm, energie {e_best:.0f}")

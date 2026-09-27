@@ -32,6 +32,7 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
 
     a = np.linspace(0, 2 * np.pi, 72)
     body = [f'<path d="{path(outline)}" class="part"/>']
+    labels: list[str] = []  # boven op de rest
     te = part.top_edge
     if te is not None:  # binnenrand van een afschuining of afronding rondom (V17)
         inner = part.outer.inset(te.size)
@@ -44,9 +45,13 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
             continue
         x, y = tr(q)
         body.append(f'<path d="M {x[0]:.1f},{y[0]:.1f} L {x[1]:.1f},{y[1]:.1f}" class="edge"/>')
-        m = q.mean(axis=0) + 6.0 / scale * st.normal()
-        lx, ly = tr(m[None, :])
-        body.append(f'<text x="{lx[0]:.1f}" y="{ly[0]:.1f}" class="lbl">h {st.height:.2f}</text>')
+        n = st.normal()
+        # naast de lijn, aan de lage kant en dicht bij een einde (minder kans op een gat); SVG: y omlaag
+        lx, ly = tr((0.85 * q[1] + 0.15 * q[0])[None, :])
+        lx, ly = lx[0] + 6.0 * n[0], ly[0] - 14.0 * n[1] + 4.0
+        anchor = "start" if n[0] > 0.5 else "end" if n[0] < -0.5 else "middle"
+        labels.append(f'<text x="{lx:.1f}" y="{ly:.1f}" class="lbl" style="text-anchor:{anchor}">'
+                      f'trede {st.height:.2f}</text>')
     for h in part.holes:
         body.append(f'<path d="{path(np.column_stack([h.x + h.d / 2 * np.cos(a), h.y + h.d / 2 * np.sin(a)]))}" '
                     f'class="hole"/>')
@@ -63,6 +68,7 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
         body.append(f'<path d="{path(np.asarray(c, float))}" class="hole"/>')
     ox, oy = tr(np.array([[0.0, 0.0]]))
     body.append(f'<circle cx="{ox[0]:.1f}" cy="{oy[0]:.1f}" r="4" class="datum"/>')
+    body += labels
     return (f'<svg viewBox="0 0 {width} {h_px:.0f}" width="100%" role="img" '
             f'aria-label="Bovenaanzicht van het model">{"".join(body)}</svg>')
 

@@ -119,7 +119,7 @@ def unseen_holes(part, K: np.ndarray, top_views: list, min_px: int = 20) -> list
         seen = judged = False
         for pose, m in top_views:
             uv = []
-            for z in (part.height, 0.0):
+            for z in (part.height_at(h.x, h.y), 0.0):  # bij een trede: de bovenkant daar
                 p, depth = calib.project(np.column_stack([ring, np.full(len(ring), z)]), pose, K)
                 if np.any(depth <= 0):
                     break
@@ -316,8 +316,10 @@ def _add_missed_holes(part, K: np.ndarray, vd: list, energy: float, log=print):
 
 
 # V17: een vorm die geen prisma is als model proberen, als de vormtoets (V19) erom vraagt
-TOP_TRY_MM = -0.02  # kijkhoekverschil (prismcheck) waaronder een afgeschuinde of afgeronde bovenrand geprobeerd wordt
-NON_PRISM_GAIN = 0.05  # zoveel lager moet de energie worden (een prisma past met een afschuining ~1% beter)
+# kijkhoekverschil (prismcheck) waaronder een afgeschuinde of afgeronde bovenrand geprobeerd wordt; prisma's gaven
+# +0,003 tot +0,10 mm, een afschuining van 1,5 mm op een zwart onderdeel −0,013 mm (de meldgrens is −0,04 mm)
+TOP_TRY_MM = 0.0
+NON_PRISM_GAIN = 0.05  # zoveel lager moet de energie worden (een prisma past met een afschuining 1-3% beter)
 
 
 def _prism_check(ef, part):
@@ -326,16 +328,22 @@ def _prism_check(ef, part):
     return prismcheck.check(ef, angle, shift)
 
 
-def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: float, log=print):
+def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: float, log=print,
+               info: dict | None = None):
     """V17: past een prisma niet (de vormtoets vond een stuk bovenrand dat lager of hoger ligt, of een
     kijkhoekverschil zoals bij een afschuining), dan een trede of een afgeschuinde of afgeronde bovenrand
     rondom als model proberen, vanuit de pixelfit. Alleen als het model er duidelijk beter door past (energie
-    minstens 5% lager); geeft dan (model, energie), anders None."""
+    minstens 5% lager); geeft dan (model, energie), anders None. `info` (voor diagnose.json) krijgt wat er
+    geprobeerd is."""
+    info = {} if info is None else info
     goal = energy * (1.0 - NON_PRISM_GAIN)
     runs = shape.runs_mat
+    info.update({"kijkhoek_verschil_mm": shape.trend, "energie_prisma": round(float(energy), 1)})
     if runs and part.outer.kind == "polygon":
         r = max(runs, key=lambda r: np.linalg.norm(np.asarray(r["tot"]) - np.asarray(r["van"])))
         cand, e = silhouette.fit_step(part, K, vd, r["van"], r["tot"], r["midden"], lower=r["soort"] == "lager")
+        info.update({"geprobeerd": "trede", "energie": None if cand is None else round(float(e), 1),
+                     "aangenomen": bool(cand is not None and e < goal)})
         if cand is not None and e < goal:
             st = cand.steps[0]
             log(f"trede gemodelleerd: voorbij een rechte lijn is het deel {st.height:.2f} in plaats van "
@@ -345,8 +353,12 @@ def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: f
             "geen geldige trede gevonden" if cand is None else
             f"het model past er niet duidelijk beter door (energie {energy:.0f} → {e:.0f})"))
     elif not runs and shape.trend is not None and shape.trend < TOP_TRY_MM:
-        cand, e = silhouette.fit_top_edge(part, K, vd)
-        if cand is not None and e < goal and cand.top_edge.size >= max(0.3, 2.0 * mm_per_px):
+        cand, e = silhouette.fit_top_edge(part, K, vd, log=log)
+        ok = cand is not None and e < goal and cand.top_edge.size >= max(0.3, 2.0 * mm_per_px)
+        info.update({"geprobeerd": "bovenrand", "energie": None if cand is None else round(float(e), 1),
+                     "soort": None if cand is None else cand.top_edge.kind,
+                     "maat_mm": None if cand is None else round(cand.top_edge.size, 3), "aangenomen": ok})
+        if ok:
             te = cand.top_edge
             log(f"bovenrand gemodelleerd: {te.kind} van {te.size:.2f} mm rondom, hoogte {cand.height:.2f} mm; het "
                 f"model past duidelijk beter (energie {energy:.0f} → {e:.0f})")
@@ -622,7 +634,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     # V17: zo'n vorm dan als model proberen, en de randfit en de toets opnieuw
     shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
     if shape is not None:
-        alt = _non_prism(part, cam.K, vd, energy, shape, mm_per_px, log=log)
+        diag["vormmodel"] = {}
+        alt = _non_prism(part, cam.K, vd, energy, shape, mm_per_px, log=log, info=diag["vormmodel"])
         if alt is not None:
             part, energy = alt
             t_fit = time.time()

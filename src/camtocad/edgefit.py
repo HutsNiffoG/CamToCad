@@ -6,7 +6,10 @@ Deze fit verfijnt het resultaat daarna.
 
 * Modelpunten op de onder- en bovenrand van de contour en van de gaten (~1 per mm) worden per foto
   geprojecteerd. Per punt vormt de onderrand de silhouetrand als de wand naar de camera kijkt, anders
-  de bovenrand; punten die in het modelsilhouet verborgen liggen tellen niet.
+  de bovenrand; punten die in het modelsilhouet verborgen liggen tellen niet. Een afgeschuinde of
+  afgeronde bovenrand (V17) geeft de buitencontour niveaus tussen onder- en bovenrand (de schouder, de
+  boog), en dan telt het niveau dat in beeld het verst naar buiten ligt. Een trede (V17) geeft de
+  bovenrand per stuk een eigen hoogte, plus punten op de verticale randen van de trede (zie `rims`).
 * Residu = afstand (px, subpixel via bilineaire interpolatie) van het punt tot de rand van het
   objectmasker, alleen waar ook zekere mat vlakbij is (bewijs). De ware rand ligt in de strook zonder
   bewijs tussen object en zekere mat: de maskerrand ligt gemiddeld iets naar binnen (vooral waar een
@@ -16,7 +19,9 @@ Deze fit verfijnt het resultaat daarna.
   masker) telt nauwelijks mee, en de fit gedraagt zich meer als een mediaan dan als een gemiddelde.
 * Alleen binnen een vertrouwensgebied rond de pixelfit (±0,5 mm, ±0,3°): zonder bewijs rond een gat
   (zwart op zwart) kan een parameter anders wegdrijven. Raakt de oplossing de rand van dat gebied, dan
-  blijft de pixelfit staan.
+  blijft de pixelfit staan. Ruimer waar de pixelfit zelf onnauwkeurig is: de as van een sleuf (±2°), de
+  maat van een afschuining of afronding van de bovenrand (±1 mm), de lijn van een trede (±1 mm, ±2°), en
+  een afronding mag tot 5 px groeien (onscherpte maakt van een scherpe hoek een kleine afronding).
 * Een parameter die de contour bij een kleine stap (0,1 mm) ongeldig maakt, blijft staan: een afronding
   die net past, de randjes van een hap uit het masker. Zijn afgeleide is onbruikbaar (een sprong naar de
   strafwaarde) en zou de hele oplossing vastzetten.
