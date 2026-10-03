@@ -97,6 +97,12 @@ def kamerboring(cq, x, y, dk, diepte, boven):
     return cq.Workplane("XY").workplane(offset=boven - diepte).center(x, y).circle(dk / 2).extrude(diepte + 1)
 
 
+def blind_gat(cq, x, y, d, diepte, boven):
+    """Blind gat (x, y) met diameter `d`, `diepte` diep onder het bovenvlak (hoogte `boven`), met een vlakke bodem;
+    1 mm boven het bovenvlak doorgetrokken (geen samenvallende vlakken)."""
+    return cq.Workplane("XY").workplane(offset=boven - diepte).center(x, y).circle(d / 2).extrude(diepte + 1)
+
+
 def trede(cq, model, x, y, hoek, hoogte, totaal):
     """Trede: voorbij de lijn door (x, y), in de richting `hoek` (graden, 0 = +X), is het deel maar `hoogte`
     hoog; `totaal` is de hoogte van het deel."""

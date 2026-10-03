@@ -88,6 +88,7 @@ def view_table(views: list, dets: dict, top_names: set[str], blur: dict | None =
             "reprojectiefout_px": round(float(pose.rms_px), 3),
             "camerahoogte_mm": round(float(pose.center[2]), 0),
             "onscherpte_px": None if blur.get(pose.name) is None else round(float(blur[pose.name]), 2),
+            "toon": None if getattr(m, "tone_params", None) is None else m.tone_params.to_dict(),
             "ligging": placement.get(pose.name),
             "camera": cameras.get(pose.name),
         })

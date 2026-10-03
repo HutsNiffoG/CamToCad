@@ -6,6 +6,12 @@ radiale profiel van de grijswaarden op het bovenvlak (in mm), in de foto's van b
 buiten het gat. Een verzinking is het alleen als die rand rondom ligt (in bijna alle richtingen) en in de meeste
 foto's op dezelfde afstand: een kras, een vlek of glans geeft geen ring. De randfit zet de maat daarna precies
 (edgefit.measure_inner).
+
+Een smalle verzinking (een faas van een halve millimeter aan de gatrand, v0.11) heeft geen eigen piek: haar rand ligt
+zo dicht bij die van het gat dat ze in elkaar overlopen. Daarvoor `narrow`: per veronderstelde breedte de rand meten
+zoals de randfit dat doet, en kijken waar hij werkelijk ligt. Bij een faas ligt die gemeten rand steeds op dezelfde
+plek, een halve millimeter buiten het gat; bij een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf,
+een pixel of wat buiten het gat.
 """
 
 from __future__ import annotations
@@ -29,6 +35,12 @@ PEAK_RATIO, DIR_RATIO = 2.0, 1.5
 MIN_ANGLES = 0.7  # in dit deel van de richtingen
 MIN_VIEWS = 0.6  # in dit deel van de foto's op dezelfde afstand (± PEAK_TOL_MM)
 PEAK_TOL_MM = 0.3
+# smalle verzinking (narrow): veronderstelde breedtes (mm buiten het gat), en de gemeten rand moet minstens zoveel
+# buiten het gat liggen (mm, en in pixels van de bovenaanzichten: de uitloper van een gewone gatrand meet 1,1-1,2 px,
+# een faas van 0,5 mm op 0,25 mm per pixel 1,9-2,5 px), met zoveel metingen
+NARROW_W = tuple(np.round(np.arange(0.45, 1.31, 0.05), 2))
+NARROW_MIN_MM, NARROW_MIN_PX, NARROW_MIN_MEAS = 0.3, 1.5, 50
+NARROW_TOP_DEG = 78.0  # het gat 'van boven' en de pixelmaat: alleen de echte bovenaanzichten
 
 
 def _room(part: Part2p5D, i: int) -> float:
@@ -79,11 +91,83 @@ def radial_gradient(part: Part2p5D, K: np.ndarray, vd: list, i: int, n_angles: i
     return r, out
 
 
+def _elevation(part: Part2p5D, i: int, v) -> float:
+    """Hoe steil de camera van foto `v` op gat i kijkt (graden boven het bovenvlak)."""
+    h = part.holes[i]
+    z = part.height_at(h.x, h.y) if part.steps else part.height
+    c = v.pose.center
+    return math.degrees(math.atan2(c[2] - z, math.hypot(c[0] - h.x, c[1] - h.y)))
+
+
+def _top_view_hole(part: Part2p5D, K: np.ndarray, vd: list, i: int) -> float:
+    """Diameter van gat i uit alleen de foto's van boven: daar begrenst het nauwste stuk de doorkijk, ook bij een faas.
+    De schuine foto's kijken langs de faas en maken een gewoon gefit gat te groot."""
+    from . import counterbore, silhouette
+
+    h = part.holes[i]
+    views = [v for v in counterbore._local_views(part, i, vd, K) if _elevation(part, i, v) >= NARROW_TOP_DEG]
+    if len(views) < 2:
+        return h.d
+    fitted, _, _ = silhouette.refine(part, K, views, max_evals=60, only={f"hd{i}"})
+    return fitted.holes[i].d
+
+
+def narrow(part: Part2p5D, K: np.ndarray, vd: list, i: int) -> tuple[float | None, str]:
+    """Een smalle verzinking (faas) aan gat i (zie de moduletekst): (diameter aan het bovenvlak of None, toelichting).
+
+    Per breedte uit NARROW_W een verzinking verondersteld, de rand gemeten (edgefit.measure_inner), en per meting
+    teruggerekend waar de rand werkelijk ligt (de modelrand min het residu, in mm). Een faas: die plek ligt over de
+    breedtes heen vast, minstens NARROW_MIN_MM en NARROW_MIN_PX buiten het gat in de foto's van boven."""
+    from dataclasses import replace
+
+    from . import edgefit
+
+    h = part.holes[i]
+    d0 = _top_view_hole(part, K, vd, i)
+    rims, mm_px, n_total = [], [], 0
+    for w in NARROW_W:
+        trial = part.copy()
+        trial.holes[i] = replace(h, d=d0, csk=d0 + 2 * w, cb=0.0, cb_depth=0.0)
+        if not trial.is_valid():
+            continue
+        lay = edgefit.layout(trial)
+        ie = edgefit.inner_edges(trial, lay)
+        sl = ie.groups.get(("verzinking", i))
+        if sl is None:
+            continue
+        res = []
+        for v, (idx, pos, nrm, _wt) in zip(vd, edgefit.measure_inner(trial, K, vd, lay)):
+            sel = (idx >= sl.start) & (idx < sl.stop)
+            if not sel.any():
+                continue
+            P = ie.P[idx[sel]]
+            uv, _ = project(P, v.pose, K)
+            uv2, _ = project(P + np.column_stack([0.1 * ie.D[idx[sel]], np.zeros(len(P))]), v.pose, K)
+            px_per_mm = np.linalg.norm(uv2 - uv, axis=1) / 0.1
+            r_px = np.sum((uv - [v.x0, v.y0] - pos[sel]) * nrm[sel], axis=1)
+            res += list(r_px / np.maximum(px_per_mm, 1e-6))
+            if _elevation(part, i, v) >= NARROW_TOP_DEG:
+                mm_px += list(1.0 / np.maximum(px_per_mm, 1e-6))
+        if len(res) >= NARROW_MIN_MEAS:
+            rims.append(d0 / 2 + w - float(np.median(res)))
+            n_total += len(res)
+    if len(rims) < 3:
+        return None, f"faas: te weinig metingen ({n_total})"
+    rim = float(np.median(rims))
+    need = max(NARROW_MIN_MM, NARROW_MIN_PX * float(np.median(mm_px)) if mm_px else NARROW_MIN_MM)
+    width = rim - d0 / 2
+    note = (f"faas: rand op Ø {2 * rim:.2f} ({width:.2f} mm buiten het gat Ø {d0:.2f} van boven; nodig {need:.2f}), "
+            f"spreiding {float(np.std(rims)):.2f} mm over {len(rims)} breedtes, {n_total} metingen")
+    if width < need or float(np.std(rims)) > 0.15:
+        return None, note
+    return 2 * rim, note
+
+
 def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None) -> dict[int, float]:
     """Gaten met een verzinking: {index: diameter aan het bovenvlak (mm)}. Zie de moduletekst."""
     found = {}
     for i, h in enumerate(part.holes):
-        if h.csk > 0:
+        if h.csk > 0 or h.cb > 0 or h.blind:
             continue
         r, grads = radial_gradient(part, K, vd, i)
         if r is None or len(grads) < 2:
@@ -119,4 +203,10 @@ def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None) -> dict[int, float
                 f"als de rest, rondom {around:.0%}, in {agree:.0%} van {len(grads)} foto's op dezelfde plaats")
         if ok:
             found[i] = float(2 * r[k])
+        else:  # geen eigen ring: misschien een smalle verzinking (faas) tegen de gatrand aan
+            dk, note = narrow(part, K, vd, i)
+            if log:
+                log(f"gat {i + 1}: {'smalle verzinking' if dk else 'geen smalle verzinking'}; {note}")
+            if dk:
+                found[i] = dk
     return found

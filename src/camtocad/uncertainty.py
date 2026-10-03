@@ -35,7 +35,9 @@ SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afrondi
           "verzinking": 0.40,
           # een kamerboring (v0.10): de rand van de kamer in de grijswaarden en de doorkijk in schuine foto's; de
           # diepte alleen uit die doorkijk (waar het doorgaande gat begint)
-          "kamerboring": 0.40, "kamerboring diepte": 0.60}
+          "kamerboring": 0.40, "kamerboring diepte": 0.60,
+          # een blind gat (v0.11): de diepte uit de onderrand van de wand in de grijswaarden
+          "gat diepte": 0.60}
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 
 

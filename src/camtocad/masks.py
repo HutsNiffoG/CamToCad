@@ -29,6 +29,48 @@ from .mat import BoardRaster
 
 
 @dataclass
+class Tone:
+    """Hoe de camera het licht vastlegt (tone.py): toonkromme T(x) = 255 · (x / 255)^g, extra onscherpte van de foto
+    t.o.v. de voorspelde mat (σ in px, in lineair licht) en verscherping (unsharp masking: k, σ in px)."""
+
+    g: float = 1.0
+    blur: float = 0.0
+    sharpen: float = 0.0
+    sharpen_px: float = 1.5
+    grid: np.ndarray | None = None  # lokale toonbewerking (HDR): g per tegel (n x n over het beeld), of None
+
+    def to_dict(self) -> dict:
+        out = {"g": round(self.g, 3), "onscherpte_px": round(self.blur, 2), "verscherping_k": round(self.sharpen, 3),
+               "verscherping_px": round(self.sharpen_px, 2)}
+        if self.grid is not None:
+            out["g_per_tegel"] = np.round(self.grid, 3).tolist()
+        return out
+
+    def g_map(self, shape: tuple[int, int]):
+        """g per pixel (een vloeiende overgang tussen de tegelmiddens), of één getal zonder raster."""
+        if self.grid is None:
+            return self.g
+        return cv2.resize(self.grid.astype(np.float32), (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def _curved(g) -> bool:
+    """Is er een toonkromme (g ≠ 1, of g per pixel)?"""
+    return not np.isscalar(g) or g != 1.0
+
+
+def desharpen(img: np.ndarray, k: float, sigma: float, iters: int = 6) -> np.ndarray:
+    """Maakt unsharp masking ongedaan: E uit S = (1 + k) E - k G(E), met vaste-puntiteratie (convergeert: k/(1+k) < 1).
+    Dat is een laagdoorlaatfilter: ruis en JPEG-randjes worden er kleiner van."""
+    o = img.astype(np.float32)
+    if k <= 0:
+        return o
+    E = o.copy()
+    for _ in range(iters):
+        E = (o + k * cv2.GaussianBlur(E, (0, 0), sigma)) / (1.0 + k)
+    return np.clip(E, 0.0, 255.0)
+
+
+@dataclass
 class ViewMasks:
     fg: np.ndarray  # objectpixels
     bg: np.ndarray  # zekere mat, met een veiligheidsmarge rond het object (voor het uitsnijden)
@@ -43,6 +85,8 @@ class ViewMasks:
     # de grijswaarden (vervaagd, belichting gecorrigeerd) in dezelfde uitsnede: randen binnen het object (V16)
     gray: np.ndarray | None = None
     tone: float = 1.0  # exponent van de toonkromme van de camera (V2, v0.10; zie _tone_exponent); 1 = lineair
+    tone_params: Tone | None = None  # alles wat er over de camera bekend is (v0.11; tone.py)
+    tone_map: np.ndarray | None = None  # g per pixel in de uitsnede van `gray`, bij lokale toonbewerking (v0.11)
 
 
 def predict_background(raster: BoardRaster, K: np.ndarray, pose: Pose, size: tuple[int, int]):
@@ -130,8 +174,14 @@ def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
     def best(gs, ss) -> tuple[float, float, float]:
         return min((spread(g, s), float(g), float(s)) for g in gs for s in ss)
 
-    _, g0, s0 = best(np.arange(0.30, 1.3001, 0.1), TONE_BLUR_PX)
-    sp, g, s = best(np.arange(max(0.25, g0 - 0.1), g0 + 0.1001, 0.02), (s0 - 0.15, s0, s0 + 0.15))
+    e0, g0, s0 = best(np.arange(0.30, 1.3001, 0.1), TONE_BLUR_PX[:4])
+    if s0 >= TONE_BLUR_PX[3]:  # een bewogen of onscherpe foto: ook ruimer
+        e1, g1, s1 = best(np.arange(0.30, 1.3001, 0.1), TONE_BLUR_PX[4:])
+        if e1 < e0:
+            g0, s0 = g1, s1
+    ds = 0.15 if s0 < 1.5 else 0.3
+    sp, g, s = best(np.arange(max(0.25, g0 - 0.1), g0 + 0.1001, 0.02), (s0 - ds, s0, s0 + ds))
+    s = max(s, 0.0)
     if abs(g - 1.0) < TONE_MIN_DEV or sp > (1.0 - TONE_MIN_GAIN) * spread(1.0, s):
         return 1.0, round(s, 2)
     return round(g, 2), round(s, 2)
@@ -257,14 +307,15 @@ ALPHA_SYS_GRAY, ALPHA_SYS_COLOR = 0.02, 0.05
 # niet vlak ligt tot 0,90 (§3j); een telefoon (sRGB) zit rond 0,45. Eén foto met een kromme die er niet is,
 # veranderde in een stresstest de startcontour
 TONE_MIN_DEV, TONE_MIN_GAIN = 0.15, 0.05
-TONE_BLUR_PX = (0.0, 0.35, 0.7, 1.05)  # extra vervaging (σ, px) van de voorspelling die _tone_exponent probeert
+# extra vervaging (σ, px) van de voorspelling die _tone_exponent probeert; tot 3 px voor een bewogen of onscherpe foto
+TONE_BLUR_PX = (0.0, 0.35, 0.7, 1.05, 1.5, 2.1, 3.0)
 # voorkennis voor de versterking van de mat vlak buiten de rand (_soft_alpha): pas bij een patroon met meer dan
 # ~5 grijswaarden spreiding telt de gemeten versterking, op een egaal vak blijft het een verschuiving
 MAT_GAIN_PRIOR = 25.0
 
 
 def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarray, sigma: float,
-                mis: np.ndarray, color=None, reach: int = 5, tone: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+                mis: np.ndarray, color=None, reach: int = 5, tone=1.0) -> tuple[np.ndarray, np.ndarray]:
     """Zachte objectfractie rond de rand (V2, v0.9): per pixel welk deel ervan object is, uit de grijswaarde zelf.
 
     alpha = (foto − mat) / (object − mat), met de voorspelde mat `bgv` en de grijswaarde van het object vlak
@@ -323,7 +374,7 @@ def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarra
     gain = np.clip((cov + MAT_GAIN_PRIOR) / (np.maximum(var_b, 0.0) + MAT_GAIN_PRIOR), 0.8, 1.25)
     bgv = np.where(have, m_o + gain * (b32 - m_b), bgv)
     slope = 1.0
-    if tone != 1.0:
+    if _curved(tone):
         slope = (_linear(o + 1.0, tone) - _linear(o - 1.0, tone)) / 2.0  # lineair licht per grijswaarde (variantie)
         o, bgv, lev = _linear(o, tone), _linear(bgv, tone), _linear(lev, tone)
     c = lev - bgv
@@ -525,7 +576,8 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
              tau_min: float = 14.0, texture_min: float = 10.0, min_area_frac: float = 2e-4,
              misreg_px: float = 0.4, ncc_mat: float = 0.75, window: int = 7, use_gain: bool = True,
              use_texture_missing: bool = True, px_per_mm: float = 4.0, fill_mm: float = 3.5,
-             blur_px: float | None = None, chroma: np.ndarray | None = None, estimate_tone: bool = True) -> ViewMasks:
+             blur_px: float | None = None, chroma: np.ndarray | None = None, estimate_tone: bool = True,
+             tone_params: Tone | None = None) -> ViewMasks:
     """Deelt een (ontvervormd) grijswaardenbeeld in: object, zekere mat, onbekend.
 
     Twee soorten bewijs:
@@ -555,28 +607,53 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
                 chroma = cv2.resize(half.astype(np.float32), (observed.shape[1], observed.shape[0]),
                                     interpolation=cv2.INTER_LINEAR)
         observed = cv2.cvtColor(observed, cv2.COLOR_BGR2GRAY)
+    # Hoe de camera het licht vastlegt (tone.py, v0.11). Voor de maskers blijft de foto zoals hij is, en gaat de
+    # voorspelde mat vooruit door hetzelfde: even vaag, de toonkromme, de verscherping en het afkappen op 0-255. Zo
+    # blijven ook de kleine stippen in de zwarte vakken (het bewijs naast een zwart onderdeel) even fel als in de foto;
+    # met de foto ontscherpt waren ze dat niet, en dan gingen zwarte onderdelen mis (§3k). Voor alpha, de kleur en de
+    # grijswaarden (lineair licht) is de verscherping wel ongedaan gemaakt (`lum_ds`, `p_ds`). Zonder `tone_params`
+    # (losse aanroep): alleen de kromme, geschat op het ontvervormde beeld, en de onscherpte uit `blur_px` (v0.10).
+    tp = tone_params
     o = cv2.GaussianBlur(observed.astype(np.float32), (0, 0), 0.8)
     lum = o.copy()  # grijswaarde zonder belichtingscorrectie: de kleurzweem van de mat schaalt daarmee
     p = pred.astype(np.float32)
-    if blur_px is not None and blur_px > 1.0:
-        # een bewogen of onscherpe foto: de voorspelling (zelf ~0,5 px vaag) even vaag maken, anders geeft
-        # elke zwart-witrand van de mat aan weerszijden een afwijking die op object lijkt
-        p = cv2.GaussianBlur(p, (0, 0), float(np.sqrt(blur_px ** 2 - 1.0)))
-    # toonkromme van de camera (V2, v0.10), op de foto zelf (niet vervaagd); de voorspelling door dezelfde kromme.
-    # (De vervaging die samen met de kromme geschat is, blijft hier weg: een verscherpte foto schiet aan de
-    # patroonranden over, en een vagere voorspelling gaf daar spookgaten; §3j.)
-    tone, _ = _tone_exponent(observed, p, valid) if estimate_tone else (1.0, 0.0)
-    p = cv2.GaussianBlur(p, (0, 0), 0.8)
-    if tone != 1.0:
-        # lineair licht la · p + lb (belichting, en het licht dat zwart terugkaatst), dan de kromme; terug naar
-        # 0-255 van zwart tot wit, zodat p / 255 de fractie wit blijft (_black_lift, de helling hieronder)
-        la, lb, _ = _robust_affine(_linear(o, tone), p, valid)
-        lo_t, hi_t = (255.0 * min(max(v / 255.0, 0.0), 1.0) ** tone for v in (lb, la * 255.0 + lb))
-        if la > 0 and hi_t - lo_t > 10.0:
-            p = (255.0 * ((255.0 * np.clip((la * p + lb) / 255.0, 0.0, 1.0) ** tone - lo_t) / (hi_t - lo_t))
-                 ).astype(np.float32)
+    if tp is not None:
+        if tp.blur > 0:
+            p = cv2.GaussianBlur(p, (0, 0), tp.blur)
+    else:
+        if blur_px is not None and blur_px > 1.0:
+            # een bewogen of onscherpe foto: de voorspelling (zelf ~0,5 px vaag) even vaag maken, anders geeft
+            # elke zwart-witrand van de mat aan weerszijden een afwijking die op object lijkt
+            p = cv2.GaussianBlur(p, (0, 0), float(np.sqrt(blur_px ** 2 - 1.0)))
+        tp = Tone(g=_tone_exponent(observed, p, valid)[0] if estimate_tone else 1.0)
+    sharp = tp.sharpen > 0
+    lum_ds = cv2.GaussianBlur(desharpen(observed, tp.sharpen, tp.sharpen_px), (0, 0), 0.8) if sharp else lum
+    tone = tp.g_map(o.shape)
+    p_ds = p
+    if _curved(tone) or sharp:
+        # lineair licht la · p + lb (belichting, en het licht dat zwart terugkaatst), dan de kromme en de verscherping;
+        # terug naar 0-255 van zwart tot wit, zodat p / 255 de fractie wit blijft (_black_lift, de helling hieronder)
+        la, lb, _ = _robust_affine(_linear(lum_ds, tone) if _curved(tone) else lum_ds, p, valid)
+        if la > 0:
+            def encode(v):
+                return 255.0 * np.clip(v / 255.0, 0.0, 1.0) ** tone if _curved(tone) else v
+
+            E = encode(la * p + lb)
+            lo_t, hi_t = encode(np.float32(lb)), encode(np.float32(la * 255.0 + lb))
+            if np.min(hi_t - lo_t) > 10.0:
+                p_ds = (255.0 * (E - lo_t) / (hi_t - lo_t)).astype(np.float32)
+                if sharp:
+                    E = np.clip(E + tp.sharpen * (E - cv2.GaussianBlur(E, (0, 0), tp.sharpen_px)), 0.0, 255.0)
+                p = (255.0 * (E - lo_t) / (hi_t - lo_t)).astype(np.float32)
+            else:
+                tone = 1.0
         else:
             tone = 1.0
+        if not _curved(tone) and tp.g != 1.0:
+            tp = Tone(g=1.0, blur=tp.blur, sharpen=tp.sharpen, sharpen_px=tp.sharpen_px)
+    # zoals de foto: vervaagd in gecodeerde grijswaarden, dus na de kromme
+    p = cv2.GaussianBlur(p, (0, 0), 0.8)
+    p_ds = cv2.GaussianBlur(p_ds, (0, 0), 0.8) if p_ds is not p else p
     a, b, sigma = _robust_affine(o, p, valid)
 
     # traag verlopende belichtingsverschillen wegwerken (genormaliseerde convolutie over de mat)
@@ -669,8 +746,8 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
     color = None  # (object, bruikbaar, fractie objectkleur): kleur als bewijs (V8)
     if chroma is not None:
         lum_c = lum
-        if tone != 1.0:  # kleur in lineair licht (V2, v0.10)
-            chroma, lum_c = _linear_color(chroma, lum, tone)
+        if _curved(tone):  # kleur in lineair licht (V2, v0.10), met de ontscherpte grijswaarde (v0.11)
+            chroma, lum_c = _linear_color(chroma, lum_ds, tone)
         color = _chroma_evidence(chroma, lum_c, mat_seen & valid, valid, radius, min_area)
     fg = valid & ((res > tau) | texture_missing)
     if color is not None:
@@ -727,17 +804,21 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         edge_bg |= match & color_mat & ring
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
     out = ViewMasks(fg=fg, bg=match & mat_ok & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma, amb=amb,
-                    tone=tone)
+                    tone=float(np.median(tone)) if _curved(tone) else 1.0, tone_params=tp)
     if fg.any():  # zachte objectfractie rond het object (V2), als uitsnede: dat scheelt geheugen
         x, y, w, h = cv2.boundingRect(fg.astype(np.uint8))
         y0, x0 = max(y - 12, 0), max(x - 12, 0)
         sl = (slice(y0, y + h + 12), slice(x0, x + w + 12))
-        # de foto zelf, zonder de belichtingscorrectie (een verschuiving in gecodeerde grijswaarden, die vóór de
-        # toonkromme de mengverhoudingen zou veranderen), en de voorspelde mat daarbij
-        raw, bg_raw = lum[sl], bgv[sl] + corr[sl]
+        # de foto zelf, ontscherpt en zonder de belichtingscorrectie (een verschuiving in gecodeerde grijswaarden, die
+        # vóór de toonkromme de mengverhoudingen zou veranderen), en de voorspelde mat daarbij (ook zonder verscherping)
+        bgv_ds = bgv if p_ds is p else gain * (a * p_ds + b) + lift * (1.0 - q)
+        raw, bg_raw = lum_ds[sl], bgv_ds[sl] + corr[sl]
+        tone_sl = tone[sl] if not np.isscalar(tone) else tone
         out.alpha, out.alpha_w = _soft_alpha(fg[sl], raw, bg_raw, valid[sl], sigma, misreg * gmag[sl],
                                              None if color is None else (color[1][sl], color[3][sl], color[4][sl]),
-                                             tone=tone)
+                                             tone=tone_sl)
         out.alpha_at = (y0, x0)
         out.gray = raw.astype(np.float16)
+        if not np.isscalar(tone_sl):
+            out.tone_map = tone_sl.astype(np.float16)
     return out

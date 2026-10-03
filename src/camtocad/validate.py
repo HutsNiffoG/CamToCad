@@ -55,14 +55,14 @@ KINDS = {  # soort → (enkelvoud/meervoud in maten.json, lengte-achtig voor de 
     "diameter": ("diameter", True), "gat": ("gaten", False), "hartafstand": ("hartafstanden", True),
     "afronding": ("afrondingen", False), "bovenrand": ("afschuining", False), "trede": ("treden", False),
     "verzinking": ("verzinkingen", False), "kamerboring": ("kamerboringen", False),
-    "kamerdiepte": ("kamerdieptes", False),
+    "kamerdiepte": ("kamerdieptes", False), "gatdiepte": ("gatdieptes", False),
 }
 ALIASES = {"gat": "gat", "gaten": "gat", "hartafstand": "hartafstand", "hartafstanden": "hartafstand",
            "afronding": "afronding", "afrondingen": "afronding", "lengte": "lengte", "breedte": "breedte",
            "hoogte": "hoogte", "diameter": "diameter", "afschuining": "bovenrand", "bovenrand": "bovenrand",
            "trede": "trede", "treden": "trede", "verzinking": "verzinking", "verzinkingen": "verzinking",
            "kamerboring": "kamerboring", "kamerboringen": "kamerboring", "kamerdiepte": "kamerdiepte",
-           "kamerdieptes": "kamerdiepte"}
+           "kamerdieptes": "kamerdiepte", "gatdiepte": "gatdiepte", "gatdieptes": "gatdiepte"}
 
 
 @dataclass
@@ -189,6 +189,8 @@ def model_measures(geometry: dict, unc: dict) -> dict[str, list[tuple[float, flo
         if g.get("kamerboring_d"):  # diameter en diepte van de kamer (v0.10)
             out["kamerboring"].append((float(g["kamerboring_d"]), u95(unc["hole_d"], g["kamerboring_d"])))
             out["kamerdiepte"].append((float(g["kamerboring_diepte"]), u95(unc["height"], g["kamerboring_diepte"])))
+        if g.get("diepte"):  # een blind gat (v0.11)
+            out["gatdiepte"].append((float(g["diepte"]), u95(unc["height"], g["diepte"])))
     for a, b in combinations(holes, 2):
         dist = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
         out["hartafstand"].append((dist, u95(unc["hole_xy"] * math.sqrt(2), dist)))

@@ -36,7 +36,7 @@ class ViewData:
     alpha_w: np.ndarray | None = field(default=None, repr=False, compare=False)
     # grijswaarden in de ROI (NaN buiten de uitsnede van het masker): randen binnen het object (V16)
     gray: np.ndarray | None = field(default=None, repr=False, compare=False)
-    tone: float = 1.0  # toonkromme van de camera in deze foto (masks._tone_exponent), voor `gray`
+    tone: float | np.ndarray = 1.0  # toonkromme van de camera (masks.Tone), voor `gray`; per pixel bij lokale toonbewerking
 
     def sums(self) -> tuple:
         """Per rij de cumulatieve aantallen zekere-mat-, onbekende en objectpixels (met een 0-kolom vooraan),
@@ -87,7 +87,8 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
             vd.alpha_w = _crop(m.alpha_w, m.alpha_at, y0, y1, x0, x1, 0.0)
         if m.gray is not None:
             vd.gray = _crop(m.gray, m.alpha_at, y0, y1, x0, x1, np.nan)
-            vd.tone = m.tone
+            tone_map = getattr(m, "tone_map", None)
+            vd.tone = m.tone if tone_map is None else _crop(tone_map, m.alpha_at, y0, y1, x0, x1, m.tone)
         out.append(vd)
     return out
 
@@ -257,13 +258,16 @@ def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np
     # de bovenrand van het doorgaande gat de onderkant van de kegel (de kegel zelf wordt naar boven toe breder), bij
     # een kamerboring de bodem van de kamer, en dan moet een kijkstraal ook door de kamer zelf (haar rand aan het
     # bovenvlak; in schuine foto's begrenst die de doorkijk aan de kant van de camera)
-    rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
+    # (een blind gat, v0.11, geeft geen doorkijk: in het silhouet is het er niet)
+    rings = [None if hl.blind else circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
     below = [hl.bore_depth for hl in part.holes]
     chamber = [circle_polygon((hl.x, hl.y), hl.cb / 2, 48) if hl.cb > 0 else None for hl in part.holes]
     rings += list(part.cutouts)
     rings += [s.outline() for s in part.slots]
     through = []
     for k, r2 in enumerate(rings):
+        if r2 is None:
+            continue
         c2 = r2.mean(axis=0)
         z_top = part.height_at(float(c2[0]), float(c2[1])) if part.steps else part.height
         loops = [(r2, z_top - (below[k] if k < len(below) else 0.0)), (r2, 0.0)]
@@ -401,6 +405,8 @@ def _params(part: Part2p5D) -> list[Param]:
             ps.append(Param(f"hk{i}", 0.3, 0.01, 0.5))
         if hl.cb > 0:  # kamerboring (V16, v0.10): diameter en diepte van de kamer
             ps += [Param(f"hc{i}", 0.3, 0.01, 0.5), Param(f"hz{i}", 0.4, 0.02, 0.2)]
+        if hl.blind:  # blind gat (v0.11): de diepte
+            ps.append(Param(f"hp{i}", 0.4, 0.02, 0.2))
     for i, s in enumerate(part.slots):  # sleuven en rechthoekige uitsparingen (V15)
         ps += [Param(f"sx{i}", 0.3, 0.01), Param(f"sy{i}", 0.3, 0.01), Param(f"sl{i}", 0.3, 0.01, 0.5),
                Param(f"sw{i}", 0.3, 0.01, 0.5), Param(f"sa{i}", math.radians(1.0), math.radians(0.02))]
@@ -444,7 +450,7 @@ def _get(part: Part2p5D, base_angles: np.ndarray, name: str) -> float:
         return {"sx": s.x, "sy": s.y, "sl": s.length, "sw": s.width, "sa": s.angle, "sr": s.r}[name[:2]]
     i = int(name[2:])
     h = part.holes[i]
-    return {"hx": h.x, "hy": h.y, "hd": h.d, "hk": h.csk, "hc": h.cb, "hz": h.cb_depth}[name[:2]]
+    return {"hx": h.x, "hy": h.y, "hd": h.d, "hk": h.csk, "hc": h.cb, "hz": h.cb_depth, "hp": h.depth}[name[:2]]
 
 
 def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Part2p5D:
@@ -477,7 +483,7 @@ def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Pa
     else:
         i = int(name[2:])
         p.holes[i] = replace(p.holes[i], **{{"hx": "x", "hy": "y", "hd": "d", "hk": "csk", "hc": "cb",
-                                              "hz": "cb_depth"}[name[:2]]: value})
+                                              "hz": "cb_depth", "hp": "depth"}[name[:2]]: value})
     return p
 
 
@@ -512,6 +518,8 @@ def refine(part: Part2p5D, K: np.ndarray, views: list[ViewData], max_evals: int 
     """
     base = part.outer.angles.copy()
     params = [p for p in _params(part) if only is None or p.name in only]  # `only`: alleen deze parameters
+    # een blind gat (v0.11) verandert het silhouet niet: zijn maten komen uit de randfit (de randen in de grijswaarden)
+    params = [p for p in params if not (p.name[:2] in ("hx", "hy", "hd", "hp") and part.holes[int(p.name[2:])].blind)]
     steps = {p.name: p.step for p in params}
     best, e_best = part, energy(part, K, views)
     evals = 1

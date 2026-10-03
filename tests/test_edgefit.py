@@ -420,6 +420,23 @@ def test_a_countersink_is_found_in_the_top_views_and_fitted_on_its_inner_edge(pl
     assert countersink.detect(truth, K, vd) == {}
 
 
+def test_a_small_chamfer_on_a_hole_is_a_narrow_countersink(plate_scan):
+    """v0.11: een faas van 0,5 mm (Ø 7 op een gat Ø 6) heeft in het radiale profiel geen eigen piek: haar rand loopt
+    in die van het gat over. countersink.narrow meet de rand zoals de randfit: bij een faas ligt hij vast op Ø 7, bij
+    een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf (~1 px buiten het gat)."""
+    from camtocad import countersink
+
+    truth = plate()
+    vd = [silhouette.ViewData(v.pose, v.fg, v.bg, v.unk, v.x0, v.y0) for v in plate_scan]
+    for v in vd:
+        v.gray = top_face_gray(truth, v, 7.0)
+    found = countersink.detect(truth, K, vd)
+    assert list(found) == [0] and found[0] == pytest.approx(7.0, abs=0.2)
+    for v in vd:  # zonder faas
+        v.gray = top_face_gray(truth, v, 0.0)
+    assert countersink.narrow(truth, K, vd, 0)[0] is None and countersink.detect(truth, K, vd) == {}
+
+
 def test_the_inner_edge_of_a_top_chamfer_is_fitted_from_the_top_views(plate_scan):
     """V16 (v0.10): de binnenrand van een afschuining van de bovenrand ligt in de foto's van boven binnen het silhouet,
     maar het schuine vlak is anders belicht dan het bovenvlak. Met die rand komt de maat van de afschuining uit de
@@ -455,16 +472,11 @@ def test_the_inner_edge_of_a_top_chamfer_is_fitted_from_the_top_views(plate_scan
 
 # ----------------------------------------------------------------------------- kamerboringen (v0.10)
 
-def test_a_counterbore_is_found_from_the_silhouettes_and_fitted(plate_scan):
-    """Een kamer Ø10 x 3 diep in de plaat: door het gat kijk je in de schuine foto's veel verder dan door een gewoon
-    gat. counterbore.detect vindt haar uit de silhouetten, de randfit zet diameter en diepte; een gewoon gat krijgt
-    geen kamer."""
-    from camtocad import counterbore
-
-    truth = plate()
-    truth.holes[0] = Hole(110.0, 80.0, 6.0, cb=10.0, cb_depth=3.0)
+def bore_scan(truth: Part2p5D) -> list[silhouette.ViewData]:
+    """Silhouetten van `truth` op ~51° en ~70° boven de mat (8 + 8) en drie van boven: door een gat met een kamer of
+    verzinking kijk je in de schuine foto's verder dan door een gewoon gat."""
     poses = []
-    for k in range(8):  # ~51° en ~70° boven de mat, en drie van boven
+    for k in range(8):
         az = 2 * np.pi * (k + 0.3) / 8
         poses.append(look_at([120 + 200 * np.cos(az), 80 + 200 * np.sin(az), 250.0], [120.0, 80.0, 0.0]))
         poses.append(look_at([120 + 100 * np.cos(az + 0.4), 80 + 100 * np.sin(az + 0.4), 280.0], [120.0, 80.0, 0.0]))
@@ -477,6 +489,45 @@ def test_a_counterbore_is_found_from_the_silhouettes_and_fitted(plate_scan):
     for v in vd:
         v.fg = exact_mask(truth, v)
         v.bg = ~v.fg
+    return vd
+
+
+def bore_gray(part: Part2p5D, v: silhouette.ViewData, s: int = 3) -> np.ndarray:
+    """Grijswaarden van een plaat met een kamer, per subpixel de kijkstraal door het model: bovenvlak en bodem 150
+    (allebei vlak), de wand 90, het gat 40, de zijkant 120 en de mat 200; vervaagd met σ 1 px."""
+    hh, ww = v.fg.shape
+    u, w_ = np.meshgrid((np.arange(ww * s) + 0.5) / s - 0.5 + v.x0, (np.arange(hh * s) + 0.5) / s - 0.5 + v.y0)
+    rays = np.linalg.inv(K) @ np.vstack([u.ravel(), w_.ravel(), np.ones(u.size)])
+    d, c = v.pose.R.T @ rays, -v.pose.R.T @ v.pose.t
+    h, o = part.holes[0], part.outer
+
+    def hit(z):  # snijpunt met het vlak op hoogte z
+        t = (z - c[2]) / d[2]
+        return c[0] + t * d[0], c[1] + t * d[1]
+
+    X, Y = hit(part.height)
+    Xf, Yf = hit(part.height - h.cb_depth)
+    inside = np.all([(np.cos(a) * (X - o.center[0]) + np.sin(a) * (Y - o.center[1])) <= off
+                     for a, off in zip(o.angles, o.offsets)], axis=0)
+    r_top, r_floor = np.hypot(X - h.x, Y - h.y), np.hypot(Xf - h.x, Yf - h.y)
+    fg = np.repeat(np.repeat(v.fg, s, axis=0), s, axis=1).ravel()
+    g = np.where(fg, 120.0, 200.0)
+    g = np.where(inside & (r_top >= h.cb / 2), 150.0, g)
+    in_cb = inside & (r_top < h.cb / 2)
+    g = np.where(in_cb, np.where(r_floor > h.cb / 2, 90.0, np.where(r_floor >= h.d / 2, 150.0, 40.0)), g)
+    g = g.reshape(hh, s, ww, s).mean(axis=(1, 3))
+    return cv2.GaussianBlur(g.astype(np.float32), (0, 0), 1.0)
+
+
+def test_a_counterbore_is_found_from_the_silhouettes_and_fitted(plate_scan):
+    """Een kamer Ø10 x 3 diep in de plaat: door het gat kijk je in de schuine foto's veel verder dan door een gewoon
+    gat. counterbore.detect vindt haar uit de silhouetten, de randfit zet diameter en diepte; een gewoon gat krijgt
+    geen kamer."""
+    from camtocad import counterbore
+
+    truth = plate()
+    truth.holes[0] = Hole(110.0, 80.0, 6.0, cb=10.0, cb_depth=3.0)
+    vd = bore_scan(truth)
     found = counterbore.detect(plate(), K, vd)
     assert list(found) == [0]
     dk, t, d = found[0]
@@ -489,3 +540,36 @@ def test_a_counterbore_is_found_from_the_silhouettes_and_fitted(plate_scan):
     assert h.d == pytest.approx(6.0, abs=0.05) and (h.x, h.y) == pytest.approx((110.0, 80.0), abs=0.05)
     assert h.cb == pytest.approx(10.0, abs=0.1) and h.cb_depth == pytest.approx(3.0, abs=0.15)
     assert counterbore.detect(plate(), K, plate_scan) == {}
+
+
+def test_a_countersink_seen_only_in_the_silhouettes_is_not_a_counterbore():
+    """v0.11: ook door een verzonken gat kijk je in de schuine foto's verder. Zonder ring in de grijswaarden werd een
+    verzinking in v0.10 een ondiepe kamer; nu wint de verzinking (een maat minder), en gaat ze terug naar de pijplijn."""
+    from camtocad import counterbore
+
+    truth = plate()
+    truth.holes[0] = Hole(110.0, 80.0, 6.0, csk=11.0)
+    sunk = {}
+    assert counterbore.detect(plate(), K, bore_scan(truth), sunk=sunk) == {}
+    assert list(sunk) == [0] and sunk[0] == pytest.approx((11.0, 6.0), abs=0.2)
+
+
+def test_the_floor_edge_of_a_counterbore_sets_its_depth():
+    """v0.11: de onderrand van de wand van een kamer (waar ze de bodem raakt) is in de schuine foto's een rand in de
+    grijswaarden, als de camera door de kamer heen de bodem ziet. Daarmee komt de diepte uit de randfit, ook vanuit
+    een start die 0,6 mm te ondiep is; zonder grijswaarden alleen uit het silhouet."""
+    truth = plate()
+    truth.holes[0] = Hole(110.0, 80.0, 6.0, cb=10.0, cb_depth=3.0)
+    vd = bore_scan(truth)
+    for v in vd:
+        v.gray = bore_gray(truth, v)
+    lay = edgefit.layout(truth)
+    n_rim = lay["cb"][0]
+    meas = edgefit.measure_inner(truth, K, vd, lay)
+    assert sum(int(np.sum(m[0] >= n_rim)) for m in meas) > 100  # de bodemrand is in de meeste foto's gemeten
+    start = plate()
+    start.holes[0] = Hole(110.1, 79.9, 6.1, cb=10.3, cb_depth=2.4)
+    ef = edgefit.fit(start, K, vd)
+    assert ef.accepted, ef.note
+    h = ef.part.holes[0]
+    assert h.cb_depth == pytest.approx(3.0, abs=0.05) and h.cb == pytest.approx(10.0, abs=0.05)

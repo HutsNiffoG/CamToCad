@@ -3,6 +3,7 @@
 import math
 import runpy
 
+import cv2
 import numpy as np
 import pytest
 
@@ -165,6 +166,63 @@ def test_a_step_is_modelled():
     check = pipeline._prism_check(ef2, p)
     assert check.issues == [] and check.details["stukken"] == []
     assert edgefit.jackknife(ef2) is not None
+
+
+def step_gray(v, xs: float = 130.0, hi: float = 6.0, lo: float = 3.0, box=(95.0, 145.0, 65.0, 95.0), s: int = 3):
+    """Grijswaarden van een blok met een trede (rechts van x = `xs` maar `lo` hoog): de bovenvlakken 150, het
+    verticale vlak van de trede 90, de zijkanten 120, de mat 200; per subpixel de eerste treffer van de kijkstraal."""
+    x0, x1, y0, y1 = box
+    hh, ww = v.fg.shape
+    u, w_ = np.meshgrid((np.arange(ww * s) + 0.5) / s - 0.5 + v.x0, (np.arange(hh * s) + 0.5) / s - 0.5 + v.y0)
+    rays = np.linalg.inv(K) @ np.vstack([u.ravel(), w_.ravel(), np.ones(u.size)])
+    d, c = v.pose.R.T @ rays, -v.pose.R.T @ v.pose.t
+    best = np.full(u.size, np.inf)
+    g = np.where(np.repeat(np.repeat(v.fg, s, axis=0), s, axis=1).ravel(), 120.0, 200.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        hits = []
+        for z, xa, xb in ((hi, x0, xs), (lo, xs, x1)):  # de bovenvlakken
+            t = (z - c[2]) / d[2]
+            X, Y = c[0] + t * d[0], c[1] + t * d[1]
+            hits.append((t, (X >= xa) & (X <= xb) & (Y >= y0) & (Y <= y1), 150.0))
+        t = (xs - c[0]) / d[0]  # het vlak van de trede, van de lage kant gezien
+        Y, Z = c[1] + t * d[1], c[2] + t * d[2]
+        hits.append((t, (Y >= y0) & (Y <= y1) & (Z >= lo) & (Z <= hi) & (c[0] > xs), 90.0))
+    for t, ok, val in hits:
+        ok = ok & (t > 0) & (t < best)
+        best, g = np.where(ok, t, best), np.where(ok, val, g)
+    g = g.reshape(hh, s, ww, s).mean(axis=(1, 3))
+    return cv2.GaussianBlur(g.astype(np.float32), (0, 0), 1.0)
+
+
+def test_the_step_face_edges_pin_the_line():
+    """v0.11: het verticale vlak van een trede is in de foto's van de lage kant een band in de grijswaarden. Zijn
+    boven- en onderrand (randen binnen het object) leggen de lijn vast; zonder grijswaarden alleen de silhouetten,
+    en daarin ligt de lijn van een trede ~0,1 mm verkeerd (een punt van de lijn ligt soms net naast de silhouetrand)."""
+    vd = scan([block(95, 145, 65, 95, 3.0), block(95, 130, 65, 95, 6.0)])
+    for v in vd:
+        v.gray = step_gray(v)
+    truth = block(95, 145, 65, 95, 6.0)
+    truth.steps = [Step.from_line(0.0, 130.0, 3.0, (130.0, 80.0))]
+    lay = edgefit.layout(truth)
+    n_line = lay["steps"][0]["line"]
+    meas = edgefit.measure_inner(truth, K, vd, lay)
+    assert sum(int(np.sum(m[0] < n_line)) for m in meas) > 150  # bovenrand van het vlak
+    assert sum(int(np.sum(m[0] >= n_line)) for m in meas) > 150  # onderrand
+    start = block(95.1, 144.9, 65.1, 94.9, 6.1)
+    start.steps = [Step.from_line(0.01, 130.4, 3.3, (130.0, 80.0))]
+    err = []
+    for gray in (True, False):
+        views = []
+        for v in vd:
+            nv = silhouette.ViewData(v.pose, v.fg, v.bg, v.unk, v.x0, v.y0)
+            nv.gray = v.gray if gray else None
+            views.append(nv)
+        ef = edgefit.fit(start, K, views, mm_per_px=0.23)
+        assert ef.accepted, ef.note
+        st = ef.part.steps[0]
+        assert st.height == pytest.approx(3.0, abs=0.05)
+        err.append(abs(st.offset - 130.0))
+    assert err[0] < 0.07 and err[0] < 0.7 * err[1]
 
 
 def test_a_small_high_part_is_a_step_too():

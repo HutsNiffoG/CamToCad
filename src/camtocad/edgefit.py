@@ -81,6 +81,7 @@ EVIDENCE_MIN, AMP_MAX = 0.10, 8.0
 # Randen binnen het object (V16, zie measure_inner): zo ver (px) langs de normaal gezocht, en alleen bij zoveel
 # contrast (grijswaarden) tussen de kegel van een verzinking en het bovenvlak
 INNER_SEARCH_PX, INNER_MIN_CONTRAST = 5.0, 10.0
+STEP_END_MM = 1.5  # de randen van een trede: zo ver van de contour blijven (daar is het vlak smaller dan de band)
 
 
 def signed_dist(mask: np.ndarray) -> np.ndarray:
@@ -163,7 +164,8 @@ def layout(part: Part2p5D, density: float = DENSITY) -> dict:
     out = {"holes": [max(16, int(math.pi * h.d * density)) for h in part.holes],
            "slots": [_polygon_layout(s.corner_table(), density, 0) for s in part.slots],
            "csk": [max(24, int(math.pi * h.csk * density)) if h.csk > 0 else 0 for h in part.holes],
-           "cb": [max(24, int(math.pi * h.cb * density)) if h.cb > 0 else 0 for h in part.holes]}
+           "cb": [max(24, int(math.pi * h.cb * density)) if h.cb > 0 else 0 for h in part.holes],
+           "blind": [max(24, int(math.pi * h.d * density)) if h.blind else 0 for h in part.holes]}
     if o.kind == "circle":
         out["circle"] = max(48, int(2 * math.pi * o.radius * density))
     else:
@@ -337,20 +339,51 @@ def points3d(part: Part2p5D, lay: dict) -> np.ndarray:
     return rims(part, lay).P
 
 
-def inner_edges(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Randen binnen het object (V16): punten (3D), hun richting naar buiten (2D), het andere einde van de band
-    ernaast (3D: hoe ver er in beeld gezocht mag worden) en de normaal van die band (3D: is hij in een foto te zien).
+@dataclass
+class InnerEdges:
+    """Randen binnen het object (zie inner_edges), per punt."""
+
+    P: np.ndarray  # (N, 3) punt op de rand
+    D: np.ndarray  # (N, 2) richting naar buiten (in het vlak)
+    Q: np.ndarray  # (N, 3) het andere einde van de band ernaast: hoe ver er in beeld gezocht mag worden
+    B: np.ndarray  # (N, 3) normaal van die band: is hij in een foto te zien
+    # (N, 3) het einde van wat er aan de andere kant van de rand te zien is, als dat smal is (anders NaN): de bodem
+    # van een kamer tussen de wand en het doorgaande gat
+    Q2: np.ndarray
+    # (N, 4) een opening waardoor de camera moet kijken (midden x, y, straal, hoogte), anders NaN: de kamer
+    opening: np.ndarray
+    groups: dict = field(default_factory=dict)  # (soort, index) -> slice in de punten, bijv. ("blind", 0)
+
+
+def inner_edges(part: Part2p5D, lay: dict) -> InnerEdges:
+    """Randen binnen het object (V16), zie InnerEdges.
 
     * De bovenrand van een verzinking: de band is de kegel, tot het doorgaande gat eronder.
     * De bovenrand van een kamerboring: de band is de wand van de kamer, tot haar bodem; alleen de wand aan de
       overkant is te zien (v0.10).
+    * De onderrand van die wand, waar hij de bodem van de kamer raakt (v0.11): dezelfde band naar boven, en aan de
+      andere kant de bodem, tot het doorgaande gat; alleen waar de camera door de kamer heen die bodem ziet. Die rand
+      legt de diepte van de kamer vast; in v0.10 kwam die alleen uit het silhouet (de doorkijk door het gat).
     * De binnenrand van een afschuining van de bovenrand: de band is de afschuining, tot de schouder. In de foto's
       van boven ligt die rand binnen het silhouet, maar het schuine vlak is anders belicht dan het bovenvlak.
       (Een afronding gaat vloeiend over in het bovenvlak: daar is geen scherpe rand.)
+    * Een blind gat (v0.11): zijn bovenrand en de onderrand van zijn wand, zoals bij een kamer (de bodem loopt door
+      tot de wand aan de overkant). In het silhouet is een blind gat er niet; dit zijn zijn enige randen.
+    * De boven- en onderrand van het verticale vlak van een trede (v0.11): de band is dat vlak, dat naar de lage kant
+      kijkt; de bovenrand legt de lijn vast, de onderrand ook de hoogte van de trede. Tot v0.11 kwam de lijn alleen uit
+      de verticale randen waar ze de contour snijdt, in zijaanzichten. Niet in de laatste STEP_END_MM bij de contour.
     Het aantal punten ligt vast bij een gegeven indeling (`lay`), ook als een afronding bij de afschuining scherp
     wordt (dan herhaalde punten); measure_inner slaat punten zonder bruikbare rand over."""
     s2 = math.sqrt(0.5)
-    pts, dirs, far, band = [], [], [], []
+    pts, dirs, far, band, far2, opening = [], [], [], [], [], []
+    groups: dict = {}
+
+    def none(n: int, k: int) -> np.ndarray:
+        return np.full((n, k), np.nan)
+
+    def mark(key: tuple, n: int) -> None:  # de laatste n punten horen bij `key`
+        end = sum(len(q) for q in pts)
+        groups[key] = slice(end - n, end)
     te = part.top_edge
     if te is not None and te.kind == "afschuining" and not part.steps:
         p2, nrm, _ = points2d(part, lay)
@@ -360,7 +393,10 @@ def inner_edges(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.n
         dirs.append(nrm[:no])
         far.append(np.column_stack([p2[:no], np.full(no, part.height - te.size)]))
         band.append(np.column_stack([s2 * nrm[:no], np.full(no, s2)]))  # het schuine vlak kijkt naar buiten
-    for h, n in zip(part.holes, lay.get("csk", [])):
+        far2.append(none(no, 3))
+        opening.append(none(no, 4))
+        mark(("afschuining", 0), no)
+    for i, (h, n) in enumerate(zip(part.holes, lay.get("csk", []))):
         if n == 0 or h.csk <= 0:
             continue
         a = (np.arange(n) + 0.5) / n * 2 * math.pi
@@ -371,25 +407,84 @@ def inner_edges(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.n
         dirs.append(d)
         far.append(np.column_stack([c + h.d / 2 * d, np.full(n, z - h.csk_depth)]))
         band.append(np.column_stack([-s2 * d, np.full(n, s2)]))  # de kegel kijkt naar de as
-    for h, n in zip(part.holes, lay.get("cb", [])):
+        far2.append(none(n, 3))
+        opening.append(none(n, 4))
+        mark(("verzinking", i), n)
+    for i, (h, n) in enumerate(zip(part.holes, lay.get("cb", []))):
         if n == 0 or h.cb <= 0:
             continue
         a = (np.arange(n) + 0.5) / n * 2 * math.pi
         d = np.column_stack([np.cos(a), np.sin(a)])
         z = part.height_at(h.x, h.y) if part.steps else part.height
         c = np.array([h.x, h.y])
-        pts.append(np.column_stack([c + h.cb / 2 * d, np.full(n, z)]))
-        dirs.append(d)
-        far.append(np.column_stack([c + h.cb / 2 * d, np.full(n, z - h.cb_depth)]))
-        band.append(np.column_stack([-d, np.zeros(n)]))  # de wand kijkt naar de as
+        top = np.column_stack([c + h.cb / 2 * d, np.full(n, z)])
+        floor = np.column_stack([c + h.cb / 2 * d, np.full(n, z - h.cb_depth)])
+        pts += [top, floor]
+        dirs += [d, d]
+        far += [floor, top]
+        band += [np.column_stack([-d, np.zeros(n)])] * 2  # de wand kijkt naar de as
+        far2 += [none(n, 3), np.column_stack([c + h.d / 2 * d, np.full(n, z - h.cb_depth)])]
+        opening += [none(n, 4), np.tile([h.x, h.y, h.cb / 2, z], (n, 1))]
+        mark(("kamer", i), 2 * n)
+    for i, (h, n) in enumerate(zip(part.holes, lay.get("blind", []))):
+        if n == 0 or not h.blind:
+            continue
+        a = (np.arange(n) + 0.5) / n * 2 * math.pi
+        d = np.column_stack([np.cos(a), np.sin(a)])
+        z = part.height_at(h.x, h.y) if part.steps else part.height
+        c = np.array([h.x, h.y])
+        top = np.column_stack([c + h.d / 2 * d, np.full(n, z)])
+        bottom = np.column_stack([c + h.d / 2 * d, np.full(n, z - h.depth)])
+        pts += [top, bottom]
+        dirs += [d, d]
+        far += [bottom, top]
+        band += [np.column_stack([-d, np.zeros(n)])] * 2  # de wand kijkt naar de as
+        far2 += [none(n, 3), np.column_stack([c - h.d / 2 * d, np.full(n, z - h.depth)])]
+        opening += [none(n, 4), np.tile([h.x, h.y, h.d / 2, z], (n, 1))]
+        mark(("blind", i), 2 * n)
+    for k, (st, ls) in enumerate(zip(part.steps, lay.get("steps", []))):
+        q = part.step_crossings(st)
+        if q is None:  # ongeldig model (de fit geeft dan een strafwaarde): punten op één plek
+            q = np.repeat([st.offset * st.normal()], 2, axis=0)
+        n, length = ls["line"], float(np.linalg.norm(q[1] - q[0]))
+        m = min(STEP_END_MM / max(length, 1e-9), 0.4)
+        t = m + (1 - 2 * m) * (np.arange(n) + 0.5) / n
+        line = q[0] + t[:, None] * (q[1] - q[0])
+        nrm = np.tile(st.normal(), (n, 1))
+        top, bottom = np.column_stack([line, np.full(n, part.height)]), np.column_stack([line, np.full(n, st.height)])
+        pts += [top, bottom]
+        dirs += [nrm, nrm]
+        far += [bottom, top]
+        band += [np.column_stack([nrm, np.zeros(n)])] * 2  # het vlak kijkt naar de lage kant
+        far2 += [none(n, 3)] * 2
+        opening += [none(n, 4)] * 2
+        mark(("trede", k), 2 * n)
     if not pts:
         e3 = np.zeros((0, 3))
-        return e3, np.zeros((0, 2)), e3, e3
-    return np.vstack(pts), np.vstack(dirs), np.vstack(far), np.vstack(band)
+        return InnerEdges(e3, np.zeros((0, 2)), e3, e3, e3, np.zeros((0, 4)))
+    return InnerEdges(np.vstack(pts), np.vstack(dirs), np.vstack(far), np.vstack(band), np.vstack(far2),
+                      np.vstack(opening), groups)
+
+
+def _visible_fraction(P: np.ndarray, Q2: np.ndarray, opening: np.ndarray, C: np.ndarray, margin: float = 0.05):
+    """Hoe ver (als deel van P → Q2) de camera in C door de opening heen ziet: de zichtlijn van een punt naar de
+    camera moet het vlak van de opening binnen de cirkel snijden (met `margin` mm speling). 0 als P zelf niet te
+    zien is."""
+    out = np.zeros(len(P))
+    for f in (1.0, 0.75, 0.5, 0.25):
+        X = P + f * (Q2 - P)
+        lam = (opening[:, 3] - X[:, 2]) / np.maximum(C[2] - X[:, 2], 1e-9)
+        cross = X[:, :2] + lam[:, None] * (C[:2] - X[:, :2])
+        seen = np.hypot(cross[:, 0] - opening[:, 0], cross[:, 1] - opening[:, 1]) < opening[:, 2] - margin
+        out = np.where((out == 0) & seen, f, out)
+    lam = (opening[:, 3] - P[:, 2]) / np.maximum(C[2] - P[:, 2], 1e-9)
+    cross = P[:, :2] + lam[:, None] * (C[:2] - P[:, :2])
+    seen = np.hypot(cross[:, 0] - opening[:, 0], cross[:, 1] - opening[:, 1]) < opening[:, 2] - margin
+    return np.where(seen, out, 0.0)
 
 
 def has_inner_edges(part: Part2p5D) -> bool:
-    return any(h.csk > 0 or h.cb > 0 for h in part.holes) or (
+    return any(h.csk > 0 or h.cb > 0 or h.blind for h in part.holes) or bool(part.steps) or (
         part.top_edge is not None and part.top_edge.kind == "afschuining" and not part.steps)
 
 
@@ -403,7 +498,9 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
     breedte van de band in beeld aan beide kanten; de rand ligt waar het profiel halverwege de band en het
     bovenvlak is, het dichtst bij het model. Alleen waar de band naar de camera kijkt. Zonder contrast
     (INNER_MIN_CONTRAST grijswaarden) of met een stuk zonder grijswaarden geen meting."""
-    P, D, Q, B = inner_edges(part, lay)
+    ie = inner_edges(part, lay)
+    P, D, Q, B = ie.P, ie.D, ie.Q, ie.B
+    narrow = np.isfinite(ie.Q2[:, 0])
     empty = (np.zeros(0, int), np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0))
     if not len(P):
         return [empty for _ in vd]
@@ -421,6 +518,12 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
         nrm = uv1 - uv0
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
         width = np.abs(np.sum((uv0 - uvq) * nrm, axis=1))  # breedte van de band in beeld, langs de normaal
+        if narrow.any():  # en wat er aan de andere kant te zien is, als dat smal is (de bodem van een kamer)
+            frac = _visible_fraction(P[narrow], ie.Q2[narrow], ie.opening[narrow], v.pose.center)
+            uvq2, _ = project(P[narrow] + frac[:, None] * (ie.Q2[narrow] - P[narrow]), v.pose, K)
+            width[narrow] = np.where(frac > 0, np.minimum(width[narrow],
+                                                          np.abs(np.sum((uv0[narrow] - uvq2) * nrm[narrow], axis=1))),
+                                     0.0)
         uv0 = uv0 - off
         reach = np.minimum(search_px, 0.8 * width)
         facing = np.sum((v.pose.center - P) * B, axis=1) > 0
@@ -446,8 +549,9 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
             c = l_in - l_out
             if abs(c) < INNER_MIN_CONTRAST:
                 continue
-            if tone != 1.0:  # halverwege in lineair licht (toonkromme van de camera, V2)
-                p, l_out, l_in = (255.0 * np.clip(np.asarray(x) / 255.0, 1e-6, 1.5) ** (1.0 / tone)
+            g_here = tone if np.isscalar(tone) else float(tone[int(round(uv0[j, 1])), int(round(uv0[j, 0]))])
+            if g_here != 1.0:  # halverwege in lineair licht (toonkromme van de camera, V2)
+                p, l_out, l_in = (255.0 * np.clip(np.asarray(x) / 255.0, 1e-6, 1.5) ** (1.0 / g_here)
                                   for x in (p, l_out, l_in))
             a = (p - l_out) / (l_in - l_out) - 0.5
             cross = np.flatnonzero(span[:-1] & span[1:] & (np.sign(a[:-1]) != np.sign(a[1:])))
@@ -606,11 +710,52 @@ def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]
                 worst = max(worst, math.sqrt(sw / sf))
             return min(worst, AMP_MAX)
 
-        if frac < EVIDENCE_MIN:  # een paar punten met bewijs zeggen niets over de vorm van het bewijs
+        if kind == "gat" and part.holes[i].blind:  # een blind gat (v0.11): alleen de randen in de grijswaarden
+            out[(kind, i)] = _blind_evidence(prob, part, i, names, sizes, positions)
+        elif frac < EVIDENCE_MIN:  # een paar punten met bewijs zeggen niets over de vorm van het bewijs
             out[(kind, i)] = Evidence(frac, AMP_MAX, AMP_MAX)
         else:
             out[(kind, i)] = Evidence(frac, amp(sizes), amp(positions))
     return out
+
+
+def _blind_evidence(prob: "_Problem", part: Part2p5D, i: int, names: list[str], sizes: list[dict],
+                    positions: list[dict]) -> Evidence:
+    """Bewijs rond een blind gat: zoals `evidence`, maar uit de gemeten bovenrand (measure_inner) in plaats van de
+    silhouetrand. Per punt van die rand het aantal foto's waarin hij gemeten is; de vergroting naar hoe die punten
+    rond het gat liggen (gemeten aan één kant: maat en plaats hangen samen)."""
+    ie = inner_edges(part, prob.lay)
+    sl = ie.groups.get(("blind", i))
+    if sl is None or not prob.inner:
+        return Evidence(0.0, AMP_MAX, AMP_MAX)
+    n = (sl.stop - sl.start) // 2  # de eerste helft: de bovenrand
+    counts = np.zeros(n)
+    for idx, *_ in prob.inner:
+        top = idx[(idx >= sl.start) & (idx < sl.start + n)] - sl.start
+        np.add.at(counts, top, 1.0)
+    frac = float(np.mean(counts > 0))
+    if frac < EVIDENCE_MIN:
+        return Evidence(frac, AMP_MAX, AMP_MAX)
+    a = (np.arange(n) + 0.5) / n * 2 * math.pi
+    cols = {f"hx{i}": np.cos(a), f"hy{i}": np.sin(a), f"hd{i}": np.full(n, 0.5)}
+    names = [nm for nm in names if nm in cols]
+    D = np.column_stack([cols[nm] for nm in names])
+    Aw, Af = D.T @ (counts[:, None] * D), D.T @ D
+    worst_size, worst_pos = 1.0, 1.0
+    for qs, which in ((sizes, "size"), (positions, "pos")):
+        for qd in qs:
+            g = np.array([qd.get(nm, 0.0) for nm in names])
+            try:
+                sw = float(g @ np.linalg.solve(Aw, g)) * counts.sum()
+                sf = float(g @ np.linalg.solve(Af, g)) * n
+            except np.linalg.LinAlgError:
+                return Evidence(frac, AMP_MAX, AMP_MAX)
+            amp = min(math.sqrt(sw / sf), AMP_MAX) if sf > 0 and sw >= 0 else AMP_MAX
+            if which == "size":
+                worst_size = max(worst_size, amp)
+            else:
+                worst_pos = max(worst_pos, amp)
+    return Evidence(frac, worst_size, worst_pos)
 
 
 def _free_params(part: Part2p5D, base: np.ndarray) -> list[silhouette.Param]:
@@ -688,7 +833,7 @@ class _Problem:
         if not p.is_valid():
             return np.full(n_on, 20.0)
         P = points3d(p, self.lay)
-        P_in = inner_edges(p, self.lay)[0] if self.inner else None
+        P_in = inner_edges(p, self.lay).P if self.inner else None
         out = []
         for i in views:
             v, (sf, band), on = self.vd[i], self.fields[i], self.status[i]
@@ -711,7 +856,7 @@ class _Problem:
         for p, v in zip(self.params, x0):
             d = (math.radians(TRUST_DEG) if p.name == "rot"
                  else math.radians(TRUST_SLOT_DEG) if p.name.startswith(("sa", "ta"))
-                 else TRUST_TOP_MM if p.name == "top" or p.name.startswith(("hc", "hz"))
+                 else TRUST_TOP_MM if p.name == "top" or p.name.startswith(("hc", "hz", "hp"))
                  else TRUST_STEP_MM if p.name.startswith("to") else TRUST_MM)
             up = self.fillet_trust if p.name.startswith(("fil", "sr")) else d
             lo.append(max(v - d, p.lower))
@@ -739,7 +884,8 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     # om op te fitten
     prob.freeze([nm for kind, i, names in weak for nm in names
                  + ([f"hk{i}"] if kind == "gat" and part.holes[i].csk > 0 else [])
-                 + ([f"hc{i}", f"hz{i}"] if kind == "gat" and part.holes[i].cb > 0 else [])])
+                 + ([f"hc{i}", f"hz{i}"] if kind == "gat" and part.holes[i].cb > 0 else [])
+                 + ([f"hp{i}"] if kind == "gat" and part.holes[i].blind else [])])
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None

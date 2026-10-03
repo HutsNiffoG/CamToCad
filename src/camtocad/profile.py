@@ -38,6 +38,12 @@ class Hole:
     csk: float = 0.0  # verzinking (V16): diameter aan het bovenvlak, kegel onder CSK_ANGLE_DEG; 0 = geen
     cb: float = 0.0  # kamerboring (V16, v0.10): diameter van de kamer aan het bovenvlak; 0 = geen
     cb_depth: float = 0.0  # diepte van de kamer onder het bovenvlak (vlakke bodem)
+    depth: float = 0.0  # blind gat (v0.11): diepte onder het bovenvlak (vlakke bodem); 0 = doorgaand
+
+    @property
+    def blind(self) -> bool:
+        """Een blind gat: in geen enkele foto is er de mat door te zien."""
+        return self.depth > 0
 
     @property
     def csk_depth(self) -> float:
@@ -348,6 +354,9 @@ class Part2p5D:
         if any(h.cb > 0 and not (h.csk == 0 and h.cb > h.d + 0.2 and 0.2 < h.cb_depth < 0.85 * self.height)
                for h in self.holes):
             return False
+        # een blind gat (v0.11): niet door het onderdeel heen, en zonder verzinking of kamer
+        if any(h.blind and not (h.csk == 0 and h.cb == 0 and 0.2 < h.depth < self.height - 0.3) for h in self.holes):
+            return False
         if self.top_edge is not None:
             s = self.top_edge.size
             if self.steps or not 0.0 < s < 0.8 * self.height:
@@ -376,8 +385,8 @@ class Part2p5D:
         o = out.outer
         o.center, o.offsets, o.fillets, o.radius = o.center * factor, o.offsets * factor, o.fillets * factor, \
             o.radius * factor
-        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor, h.csk * factor, h.cb * factor, h.cb_depth * factor)
-                     for h in self.holes]
+        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor, h.csk * factor, h.cb * factor, h.cb_depth * factor,
+                          h.depth * factor) for h in self.holes]
         out.cutouts = [c * factor for c in self.cutouts]
         out.slots = [s.scaled(factor) for s in self.slots]
         if self.top_edge is not None:
@@ -394,7 +403,7 @@ class Part2p5D:
         out = self.copy()
         out.outer.center = R @ self.outer.center + shift
         out.outer.angles = self.outer.angles + angle
-        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d, h.csk, h.cb, h.cb_depth) for h in self.holes]
+        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d, h.csk, h.cb, h.cb_depth, h.depth) for h in self.holes]
         out.cutouts = [(R @ cu.T).T + shift for cu in self.cutouts]
         out.slots = []
         for s in self.slots:
@@ -418,7 +427,8 @@ class Part2p5D:
                 "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d),
                            **({"verzinking_d": float(h.csk), "verzinking_hoek": CSK_ANGLE_DEG} if h.csk > 0 else {}),
                            **({"kamerboring_d": float(h.cb), "kamerboring_diepte": float(h.cb_depth)}
-                              if h.cb > 0 else {})}
+                              if h.cb > 0 else {}),
+                           **({"diepte": float(h.depth)} if h.blind else {})}
                           for h in self.holes],
                 "sleuven": [s.to_dict() for s in self.slots],
                 "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts],

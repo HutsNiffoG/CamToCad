@@ -21,8 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import (__version__, cadmodel, calib, counterbore, countersink, debug, edgefit, holes, hull, initial, masks,
-               placement, preflight, prismcheck, profile, report, silhouette, uncertainty)
+from . import (__version__, blindhole, cadmodel, calib, counterbore, countersink, debug, edgefit, holes, hull, initial,
+               masks, placement, preflight, prismcheck, profile, report, silhouette, tone, uncertainty)
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
@@ -152,6 +152,8 @@ def unseen_holes(part, K: np.ndarray, top_views: list, min_px: int = 20) -> list
 
     out = []
     for i, h in enumerate(part.holes):
+        if h.blind:  # een blind gat (v0.11) laat nooit mat zien
+            continue
         ring = circle_polygon((h.x, h.y), h.d / 2, 48)
         seen = judged = False
         for pose, m in top_views:
@@ -246,6 +248,75 @@ def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg
     return part, energy, removed
 
 
+COARSE_EPS = 0.01  # V30: tolerantie van de grovere startcontour, als deel van de omtrek
+COARSE_RECT = 0.85  # een rechthoek als start als de contour minstens dit deel van zijn kleinste rechthoek vult
+
+
+def _coarse_starts(part) -> list[tuple[str, profile.Profile]]:
+    """V30: grovere buitencontouren naast een rommelige startcontour.
+
+    Waar een zwart onderdeel op een zwart vak ligt, is er in de bovenaanzichten geen bewijs voor de rand, en dan
+    rafelt de startcontour (een trap van korte randen). Vanuit zo'n start vindt de kompaszoektocht vaak geen goede
+    vorm meer: hij kan geen hoekpunten weghalen, en welke rafels er zijn hangt af van kleinigheden (zelfs van het
+    aantal rekenthreads). Daarom ook een grove benadering van dezelfde contour (tolerantie 1% van de omtrek, de
+    randen haaks op de hoofdrichting) en, als de contour zijn kleinste omhullende rechthoek grotendeels vult, die
+    rechthoek. De silhouetenergie van alle foto's kiest daarna (zie _refine_start)."""
+    o = part.outer
+    if o.kind != "polygon" or o.n <= 4:
+        return []
+    P = o.outline()
+    perim = float(np.sum(np.linalg.norm(np.diff(np.vstack([P, P[:1]]), axis=0), axis=1)))
+    out = []
+    coarse = profile.polygon_from_contour(P, 0.2, eps_mm=COARSE_EPS * perim)
+    coarse, _ = profile.regularize_angles(coarse)
+    if coarse.is_valid() and coarse.n <= o.n - 2:
+        out.append(("grovere contour", coarse))
+    (cx, cy), (w, h), a = cv2.minAreaRect(P.astype(np.float32))
+    if w * h > 0 and o.area() / (w * h) >= COARSE_RECT and not (out and out[0][1].n == 4):
+        t = math.radians(a)
+        r = float(np.median(o.fillets[o.fillets > 0])) if np.any(o.fillets > 0) else 0.0
+        rect = profile.Profile("polygon", np.array([cx, cy]), t + np.arange(4) * math.pi / 2,
+                               np.array([w / 2, h / 2, w / 2, h / 2]), np.full(4, min(r, 0.25 * min(w, h))))
+        if rect.is_valid():
+            out.append(("rechthoek", rect))
+    return out
+
+
+def _refine_start(part, K: np.ndarray, vd: list, max_evals: int, log=print):
+    """De hoofdverfijning, met bij een rommelige startcontour ook de grovere starten van _coarse_starts (V30).
+
+    Elke start wordt volledig verfijnd (de rommelige kort: daaruit wordt het toch zelden wat); de laagste energie
+    wint, met per hoekpunt een kleine straf (zoals in _simplify_outline: 0,5% of één pixel per foto). Een echt
+    kenmerk dat de grove start mist, kost in elke foto veel meer dan die straf. Geeft (model, energie, evaluaties van
+    de winnende start)."""
+    n_features = ((part.outer.n if part.outer.kind == "polygon" else 1) + len(part.holes) + len(part.cutouts)
+                  + len(part.slots))
+    alts = _coarse_starts(part)
+    first = max_evals
+    if n_features > 20:  # rommelige startcontour: alleen kort fitten (de grovere start komt hieronder)
+        first = min(max_evals, 300)
+        log(f"rommelige startcontour ({n_features} randen, gaten en uitsparingen): korte verfijning")
+    best, e_best, evals = silhouette.refine(part, K, vd, max_evals=first, log=log)
+    if not alts:
+        return best, e_best, evals
+
+    def corners(p) -> int:
+        return p.outer.n if p.outer.kind == "polygon" else 1
+
+    for what, outer in alts:
+        cand = part.copy()
+        cand.outer = outer
+        if not cand.is_valid():
+            continue
+        cand, e, n = silhouette.refine(cand, K, vd, max_evals=max_evals)
+        better = e + max(0.005 * min(e, e_best), float(len(vd))) * (corners(cand) - corners(best)) < e_best
+        log(f"startcontour met {part.outer.n} randen; ook als {what} ({outer.n} randen) geprobeerd: energie {e:.0f} "
+            f"tegen {e_best:.0f}" + ("; verder met de " + what if better else ""))
+        if better:
+            best, e_best, evals = cand, e, n
+    return best, e_best, evals
+
+
 def _effective_uncertainty(unc, snaps: list, scale_rel: float):
     """Samenvatting per soort maat (voor report.json en `camtocad valideer`) uit de σ per maat: het
     grootste toevallige deel per soort, zonder printschaal (die staat apart in scale_rel)."""
@@ -263,8 +334,8 @@ def _effective_uncertainty(unc, snaps: list, scale_rel: float):
         return n.startswith("trede ") and n.endswith(what)
 
     def is_inner_size(n: str) -> bool:  # gaten, verzinkingen, kamers, sleuven en uitsparingen: binnenvormen
-        return n.startswith(("gat Ø", "verzinking Ø", "kamerboring Ø")) or (n.startswith(("sleuf ", "uitsparing "))
-                                                           and n.endswith(("breedte", "hartafstand", "lengte")))
+        return n.startswith(("gat Ø", "blind gat Ø", "verzinking Ø", "kamerboring Ø")) or (
+            n.startswith(("sleuf ", "uitsparing ")) and n.endswith(("breedte", "hartafstand", "lengte")))
 
     return cadmodel.Uncertainty(
         edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")) or is_step(n, "positie"),
@@ -570,6 +641,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
 
     # 3. objectmaskers
     raster = rasterize_board(spec, 10.0, 3.0)
+    # hoe de camera het licht vastlegt (tone.py, v0.11): de verscherping één keer per scan, uit de randen van de
+    # matvakken in een paar foto's; de toonkromme en de onscherpte daarna per foto, op de ruwe foto
+    sharp = tone.camera_sharpening([(lookup[d.name], cal.poses[d.name], d.ids) for d in dets if d.name in cal.poses],
+                                   cam, spec)
 
     def view_masks(pose):
         img = calib.undistort(lookup[pose.name], cam)
@@ -579,15 +654,20 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if ch is not None:  # kleur (V8): terug naar volle resolutie en dezelfde ontvervorming als het grijsbeeld
             ch = calib.undistort(cv2.resize(ch.astype(np.float32), (img.shape[1], img.shape[0]),
                                             interpolation=cv2.INTER_LINEAR), cam)
+        tn = tone.estimate(lookup[pose.name], pred, valid, cam, sharp)
         return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0),
-                                    blur_px=blur.get(pose.name), chroma=ch)
+                                    blur_px=blur.get(pose.name), chroma=ch, tone_params=tn)
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:  # grote beeldbewerkingen: OpenCV en numpy geven de GIL vrij
         views = list(pool.map(view_masks, cal.poses.values()))
+    tones = [m.tone_params for _, m in views if m.tone_params is not None]
+    if tones:
+        log(f"camera: {tone.describe(tones)}; verscherping k {sharp.k:.2f} (σ {sharp.sigma:.1f} px, "
+            f"{sharp.n_photos} foto's)")
     top_views: list = []
     all_views, lig_of = views, {}  # ook de foto's die niet bij de rest passen staan in diagnose.json
     diag = {"camtocad": __version__, "opencv": cv2.__version__, "detector_bias_px": bias.tolist(),
-            "camera": cam.to_dict(), "geweigerd": cal.rejected}
+            "camera": cam.to_dict(), "geweigerd": cal.rejected, "verscherping": sharp.to_dict()}
 
     def write_debug(extra: dict | None = None) -> None:
         if not opts.debug_images:
@@ -696,13 +776,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "oppervlak_mm2": sweep.area.round(1).tolist(), "beste_mm": sweep.best, "informatief": sweep.informative},
     }})
     vd = silhouette.prepare(views, cam.K, part, z_max=part.height * 1.4 + 4)
-    max_evals = opts.max_evals
-    n_features = ((part.outer.n if part.outer.kind == "polygon" else 1) + len(part.holes) + len(part.cutouts)
-                  + len(part.slots))
-    if n_features > 20:  # rommelige startcontour: het resultaat wordt toch 'onbetrouwbaar'; niet minutenlang fitten
-        max_evals = min(max_evals, 300)
-        log(f"rommelige startcontour ({n_features} randen, gaten en uitsparingen): korte verfijning")
-    part, energy, evals = silhouette.refine(part, cam.K, vd, max_evals=max_evals, log=log)
+    part, energy, evals = _refine_start(part, cam.K, vd, opts.max_evals, log=log)
     probed, e_probed, changed = silhouette.probe_fillets(part, cam.K, vd, energy)
     if changed:  # een afronding die de kompaszoektocht vanuit een (bijna) scherpe hoek niet vond
         probed, e_probed, _ = silhouette.refine(probed, cam.K, vd, max_evals=200)
@@ -758,7 +832,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     found_on = ef.part if ef.accepted else part
     if found_on.holes:
         notes = []
-        bored = counterbore.detect(found_on, cam.K, vd, log=notes.append)
+        sunk2: dict[int, tuple[float, float]] = {}  # verzinkingen die alleen de silhouetten zien (v0.11)
+        bored = counterbore.detect(found_on, cam.K, vd, log=notes.append, sunk=sunk2)
         if notes:
             diag["kamerboringen"] = notes
         trial = found_on.copy()
@@ -774,12 +849,62 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                 if ef_cb.accepted or not edge or not all(n.startswith(("hc", "hz")) for n in edge):
                     break
                 ef_cb = edgefit.fit(ef_cb.extra["moved"], cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
-            if ef_cb.accepted:
+            # een kamer die in de randfit (bijna) verdwijnt, was er geen
+            min_depth = max(counterbore.CB_MIN_DEPTH, counterbore.CB_MIN_FRAC * trial.height)
+            shallow = [i for i in bored if ef_cb.accepted and ef_cb.part.holes[i].cb_depth < min_depth]
+            if shallow:
+                log("kamerboring niet gebruikt: " + ", ".join(
+                    f"gat {i + 1} maar {ef_cb.part.holes[i].cb_depth:.2f} mm diep" for i in shallow))
+                for i in shallow:
+                    bored.pop(i)
+                trial = found_on.copy()
+                for i, (dk, t, d) in bored.items():
+                    trial.holes[i] = replace(trial.holes[i], d=d, csk=0.0, cb=dk, cb_depth=t)
+                ef_cb = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px) if bored else ef_cb
+            if bored and ef_cb.accepted:
                 ef, part = ef_cb, ef_cb.part
                 log("kamerboring herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].cb:.2f} x "
                                                       f"{ef.part.holes[i].cb_depth:.2f} diep" for i in sorted(bored)))
-            else:
+            elif bored:
                 log(f"kamerboring niet gebruikt: {ef_cb.note}")
+        # een verzinking die niet aan haar ring herkend werd, maar de doorkijk in de schuine foto's beter verklaart dan
+        # een gewoon gat of een kamer: als verzinking, niet als ondiepe kamer
+        found_on = ef.part if ef.accepted else part
+        trial = found_on.copy()
+        for i, (dk, d) in sunk2.items():
+            if trial.holes[i].cb <= 0:
+                trial.holes[i] = replace(trial.holes[i], d=d, csk=dk)
+        if sunk2 and trial.is_valid():
+            t_fit = time.time()
+            ef_csk = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            if ef_csk.accepted:
+                ef, part = ef_csk, trial
+                log("verzinking herkend aan de doorkijk: " + ", ".join(
+                    f"gat {i + 1} Ø {ef.part.holes[i].csk:.2f} x {profile.CSK_ANGLE_DEG:.0f}°" for i in sorted(sunk2)))
+            else:
+                log(f"verzinking (doorkijk) niet gebruikt: {ef_csk.note}")
+    # v0.11: blinde gaten. In het silhouet zijn ze er niet, in de grijswaarden wel (blindhole.py); dan als model en de
+    # randfit opnieuw (hun maten komen alleen uit de randen in de grijswaarden)
+    found_on = ef.part if ef.accepted else part
+    notes, maybe = [], []
+    blind = blindhole.detect(found_on, cam.K, vd, log=notes.append, maybe=maybe)
+    if notes:
+        diag["blinde_gaten"] = notes
+    for x, y, d in maybe:
+        warnings.append(f"mogelijk een blind gat op ({x:.1f}, {y:.1f}) mm (mat), Ø ~{d:.1f}: in de grijswaarden is de "
+                        "bovenrand te zien, maar de bodem niet (te weinig contrast); niet gemodelleerd")
+    trial = found_on.copy()
+    trial.holes += blind
+    if blind and trial.is_valid():
+        t_fit = time.time()
+        ef_b = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+        n0 = len(found_on.holes)
+        if ef_b.accepted:
+            ef, part = ef_b, ef_b.part
+            log("blind gat herkend: " + ", ".join(f"gat {n0 + k + 1} Ø {h.d:.2f} x {h.depth:.2f} diep"
+                                                  for k, h in enumerate(ef.part.holes[n0:])))
+        else:
+            log(f"blind gat niet gebruikt: {ef_b.note}")
     if ef.accepted:
         part = ef.part
         energy = silhouette.energy(part, cam.K, vd)
@@ -881,7 +1006,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             f", bovenrand rondom {'afgeschuind' if te.kind == 'afschuining' else 'afgerond'}" if te else "")
         + (f", {len(snapped.steps)} trede" if snapped.steps else "")
         + (f", {n_sunk} verzonken gat(en)" if (n_sunk := sum(h.csk > 0 for h in snapped.holes)) else "")
-        + (f", {n_cb} kamerboring(en)" if (n_cb := sum(h.cb > 0 for h in snapped.holes)) else ""),
+        + (f", {n_cb} kamerboring(en)" if (n_cb := sum(h.cb > 0 for h in snapped.holes)) else "")
+        + (f", {n_bl} blind(e) gat(en)" if (n_bl := sum(h.blind for h in snapped.holes)) else ""),
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",

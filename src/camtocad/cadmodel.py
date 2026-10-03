@@ -89,7 +89,8 @@ def bolt_circle(holes: list[Hole], center=(0.0, 0.0), tol_r: float = 0.25,
 
     Geeft (straal, hoek van het eerste gat, aantal) of None.
     """
-    if len(holes) < 3 or max(h.d for h in holes) - min(h.d for h in holes) > 0.3:
+    if len(holes) < 3 or max(h.d for h in holes) - min(h.d for h in holes) > 0.3 \
+            or len({h.blind for h in holes}) > 1:  # niet doorgaande en blinde gaten door elkaar (v0.11)
         return None
     c = np.asarray(center, float)
     rel = np.array([[h.x, h.y] for h in holes]) - c
@@ -256,19 +257,32 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             snaps.append(s)
 
     diam = [h.d for h in part.holes]
-    # 3σ: het verschil tussen een gat en het groepsgemiddelde is zelf ook onzeker (~1,15σ)
-    for g in _groups(diam, 3.0 * unc.hole_d):
-        # gewogen: een gat met bewijs aan maar een deel van de rand telt minder mee (1/vergroting²)
-        wts = np.array([1.0 / amps("gat", i)[0] ** 2 for i in g])
-        wts /= wts.sum()
-        d = float(wts @ [diam[i] for i in g])
-        amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[0] ** 2 for i in g])))
-        label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
-        s = do_snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
-                    lambda p, g=g, wts=wts: float(wts @ [p.holes[i].d for i in g]), "gat", amp)
-        for i in g:
-            out.holes[i] = replace(out.holes[i], d=s.value)
-        snaps.append(s)
+    # doorgaande en blinde gaten (v0.11) elk apart in groepen; een blind gat ook met zijn diepte
+    for blind in (False, True):
+        kind = [i for i, h in enumerate(part.holes) if h.blind == blind]
+        prefix = "blind gat" if blind else "gat"
+        # 3σ: het verschil tussen een gat en het groepsgemiddelde is zelf ook onzeker (~1,15σ)
+        for g in _groups([diam[i] for i in kind], 3.0 * unc.hole_d):
+            g = [kind[j] for j in g]
+            # gewogen: een gat met bewijs aan maar een deel van de rand telt minder mee (1/vergroting²)
+            wts = np.array([1.0 / amps("gat", i)[0] ** 2 for i in g])
+            wts /= wts.sum()
+            d = float(wts @ [diam[i] for i in g])
+            amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[0] ** 2 for i in g])))
+            label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
+            s = do_snap(f"{prefix} Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
+                        lambda p, g=g, wts=wts: float(wts @ [p.holes[i].d for i in g]), "gat", amp)
+            for i in g:
+                out.holes[i] = replace(out.holes[i], d=s.value)
+            snaps.append(s)
+            if blind:
+                t = float(wts @ [part.holes[i].depth for i in g])
+                st = do_snap(f"blind gat diepte ({label})", t, unc.height / math.sqrt(len(g)) + 0.05,
+                             length_candidates(t, imperial),
+                             lambda p, g=g, wts=wts: float(wts @ [p.holes[i].depth for i in g]), "gat diepte", amp)
+                for i in g:
+                    out.holes[i] = replace(out.holes[i], depth=min(st.value, out.height - 0.5))
+                snaps.append(st)
 
     # verzinkingen (V16): de diameter aan het bovenvlak (90°), per groep gelijke; gewogen naar het bewijs rond het
     # gat, zoals de gaten zelf (een gat zonder bewijs heeft ook rond zijn verzinking weinig te zien)
@@ -431,6 +445,9 @@ def build(part: Part2p5D) -> cq.Workplane:
         x, y = st.offset * st.normal()
         model = cadhelpers.trede(cq, model, x, y, math.degrees(st.angle), st.height, part.height)
     for h in part.holes:
+        if h.blind:  # blind gat (v0.11): een cilinder vanaf het bovenvlak, vlakke bodem
+            model = model.cut(cadhelpers.blind_gat(cq, h.x, h.y, h.d, h.depth, part.height_at(h.x, h.y)))
+            continue
         cutter = cq.Workplane("XY").workplane(offset=-1).center(h.x, h.y).circle(h.d / 2).extrude(part.height + 2)
         model = model.cut(cutter)
         if h.csk > 0:  # verzinking (V16): een kegel vanaf het bovenvlak
@@ -567,21 +584,46 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
                   "          steekcirkel_d / 2 * math.sin(2 * math.pi * k / aantal_gaten), gat_d1)",
                   "         for k in range(aantal_gaten)]"]
         dvars = {round(h.d, 6): "gat_d1" for h in part.holes}
-    elif part.holes:
+    elif any(not h.blind for h in part.holes):
         lines += ["", "# Doorgaande gaten"]
         for h in part.holes:
             key = round(h.d, 6)
-            if key not in dvars:
+            if not h.blind and key not in dvars:
                 dvars[key] = f"gat_d{len(dvars) + 1}"
                 rec = next((s for s in snaps if s.name.startswith("gat Ø") and abs(s.value - h.d) < 1e-6), None)
                 lines.append(f"{dvars[key]} = {_fmt(h.d)}{_comment(rec)}")
         lines.append("gaten = [  # (x, y, diameter)")
         for i, h in enumerate(part.holes):
+            if h.blind:
+                continue
             sx, sy = by_name.get(f"gat {i + 1} x"), by_name.get(f"gat {i + 1} y")
             note = ""
             if sx and sy:
                 note = f"  # gemeten ({sx.measured:.3f}, {sy.measured:.3f}) ± {max(sx.u95, sy.u95):.3f}"
             lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dvars[round(h.d, 6)]}),{note}")
+        lines.append("]")
+    if any(h.blind for h in part.holes):  # blinde gaten (v0.11)
+        bvars: dict[tuple[float, float], tuple[str, str]] = {}
+        lines += ["", "# Blinde gaten: diameter en diepte onder het bovenvlak (vlakke bodem)"]
+        for h in part.holes:
+            key = (round(h.d, 6), round(h.depth, 6))
+            if h.blind and key not in bvars:
+                k = len(bvars) + 1
+                bvars[key] = (f"blind_d{k}", f"blind_diepte{k}")
+                rec_d = next((s for s in snaps if s.name.startswith("blind gat Ø") and abs(s.value - h.d) < 1e-6),
+                             None)
+                rec_t = next((s for s in snaps if s.name.startswith("blind gat diepte")
+                              and abs(s.value - h.depth) < 1e-6), None)
+                lines.append(f"{bvars[key][0]} = {_fmt(h.d)}{_comment(rec_d)}")
+                lines.append(f"{bvars[key][1]} = {_fmt(h.depth)}{_comment(rec_t)}")
+        lines.append("blinde_gaten = [  # (x, y, diameter, diepte, hoogte van het bovenvlak)")
+        for i, h in enumerate(part.holes):
+            if h.blind:
+                dv, tv = bvars[(round(h.d, 6), round(h.depth, 6))]
+                sx, sy = by_name.get(f"gat {i + 1} x"), by_name.get(f"gat {i + 1} y")
+                note = f"  # gemeten ({sx.measured:.3f}, {sy.measured:.3f}) ± {max(sx.u95, sy.u95):.3f}" \
+                    if sx and sy else ""
+                lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dv}, {tv}, {_fmt(part.height_at(h.x, h.y))}),{note}")
         lines.append("]")
     if any(h.csk > 0 for h in part.holes):
         kvars: dict[float, str] = {}
@@ -656,10 +698,13 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         lines.append(f"model = extrudeer({sketch}, hoogte)")
     if part.steps:
         lines += ["for x, y, hoek, h in treden:", "    model = trede(cq, model, x, y, hoek, h, hoogte)"]
-    if part.holes:
+    if any(not h.blind for h in part.holes):
         lines += ["for x, y, d in gaten:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).center(x, y)"
                   ".circle(d / 2).extrude(hoogte + 2))"]
+    if any(h.blind for h in part.holes):
+        lines += ["for x, y, d, diepte, boven in blinde_gaten:",
+                  "    model = model.cut(blind_gat(cq, x, y, d, diepte, boven))"]
     if any(h.csk > 0 for h in part.holes):
         lines += ["for x, y, d, dk, boven in verzinkingen:",
                   f"    model = model.cut(verzinking(cq, x, y, d, dk, boven, {_fmt(CSK_ANGLE_DEG)}))"]
