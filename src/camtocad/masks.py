@@ -118,9 +118,12 @@ def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
     if np.count_nonzero(trans) < 500:
         return 1.0, 0.0
     every = np.ones(len(y), bool)
+    linear: dict[float, np.ndarray] = {}
 
     def spread(g: float, s: float) -> float:
-        ol, ps = 255.0 * y ** (1.0 / g), at(s)
+        if g not in linear:
+            linear[g] = 255.0 * y ** (1.0 / g)
+        ol, ps = linear[g], at(s)
         a, b, _ = _robust_affine(ol, ps, every)
         return float(np.median(np.abs(ol - (a * ps + b))[trans]) / max(abs(a), 1e-3))
 
