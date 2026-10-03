@@ -9,6 +9,7 @@ uit de mat: er is geen VIO (ARCore) en geen schaaldrift nodig.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import cv2
@@ -233,11 +234,31 @@ def _view_rms(obj, img, rvec, tvec, K, dist) -> float:
     return float(np.sqrt(np.mean(np.sum((proj.reshape(-1, 2) - img.reshape(-1, 2)) ** 2, axis=1))))
 
 
+@contextmanager
+def single_threaded():
+    """OpenCV tijdelijk op één thread. De kalibratie verdeelt haar sommen over threads, en dan verschillen camera en
+    poses tussen twee runs met dezelfde foto's in de laatste bits (K tot 1e-12). Dat lijkt niets, maar het verschuift
+    een paar maskerpixels op de drempel, en daarmee soms de startcontour en de hele fit (v0.11: een scan is nu
+    reproduceerbaar)."""
+    n = cv2.getNumThreads()
+    cv2.setNumThreads(1)
+    try:
+        yield
+    finally:
+        cv2.setNumThreads(n)
+
+
 def calibrate(
     detections: list[BoardDetection], spec: MatSpec, *, min_corners: int = 12, fix_k3: bool = True,
     camera: CameraModel | None = None,
 ) -> CalibrationResult:
-    """Zelfkalibratie over alle foto's (of alleen poses als `camera` gegeven is)."""
+    """Zelfkalibratie over alle foto's (of alleen poses als `camera` gegeven is); reproduceerbaar (single_threaded)."""
+    with single_threaded():
+        return _calibrate(detections, spec, min_corners=min_corners, fix_k3=fix_k3, camera=camera)
+
+
+def _calibrate(detections: list[BoardDetection], spec: MatSpec, *, min_corners: int, fix_k3: bool,
+               camera: CameraModel | None) -> CalibrationResult:
     board = make_board(spec)
     rejected: dict[str, str] = {}
     sizes = Counter((d.width, d.height) for d in detections)
@@ -297,7 +318,12 @@ def calibrate(
 
 
 def solve_pose(det: BoardDetection, spec: MatSpec, cam: CameraModel) -> Pose | None:
-    """Pose van één foto bij een bekende camera (IPPE voor vlakke doelen + LM-verfijning)."""
+    """Pose van één foto bij een bekende camera (IPPE voor vlakke doelen + LM-verfijning); reproduceerbaar."""
+    with single_threaded():
+        return _solve_pose(det, spec, cam)
+
+
+def _solve_pose(det: BoardDetection, spec: MatSpec, cam: CameraModel) -> Pose | None:
     board = make_board(spec)
     obj, img = _object_image_points(det, board, spec)
     if len(obj) < 6:

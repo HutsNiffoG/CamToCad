@@ -100,3 +100,14 @@ def test_counterbores_are_compared_with_diameter_and_depth(tmp_path):
     p = tmp_path / "maten.json"
     p.write_text(json.dumps({"maten": {"kamerboring": 11.0, "kamerdieptes": [6.4]}}), encoding="utf-8")
     assert validate.read_reference(p)["maten"] == {"kamerboring": [11.0], "kamerdiepte": [6.4]}
+
+
+def test_blind_hole_depths_are_compared(tmp_path):
+    """v0.11: de diepte van een blind gat (`gatdieptes`); zijn diameter telt gewoon bij de gaten."""
+    part = bracket()
+    part.holes = [Hole(10.0, 20.0, 6.6), Hole(70.0, 20.0, 5.0, depth=6.02)]
+    m = validate.model_measures(part.to_dict(), UNC)
+    assert sorted(v for v, _ in m["gat"]) == [5.0, 6.6] and [v for v, _ in m["gatdiepte"]] == [6.02]
+    p = tmp_path / "maten.json"
+    p.write_text(json.dumps({"maten": {"gatdieptes": [6.0]}}), encoding="utf-8")
+    assert validate.read_reference(p)["maten"] == {"gatdiepte": [6.0]}

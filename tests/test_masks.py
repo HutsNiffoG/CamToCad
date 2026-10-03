@@ -219,6 +219,28 @@ def test_soft_alpha_puts_a_blurred_edge_between_two_pixels():
     assert np.isnan(masks._soft_alpha(fg, same, bgv, valid, 1.0, mis)[0].astype(float)).all()
 
 
+def test_no_alpha_from_grey_where_the_photo_is_clipped():
+    """Een wit vak dat boven 255 uitkomt (lokaal contrast, HDR): met het afgekapte niveau als mat ligt de halve-
+    contrastrand te ver naar het object; daarom daar geen alpha uit grijs (v0.11). Losse ruispixels op 255 tellen
+    niet als afgekapt."""
+    from scipy.special import ndtr
+
+    h, w, edge = 40, 80, 40.3
+    x = np.broadcast_to(np.arange(w, dtype=np.float32), (h, w))
+    o = np.clip(280.0 - 210.0 * ndtr((edge - x) / 1.2), 0, 255).astype(np.float32)
+    fg, valid, mis = x < edge, np.ones((h, w), bool), np.zeros((h, w), np.float32)
+    bgv = np.full((h, w), 255.0, np.float32)
+    alpha, _ = masks._soft_alpha(fg, o, bgv, valid, 1.0, mis)
+    assert _crossing(alpha) < edge - 0.1  # het afgekapte wit trekt de rand naar het object
+    zone = masks._clip_zone(o)
+    assert zone[:, 50:].all() and not zone[:, :30].any()
+    alpha, wgt = masks._soft_alpha(fg, o, bgv, valid, 1.0, mis, clipped=zone)
+    assert np.isnan(alpha.astype(float)).all() and not wgt.astype(float).any()
+    rng = np.random.default_rng(3)
+    white = np.clip(np.round(249.0 + rng.normal(0, 2.0, (h, w))), 0, 255)
+    assert (white >= 254).any() and not masks._clip_zone(white).any()
+
+
 def test_soft_alpha_in_a_color_photo():
     """Donkerblauw op een zwart vak: grijs zegt bijna niets, de kleur wel; de rand ligt dan op de halve kleur."""
     from scipy.special import ndtr

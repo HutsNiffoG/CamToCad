@@ -36,6 +36,8 @@ class ViewData:
     alpha_w: np.ndarray | None = field(default=None, repr=False, compare=False)
     # grijswaarden in de ROI (NaN buiten de uitsnede van het masker): randen binnen het object (V16)
     gray: np.ndarray | None = field(default=None, repr=False, compare=False)
+    # afgekapt in de foto, of vlak ernaast (masks._clip_zone): daar zegt de rand niets (randfit: geen bewijs)
+    clip: np.ndarray | None = field(default=None, repr=False, compare=False)
     tone: float | np.ndarray = 1.0  # toonkromme van de camera (masks.Tone), voor `gray`; per pixel bij lokale toonbewerking
 
     def sums(self) -> tuple:
@@ -85,6 +87,8 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
         if m.alpha is not None:
             vd.alpha = _crop(m.alpha, m.alpha_at, y0, y1, x0, x1, np.nan)
             vd.alpha_w = _crop(m.alpha_w, m.alpha_at, y0, y1, x0, x1, 0.0)
+            if getattr(m, "clip", None) is not None:
+                vd.clip = _crop(m.clip, m.alpha_at, y0, y1, x0, x1, False)
         if m.gray is not None:
             vd.gray = _crop(m.gray, m.alpha_at, y0, y1, x0, x1, np.nan)
             tone_map = getattr(m, "tone_map", None)

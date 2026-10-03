@@ -117,12 +117,17 @@ def without_mat_around_hole(vd, part: Part2p5D, sector=None, r_mm: float = 6.0) 
         a = a[(np.degrees(a) - sector[0]) % 360 < (sector[1] - sector[0]) % 360]
     rr = np.linspace(0.0, r_mm, 25)
     disc = np.column_stack([h.x + np.outer(rr, np.cos(a)).ravel(), h.y + np.outer(rr, np.sin(a)).ravel()])
+    return without_mat_at(vd, part, disc)
+
+
+def without_mat_at(vd, part: Part2p5D, pts: np.ndarray) -> list[silhouette.ViewData]:
+    """Geen zekere mat meer bij deze punten (2D, onder en boven): zoals een zwart onderdeel boven een zwart vak."""
     out = []
     for v in vd:
         hh, ww = v.fg.shape
         blank = np.zeros((hh, ww), np.uint8)
         for z in (0.0, part.height):
-            uv, _ = project(np.column_stack([disc, np.full(len(disc), z)]), v.pose, K)
+            uv, _ = project(np.column_stack([pts, np.full(len(pts), z)]), v.pose, K)
             uv = np.round(uv - [v.x0, v.y0]).astype(int)
             ok = (uv[:, 0] >= 0) & (uv[:, 0] < ww) & (uv[:, 1] >= 0) & (uv[:, 1] < hh)
             blank[uv[ok, 1], uv[ok, 0]] = 1
@@ -317,6 +322,35 @@ def test_edge_fit_recovers_a_slot():
     assert s.length == pytest.approx(14.0, abs=0.12) and math.degrees(s.angle) == pytest.approx(90.0, abs=0.3)
 
 
+def test_a_rectangular_cutout_with_one_side_without_evidence_stays_put():
+    """Een rechthoekige uitsparing waarvan één lange zijde nergens zekere mat naast zich heeft (zwart op zwart): de
+    breedte is dan een eigen parameter die de rest van de rand niet vastlegt, dus de uitsparing blijft staan (v0.11,
+    sleuf_donker: anders liep die zijde weg). Met bewijs rondom vindt de randfit haar gewoon."""
+    from dataclasses import replace
+
+    from camtocad.profile import Slot
+
+    truth = plate(hole=False)
+    truth.slots = [Slot(120.0, 80.0, 14.0, 8.0, 0.0, 1.5, "rechthoek")]
+    views = scan(truth)
+    s = truth.slots[0]
+    start = truth.copy()
+    start.slots[0] = replace(s, y=s.y + 0.15, width=s.width + 0.3)
+    ef = edgefit.fit(start, K, views)
+    assert ef.accepted, ef.note
+    assert not ef.extra["evidence"][("sleuf", 0)].weak
+    assert (ef.part.slots[0].y, ef.part.slots[0].width) == pytest.approx((80.0, 8.0), abs=0.05)
+    xs, ys = np.meshgrid(np.linspace(s.x - 8.0, s.x + 8.0, 81), np.linspace(83.0 - 1.5, 83.0 + 1.5, 16))
+    bare = without_mat_at(views, truth, np.column_stack([xs.ravel(), ys.ravel()]))
+    prob = edgefit._Problem(truth, K, bare)
+    prob.set_status(truth)
+    e = edgefit.evidence(prob, prob.x_of(truth))[("sleuf", 0)]
+    assert e.weak and e.fraction > edgefit.EVIDENCE_MIN  # de rest van de rand heeft bewijs genoeg
+    ef = edgefit.fit(start, K, bare)
+    assert ef.accepted, ef.note
+    assert ef.part.slots[0] == start.slots[0]
+
+
 def test_edge_distance_from_alpha_is_subpixel_even_where_the_mask_is_off():
     """V2-open: de afstand tot de rand komt uit de zachte objectfractie, lineair over de rand (dus ook tussen twee
     pixels), ook waar het binaire masker een pixel te krap is; zonder alpha de BETA-regel op dat masker."""
@@ -423,18 +457,25 @@ def test_a_countersink_is_found_in_the_top_views_and_fitted_on_its_inner_edge(pl
 def test_a_small_chamfer_on_a_hole_is_a_narrow_countersink(plate_scan):
     """v0.11: een faas van 0,5 mm (Ø 7 op een gat Ø 6) heeft in het radiale profiel geen eigen piek: haar rand loopt
     in die van het gat over. countersink.narrow meet de rand zoals de randfit: bij een faas ligt hij vast op Ø 7, bij
-    een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf (~1 px buiten het gat)."""
+    een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf (~1 px buiten het gat). En de silhouetten
+    moeten de faas steunen: met alleen een ring in de grijswaarden (bijv. een kras) blijft het een gewoon gat."""
     from camtocad import countersink
 
     truth = plate()
-    vd = [silhouette.ViewData(v.pose, v.fg, v.bg, v.unk, v.x0, v.y0) for v in plate_scan]
+    sunk = plate()
+    sunk.holes[0] = Hole(110.0, 80.0, 6.0, csk=7.0)
+    vd = scan(sunk)
     for v in vd:
         v.gray = top_face_gray(truth, v, 7.0)
     found = countersink.detect(truth, K, vd)
     assert list(found) == [0] and found[0] == pytest.approx(7.0, abs=0.2)
-    for v in vd:  # zonder faas
+    plain = [silhouette.ViewData(v.pose, v.fg, v.bg, v.unk, v.x0, v.y0) for v in plate_scan]
+    for v in plain:  # dezelfde ring, maar de silhouetten van een gewoon gat
+        v.gray = top_face_gray(truth, v, 7.0)
+    assert countersink.narrow(truth, K, plain, 0)[0] is None
+    for v in plain:  # zonder faas
         v.gray = top_face_gray(truth, v, 0.0)
-    assert countersink.narrow(truth, K, vd, 0)[0] is None and countersink.detect(truth, K, vd) == {}
+    assert countersink.narrow(truth, K, plain, 0)[0] is None and countersink.detect(truth, K, plain) == {}
 
 
 def test_the_inner_edge_of_a_top_chamfer_is_fitted_from_the_top_views(plate_scan):

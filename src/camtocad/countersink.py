@@ -11,7 +11,9 @@ Een smalle verzinking (een faas van een halve millimeter aan de gatrand, v0.11) 
 zo dicht bij die van het gat dat ze in elkaar overlopen. Daarvoor `narrow`: per veronderstelde breedte de rand meten
 zoals de randfit dat doet, en kijken waar hij werkelijk ligt. Bij een faas ligt die gemeten rand steeds op dezelfde
 plek, een halve millimeter buiten het gat; bij een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf,
-een pixel of wat buiten het gat.
+een pixel of wat buiten het gat. Die uitloper reikt bij een donker onderdeel tot een halve millimeter, net zo ver als
+een faas: daarom moeten ook de silhouetten de faas steunen (in de schuine foto's kijk je langs een faas verder door
+het gat; een gewoon gat past met een faas 14-16% slechter, een gat met een faas 0-4% beter).
 """
 
 from __future__ import annotations
@@ -160,11 +162,37 @@ def narrow(part: Part2p5D, K: np.ndarray, vd: list, i: int) -> tuple[float | Non
             f"spreiding {float(np.std(rims)):.2f} mm over {len(rims)} breedtes, {n_total} metingen")
     if width < need or float(np.std(rims)) > 0.15:
         return None, note
+    e_plain, e_csk = _silhouette_support(part, K, vd, i, 2 * rim)
+    note += f"; silhouetten {e_plain:.0f} als gewoon gat, {e_csk:.0f} met faas"
+    if not e_csk < e_plain:
+        return None, note
     return 2 * rim, note
 
 
-def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None) -> dict[int, float]:
-    """Gaten met een verzinking: {index: diameter aan het bovenvlak (mm)}. Zie de moduletekst."""
+def _silhouette_support(part: Part2p5D, K: np.ndarray, vd: list, i: int, dk: float) -> tuple[float, float]:
+    """Silhouetenergie rond gat i als gewoon gat en met een verzinking Ø `dk`, elk met de best passende gatdiameter
+    (zie counterbore.detect)."""
+    from dataclasses import replace
+
+    from . import counterbore, silhouette
+
+    h = part.holes[i]
+    views = counterbore._local_views(part, i, vd, K)
+
+    def energy(d: float, csk: float = 0.0) -> float:
+        trial = part.copy()
+        trial.holes[i] = replace(h, d=d, csk=csk, cb=0.0, cb_depth=0.0)
+        return silhouette.energy(trial, K, views) if trial.is_valid() else math.inf
+
+    ds = np.arange(h.d - 0.5, h.d + 0.201, 0.05)
+    return (min(energy(float(d)) for d in ds),
+            min((energy(float(d), dk) for d in ds if dk > d + 0.2), default=math.inf))
+
+
+def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None, weak: set | None = None) -> dict[int, float]:
+    """Gaten met een verzinking: {index: diameter aan het bovenvlak (mm)}. Zie de moduletekst. `weak`: gaten zonder
+    bewijs rond de rand (edgefit.evidence); daar is het gat van boven niet goed te zien, en dan lijkt zijn eigen rand
+    op een faas: geen smalle verzinking."""
     found = {}
     for i, h in enumerate(part.holes):
         if h.csk > 0 or h.cb > 0 or h.blind:
@@ -203,7 +231,7 @@ def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None) -> dict[int, float
                 f"als de rest, rondom {around:.0%}, in {agree:.0%} van {len(grads)} foto's op dezelfde plaats")
         if ok:
             found[i] = float(2 * r[k])
-        else:  # geen eigen ring: misschien een smalle verzinking (faas) tegen de gatrand aan
+        elif not (weak and i in weak):  # geen eigen ring: misschien een smalle verzinking (faas) tegen de gatrand aan
             dk, note = narrow(part, K, vd, i)
             if log:
                 log(f"gat {i + 1}: {'smalle verzinking' if dk else 'geen smalle verzinking'}; {note}")

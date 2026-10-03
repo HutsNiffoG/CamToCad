@@ -169,7 +169,9 @@ def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None, maybe: list | None
     scale = float(np.percentile(M[free], 99.5)) if np.any(M[free] > 0) else 0.0
     if scale <= 0:
         return []
-    img = (255 * np.clip(np.where(free, M, 0.0) / scale, 0, 1)).astype(np.uint8)
+    # wat niet vrij is (de buitenrand, bestaande gaten): het niveau van het bovenvlak, niet nul (een rand van nul rond
+    # een bestaand gat is zelf een cirkel)
+    img = (255 * np.clip(np.where(free, M, float(np.median(M[free]))) / scale, 0, 1)).astype(np.uint8)
     img = cv2.GaussianBlur(img, (0, 0), 1.5)
     circles = cv2.HoughCircles(img, cv2.HOUGH_GRADIENT, dp=1, minDist=2 * R_MIN_MM / RES_MM, param1=60, param2=18,
                                minRadius=int(R_MIN_MM / RES_MM), maxRadius=int(R_MAX_MM / RES_MM))

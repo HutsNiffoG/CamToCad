@@ -35,6 +35,8 @@ MIN_GAIN_PX, MIN_GAIN_FRAC = 30.0, 0.15
 # Een kamer of verzinking is minstens zo diep (mm, en als deel van de hoogte); minder is een afgeschuinde gatrand
 # (countersink.py), geen kamer
 CB_MIN_DEPTH, CB_MIN_FRAC = 1.0, 0.08
+# een kamer moet een verzinking zoveel verslaan: als deel van de energie met verzinking, en per foto (px)
+CSK_MARGIN_FRAC, CSK_MARGIN_PX = 0.10, 1.0
 
 
 def _diameters(d: float) -> list[float]:
@@ -134,10 +136,12 @@ def detect(part: Part2p5D, K: np.ndarray, vd: list, log=None,
                     if e < e2:
                         e2, D = e, float(c)
         need = max(MIN_GAIN_PX * len(views) / 10.0, MIN_GAIN_FRAC * e0)
-        # een kamer: duidelijk beter dan een gewoon gat, diep genoeg, en ook beter dan een verzinking (die heeft een
-        # maat minder: bij gelijke energie wint zij)
-        ok = e_plain - e1 > need and t >= min_depth and e1 < e2 - MIN_GAIN_PX * len(views) / 10.0
-        csk_ok = not ok and h.csk <= 0 and e_plain - e2 > need
+        # een kamer: duidelijk beter dan een gewoon gat, diep genoeg, en ook duidelijk beter dan een verzinking (die
+        # heeft een maat minder: bij ongeveer gelijke energie wint zij). Duidelijk: 10% en één pixel per foto; een vaste
+        # marge van drie pixels per foto was bij een gat met weinig bewijs (kleine energieën) te streng
+        beats_csk = e1 < e2 - max(CSK_MARGIN_FRAC * e2, CSK_MARGIN_PX * len(views))
+        ok = e_plain - e1 > need and t >= min_depth and beats_csk
+        csk_ok = not ok and not beats_csk and h.csk <= 0 and e_plain - e2 > need
         if log:
             log(f"gat {i + 1}: {'kamerboring' if ok else 'verzinking' if csk_ok else 'geen kamerboring'}; "
                 f"Ø {dk:.1f} x {t:.1f} diep (gat Ø {d:.2f}) geeft energie {e1:.0f}, een verzinking Ø {D:.1f} "

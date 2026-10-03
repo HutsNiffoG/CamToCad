@@ -27,6 +27,7 @@ from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, re
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
 WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
+HDR_WARN_FRAC = 0.25  # een waarschuwing over lokale toonbewerking als minstens dit deel van de foto's een tegelraster heeft
 
 
 class ScanError(ValueError):
@@ -315,6 +316,23 @@ def _refine_start(part, K: np.ndarray, vd: list, max_evals: int, log=print):
         if better:
             best, e_best, evals = cand, e, n
     return best, e_best, evals
+
+
+HOLE_PARAMS = ("hx", "hy", "hd", "hk", "hc", "hz", "hp")  # maat, plaats, verzinking, kamer en diepte van een gat
+
+
+def _edge_fit(part, K: np.ndarray, vd: list, mm_per_px: float, log=None, retries: int = 2):
+    """edgefit.fit. Stuit alleen een gat op de grens van het vertrouwensgebied (zijn maat, plaats, verzinking, kamer of
+    diepte), dan zoekt de randfit vanaf die grens verder, hooguit `retries` keer: de pixelfit zette dat gat te ver
+    weg, en anders bleef voor het hele onderdeel de pixelfit staan (v0.11; in v0.10 alleen voor een kamer). Een gat
+    zonder bewijs rondom staat in de randfit vast en kan dus niet zo weglopen."""
+    ef = edgefit.fit(part, K, vd, log=log, mm_per_px=mm_per_px)
+    for _ in range(retries):
+        edge = ef.extra.get("at_edge", [])
+        if ef.accepted or not edge or not all(n[:2] in HOLE_PARAMS for n in edge):
+            break
+        ef = edgefit.fit(ef.extra["moved"], K, vd, log=log, mm_per_px=mm_per_px)
+    return ef
 
 
 def _effective_uncertainty(unc, snaps: list, scale_rel: float):
@@ -664,6 +682,14 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if tones:
         log(f"camera: {tone.describe(tones)}; verscherping k {sharp.k:.2f} (σ {sharp.sigma:.1f} px, "
             f"{sharp.n_photos} foto's)")
+        n_hdr = sum(t.grid is not None for t in tones)
+        if n_hdr >= HDR_WARN_FRAC * len(tones):
+            # de kromme per tegel volgt een telefoon die per stuk beeld bewerkt; lokaal contrast (halo's) niet
+            warnings.append(f"in {n_hdr} van de {len(tones)} foto's is de toonkromme per stuk beeld anders (lokale "
+                            "toonbewerking, HDR). Die kromme wordt gevolgd, maar het lokale contrast dat er vaak bij hoort "
+                            "niet. Waar wit daardoor afgekapt is (255), telt de rand niet als bewijs: een gat daar krijgt "
+                            "maat en plaats uit de pixelfit, met een ruime U95. Zet HDR (Smart HDR, auto-HDR) uit voor de "
+                            "beste nauwkeurigheid")
     top_views: list = []
     all_views, lig_of = views, {}  # ook de foto's die niet bij de rest passen staan in diagnose.json
     diag = {"camtocad": __version__, "opencv": cv2.__version__, "detector_bias_px": bias.tolist(),
@@ -793,7 +819,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     def fit_log(m):
         log(f"{m} ({time.time() - t_fit:.0f} s)")
 
-    ef = edgefit.fit(part, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+    ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
     # V19: past een prisma wel? Een trede of afschuining geeft anders een stil compromis (vooral in de hoogte).
     # V17: zo'n vorm dan als model proberen, en de randfit en de toets opnieuw
     shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
@@ -803,7 +829,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if alt is not None:
             part, energy = alt
             t_fit = time.time()
-            ef = edgefit.fit(part, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
             shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
     # V16: een verzinking is een ring rond een gat in de foto's van boven; dan als model, en de randfit opnieuw. Ook
     # als de randfit niet gebruikt is: een verzonken gat laat in schuine foto's meer doorkijken dan een gewoon gat,
@@ -811,7 +837,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     found_on = ef.part if ef.accepted else part
     if found_on.holes:
         notes: list[str] = []
-        sunk = countersink.detect(found_on, cam.K, vd, log=notes.append)
+        weak = {i for (kind, i), e in ef.extra.get("evidence", {}).items() if kind == "gat" and e.weak}
+        sunk = countersink.detect(found_on, cam.K, vd, log=notes.append, weak=weak)
         if notes:
             diag["verzinkingen"] = notes
         trial = found_on.copy()
@@ -819,7 +846,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             trial.holes[i] = replace(trial.holes[i], csk=dk)
         if sunk and trial.is_valid():
             t_fit = time.time()
-            ef_csk = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
             if ef_csk.accepted:
                 ef, part = ef_csk, trial
                 log("verzinking herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].csk:.2f} x "
@@ -841,14 +868,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             trial.holes[i] = replace(trial.holes[i], d=d, csk=0.0, cb=dk, cb_depth=t)
         if bored and trial.is_valid():
             t_fit = time.time()
-            ef_cb = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
             # de diepte uit het silhouet staat soms meer dan het vertrouwensgebied verkeerd (een gat met weinig
-            # bewijs): stuit alleen een kamer op die grens, dan vanaf daar verder (hooguit twee keer)
-            for _ in range(2):
-                edge = ef_cb.extra.get("at_edge", [])
-                if ef_cb.accepted or not edge or not all(n.startswith(("hc", "hz")) for n in edge):
-                    break
-                ef_cb = edgefit.fit(ef_cb.extra["moved"], cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            # bewijs): dan vanaf die grens verder (_edge_fit)
+            ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
             # een kamer die in de randfit (bijna) verdwijnt, was er geen
             min_depth = max(counterbore.CB_MIN_DEPTH, counterbore.CB_MIN_FRAC * trial.height)
             shallow = [i for i in bored if ef_cb.accepted and ef_cb.part.holes[i].cb_depth < min_depth]
@@ -860,7 +882,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                 trial = found_on.copy()
                 for i, (dk, t, d) in bored.items():
                     trial.holes[i] = replace(trial.holes[i], d=d, csk=0.0, cb=dk, cb_depth=t)
-                ef_cb = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px) if bored else ef_cb
+                ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log) if bored else ef_cb
             if bored and ef_cb.accepted:
                 ef, part = ef_cb, ef_cb.part
                 log("kamerboring herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].cb:.2f} x "
@@ -876,7 +898,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                 trial.holes[i] = replace(trial.holes[i], d=d, csk=dk)
         if sunk2 and trial.is_valid():
             t_fit = time.time()
-            ef_csk = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
             if ef_csk.accepted:
                 ef, part = ef_csk, trial
                 log("verzinking herkend aan de doorkijk: " + ", ".join(
@@ -897,7 +919,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     trial.holes += blind
     if blind and trial.is_valid():
         t_fit = time.time()
-        ef_b = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+        ef_b = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
         n0 = len(found_on.holes)
         if ef_b.accepted:
             ef, part = ef_b, ef_b.part

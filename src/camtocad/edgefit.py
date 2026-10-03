@@ -78,9 +78,12 @@ FREEZE_PROBE_MM = 0.1
 # Bewijs rond een gat of sleuf (zie `evidence`): minder dan dit deel van de randpunten met zekere mat ernaast,
 # of een systematische fout die hierdoor minstens AMP_MAX keer groter is dan met bewijs rondom: 'zonder bewijs'
 EVIDENCE_MIN, AMP_MAX = 0.10, 8.0
+# een gat met een smalle verzinking (minder dan zoveel mm breed): systematische fout van maat en plaats zoveel groter
+NARROW_CSK_MM, NARROW_CSK_AMP = 1.0, 2.5
 # Randen binnen het object (V16, zie measure_inner): zo ver (px) langs de normaal gezocht, en alleen bij zoveel
 # contrast (grijswaarden) tussen de kegel van een verzinking en het bovenvlak
 INNER_SEARCH_PX, INNER_MIN_CONTRAST = 5.0, 10.0
+INNER_MIN_REACH_PX = 2.0  # zo ver (px) moet er langs de normaal gezocht kunnen worden (80% van de band in beeld)
 STEP_END_MM = 1.5  # de randen van een trede: zo ver van de contour blijven (daar is het vlak smaller dan de band)
 
 
@@ -529,7 +532,8 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
         facing = np.sum((v.pose.center - P) * B, axis=1) > 0
         hh, ww = g.shape
         m = search_px + 1
-        ok = (z0 > 0) & facing & (reach >= 2.0) & (uv0[:, 0] > m) & (uv0[:, 1] > m) & (uv0[:, 0] < ww - m - 1) \
+        ok = (z0 > 0) & facing & (reach >= INNER_MIN_REACH_PX) & (uv0[:, 0] > m) & (uv0[:, 1] > m) \
+            & (uv0[:, 0] < ww - m - 1) \
             & (uv0[:, 1] < hh - m - 1)
         idx = np.flatnonzero(ok)
         if not len(idx):
@@ -676,7 +680,7 @@ def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]
         uv, _ = project(rim.P[on], v.pose, prob.K)
         h, w = v.fg.shape
         uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
-        wgt = np.clip((4.0 - _bilinear(prob.fields[i][1], uv)) / 2.0, 0.0, 1.0)
+        wgt = _clip_free(v, uv, np.clip((4.0 - _bilinear(prob.fields[i][1], uv)) / 2.0, 0.0, 1.0))
         pt = rim.point[on]
         np.add.at(W, pt, wgt ** 2)
         np.add.at(N, pt, 1.0)
@@ -712,11 +716,55 @@ def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]
 
         if kind == "gat" and part.holes[i].blind:  # een blind gat (v0.11): alleen de randen in de grijswaarden
             out[(kind, i)] = _blind_evidence(prob, part, i, names, sizes, positions)
-        elif frac < EVIDENCE_MIN:  # een paar punten met bewijs zeggen niets over de vorm van het bewijs
+        elif frac < EVIDENCE_MIN or (kind == "sleuf" and _bare_side(lay["slots"][i], E[idx], n_i)):
+            # een paar punten met bewijs zeggen niets over de vorm van het bewijs; en een zijde van een sleuf of
+            # rechthoek zonder bewijs legt de randfit niet vast (zie _bare_side)
             out[(kind, i)] = Evidence(frac, AMP_MAX, AMP_MAX)
         else:
             out[(kind, i)] = Evidence(frac, amp(sizes), amp(positions))
+            h = part.holes[i] if kind == "gat" else None
+            if h is not None and h.csk > 0 and (h.csk - h.d) / 2 < NARROW_CSK_MM:
+                # een smalle verzinking (een faas, v0.11): de kegel is aan de kant van het licht af donker, en daar telt
+                # het masker de band deels als gat; haar bovenrand is te smal om de plaats vast te leggen (stresstest:
+                # een gat 0,10 mm naar die kant). Een groter systematisch deel, zoals bij bewijs aan een deel van de rand
+                e = out[(kind, i)]
+                out[(kind, i)] = Evidence(e.fraction, max(e.amp_size, NARROW_CSK_AMP), max(e.amp_pos, NARROW_CSK_AMP))
     return out
+
+
+def _clip_free(v, uv: np.ndarray, wgt: np.ndarray) -> np.ndarray:
+    """Gewicht 0 voor punten waar de foto afgekapt is of vlak ernaast (v.clip, masks._clip_zone; v0.11). Daar is
+    alpha er niet, en de maskerrand is er bij een donker onderdeel naast een afgekapt wit vak scheef: met lokaal
+    contrast (HDR) werd een gat zo 0,3-0,4 mm te groot, met een U95 van 0,2-0,3 mm. Zonder dat bewijs blijft zo'n gat
+    staan (de pixelfit), met een ruime U95."""
+    clip = getattr(v, "clip", None)
+    if clip is None:
+        return wgt
+    ui = np.round(uv).astype(int)
+    return np.where(clip[ui[:, 1], ui[:, 0]], 0.0, wgt)
+
+
+def _bare_side(ls: dict, e: np.ndarray, n: np.ndarray) -> bool:
+    """Heeft een zijde van een sleuf of rechthoek (een rechte rand met de bogen ernaast; bij een sleuf is een kopse
+    kant alleen zijn twee bogen) minder dan EVIDENCE_MIN van haar randpunten met bewijs? `ls`: de indeling van de
+    sleuf (layout), `e` en `n` per punt van de sleuf: hoe vaak met bewijs en hoe vaak op de silhouetrand.
+
+    Anders dan bij een gat zegt de rest van de rand dan niets over die zijde: de breedte (of lengte) is een eigen
+    parameter. Wat de randfit er toch ziet, zijn een paar punten met een smalle strook zonder bewijs, en die liggen
+    bij een zwart onderdeel naast de rand (de objectrand in het masker ligt binnen het object). Stresstest
+    sleuf_donker (v0.11): de rand van een uitsparing liep daardoor weg, 0,65 mm te breed, buiten de U95; vanaf
+    0,3 mm te breed liep de randfit tot de grens van het vertrouwensgebied. Zo'n sleuf blijft dus staan, met de
+    U95 van een sleuf zonder bewijs."""
+    arcs, edges = ls["arcs"], ls["edges"]
+    k = len(arcs)
+    starts = np.cumsum([0] + [a + b for a, b in zip(arcs, edges)])
+    arc = [np.arange(starts[j], starts[j] + arcs[j]) for j in range(k)]
+    edge = [np.arange(starts[j] + arcs[j], starts[j + 1]) for j in range(k)]
+    for j in range(k):
+        side = np.concatenate([arc[j], edge[j], arc[(j + 1) % k]])
+        if n[side].sum() > 0 and e[side].sum() < EVIDENCE_MIN * n[side].sum():
+            return True
+    return False
 
 
 def _blind_evidence(prob: "_Problem", part: Part2p5D, i: int, names: list[str], sizes: list[dict],
@@ -832,7 +880,8 @@ class _Problem:
         p = self.build(x)
         if not p.is_valid():
             return np.full(n_on, 20.0)
-        P = points3d(p, self.lay)
+        rim = rims(p, self.lay)
+        P, feat = rim.P, rim.point >= outer_count(self.lay)
         P_in = inner_edges(p, self.lay).P if self.inner else None
         out = []
         for i in views:
@@ -843,6 +892,9 @@ class _Problem:
             r = _bilinear(sf, uv)
             g = _bilinear(band, uv)
             wgt = np.clip((4.0 - g) / 2.0, 0.0, 1.0)  # geen zekere mat binnen ~3 px: geen bewijs
+            # gaten en sleuven: geen bewijs waar de foto afgekapt is (zie _clip_free); de buitencontour houdt daar de
+            # maskerrand (zonder bewijs zou ze kunnen wegdrijven, en er is geen pixelfit om op terug te vallen per rand)
+            wgt = np.where(feat[on], _clip_free(v, uv, wgt), wgt)
             out.append(wgt * np.clip(r, -15.0, 15.0))
             if P_in is not None and len(self.inner[i][0]):
                 # afstand (px, + = naar buiten) van het modelpunt tot de gemeten rand, langs de normaal in beeld

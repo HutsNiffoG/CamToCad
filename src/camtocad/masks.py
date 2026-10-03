@@ -84,6 +84,8 @@ class ViewMasks:
     alpha_at: tuple[int, int] = (0, 0)
     # de grijswaarden (vervaagd, belichting gecorrigeerd) in dezelfde uitsnede: randen binnen het object (V16)
     gray: np.ndarray | None = None
+    # in dezelfde uitsnede: afgekapt (0 of 255) of vlak ernaast (_clip_zone); daar geen bewijs uit alpha (v0.11)
+    clip: np.ndarray | None = None
     tone: float = 1.0  # exponent van de toonkromme van de camera (V2, v0.10; zie _tone_exponent); 1 = lineair
     tone_params: Tone | None = None  # alles wat er over de camera bekend is (v0.11; tone.py)
     tone_map: np.ndarray | None = None  # g per pixel in de uitsnede van `gray`, bij lokale toonbewerking (v0.11)
@@ -312,10 +314,16 @@ TONE_BLUR_PX = (0.0, 0.35, 0.7, 1.05, 1.5, 2.1, 3.0)
 # voorkennis voor de versterking van de mat vlak buiten de rand (_soft_alpha): pas bij een patroon met meer dan
 # ~5 grijswaarden spreiding telt de gemeten versterking, op een egaal vak blijft het een verschuiving
 MAT_GAIN_PRIOR = 25.0
+# Afgekapte grijswaarden (v0.11): waar de foto op 0 of 255 staat is het echte contrast onbekend, en dan ligt de
+# halve-contrastrand ernaast verkeerd. Een stuk telt als afgekapt als minstens CLIP_FRAC van de pixels in een venster
+# van 5 x 5 px op CLIP_LO of CLIP_HI staat (losse ruispixels niet); alpha uit grijs niet binnen CLIP_REACH px daarvan
+# (de mat vlak buiten de rand wordt tot 7,5 px ver gemeten)
+CLIP_LO, CLIP_HI, CLIP_FRAC, CLIP_REACH = 1, 254, 0.3, 8
 
 
 def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarray, sigma: float,
-                mis: np.ndarray, color=None, reach: int = 5, tone=1.0) -> tuple[np.ndarray, np.ndarray]:
+                mis: np.ndarray, color=None, reach: int = 5, tone=1.0,
+                clipped: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Zachte objectfractie rond de rand (V2, v0.9): per pixel welk deel ervan object is, uit de grijswaarde zelf.
 
     alpha = (foto − mat) / (object − mat), met de voorspelde mat `bgv` en de grijswaarde van het object vlak
@@ -332,7 +340,11 @@ def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarra
 
     `tone`: de exponent van de toonkromme van de camera (_tone_exponent). Alpha is een mengverhouding van licht,
     dus dan in lineair licht: L = T⁻¹(grijs). In de gecodeerde grijswaarden ligt de halve-contrastrand bij een
-    sRGB-kromme 0,2-0,35 px naast de rand, afhankelijk van object en mat (§3j)."""
+    sRGB-kromme 0,2-0,35 px naast de rand, afhankelijk van object en mat (§3j).
+
+    `clipped`: waar de foto afgekapt is, met CLIP_REACH px eromheen (_clip_zone). Daar geen alpha uit grijs: met een
+    afgekapte mat of een afgekapt object is het contrast te klein, en komt de rand te ver naar de andere kant (een
+    wit vak naast een zwart onderdeel dat met lokaal contrast (HDR) boven 255 komt: gaten tot 0,3 mm te groot, §3k)."""
     fg8 = fg.astype(np.uint8)
     k = np.ones((2 * reach + 1, 2 * reach + 1), np.uint8)
     band = (cv2.dilate(fg8, k) > 0) & ~(cv2.erode(fg8, k) > 0) & valid
@@ -382,6 +394,8 @@ def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarra
     a = (o - bgv) / c
     var = (sigma * sigma + mis * mis) * slope * slope / (c * c) + ALPHA_SYS_GRAY ** 2
     ok = band & near & (var < 0.25)
+    if clipped is not None:
+        ok &= ~clipped
     if color is not None:
         usable, d, nvar = color
         lev_c, near_c = level(d, usable)
@@ -398,6 +412,15 @@ def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarra
     alpha = np.where(ok, np.clip(a, -1.0, 2.0), np.nan).astype(np.float16)
     w = np.where(ok, 1.0 / np.maximum(var, 1e-4), 0.0).astype(np.float16)
     return alpha, w
+
+
+def _clip_zone(gray: np.ndarray) -> np.ndarray:
+    """Waar de foto afgekapt is (zie CLIP_FRAC: minstens zoveel pixels in een venster van 5 x 5 op 0 of 255), met
+    CLIP_REACH px eromheen."""
+    at = ((gray <= CLIP_LO) | (gray >= CLIP_HI)).astype(np.float32)
+    area = (cv2.blur(at, (5, 5)) >= CLIP_FRAC).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * CLIP_REACH + 1, 2 * CLIP_REACH + 1))
+    return cv2.dilate(area, k) > 0
 
 
 def _drop_small(mask: np.ndarray, min_area: float) -> np.ndarray:
@@ -814,10 +837,12 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         bgv_ds = bgv if p_ds is p else gain * (a * p_ds + b) + lift * (1.0 - q)
         raw, bg_raw = lum_ds[sl], bgv_ds[sl] + corr[sl]
         tone_sl = tone[sl] if not np.isscalar(tone) else tone
+        clip = _clip_zone(observed[sl])
         out.alpha, out.alpha_w = _soft_alpha(fg[sl], raw, bg_raw, valid[sl], sigma, misreg * gmag[sl],
                                              None if color is None else (color[1][sl], color[3][sl], color[4][sl]),
-                                             tone=tone_sl)
+                                             tone=tone_sl, clipped=clip)
         out.alpha_at = (y0, x0)
+        out.clip = clip
         out.gray = raw.astype(np.float16)
         if not np.isscalar(tone_sl):
             out.tone_map = tone_sl.astype(np.float16)
