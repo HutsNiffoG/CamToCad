@@ -16,7 +16,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - formaat: van ~20 mm (klein plaatje) tot 100–150 mm;
   - vorm: rechthoekig met afgeronde hoeken, een L- of U-vorm, een ring of flens;
   - dikte 3–20 mm, met doorgaande gaten van verschillende diameters.
-  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak.
+  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak. Sinds v0.9 worden verzonken gaten (90°, voor verzonken schroeven) herkend: neem een onderdeel met een paar verzinkingen mee, en meet de diameter van de verzinking aan het bovenvlak (in `maten.json` als `verzinkingen`).
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
 
 ## 2. Meten met de schuifmaat
