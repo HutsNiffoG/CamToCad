@@ -19,7 +19,8 @@ import numpy as np
 
 from . import __version__, cadhelpers
 from .profile import CSK_ANGLE_DEG, Hole, Part2p5D, Profile, Step, dominant_angle
-from .snapping import Snap, countersink_candidates, hole_candidates, length_candidates, radius_candidates, snap
+from .snapping import (Snap, counterbore_candidates, countersink_candidates, hole_candidates, length_candidates,
+                       radius_candidates, snap)
 from .uncertainty import Budget, edge_position
 
 
@@ -285,6 +286,27 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             out.holes[i] = replace(out.holes[i], csk=max(s.value, out.holes[i].d + 0.2))
         snaps.append(s)
 
+    # kamerboringen (v0.10): diameter en diepte van de kamer, per groep gelijke (naar de diameter); gewogen naar het
+    # bewijs rond het gat, zoals de verzinkingen
+    bored = [i for i, h in enumerate(part.holes) if h.cb > 0]
+    for g in _groups([part.holes[i].cb for i in bored], 3.0 * unc.hole_d + 0.5):
+        g = [bored[j] for j in g]
+        wts = np.array([1.0 / amps("gat", i)[0] ** 2 for i in g])
+        wts /= wts.sum()
+        amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[0] ** 2 for i in g])))
+        label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
+        dk = float(wts @ [part.holes[i].cb for i in g])
+        s = do_snap(f"kamerboring Ø ({label})", dk, unc.hole_d / math.sqrt(len(g)) + 0.03, counterbore_candidates(dk),
+                    lambda p, g=g, wts=wts: float(wts @ [p.holes[i].cb for i in g]), "kamerboring", amp)
+        t = float(wts @ [part.holes[i].cb_depth for i in g])
+        st = do_snap(f"kamerboring diepte ({label})", t, unc.height / math.sqrt(len(g)) + 0.05,
+                     counterbore_candidates(t, depth=True),
+                     lambda p, g=g, wts=wts: float(wts @ [p.holes[i].cb_depth for i in g]), "kamerboring diepte", amp)
+        for i in g:
+            out.holes[i] = replace(out.holes[i], cb=max(s.value, out.holes[i].d + 0.4),
+                                   cb_depth=min(st.value, 0.8 * out.height))
+        snaps += [s, st]
+
     def origin(p: Part2p5D, axis: str, at: float) -> float:
         """Datum voor gatposities: het middelpunt, of de datumrand ter hoogte van het gat."""
         if p.outer.kind == "circle":
@@ -413,6 +435,8 @@ def build(part: Part2p5D) -> cq.Workplane:
         model = model.cut(cutter)
         if h.csk > 0:  # verzinking (V16): een kegel vanaf het bovenvlak
             model = model.cut(cadhelpers.verzinking(cq, h.x, h.y, h.d, h.csk, part.height_at(h.x, h.y)))
+        if h.cb > 0:  # kamerboring (v0.10): een cilinder vanaf het bovenvlak
+            model = model.cut(cadhelpers.kamerboring(cq, h.x, h.y, h.cb, h.cb_depth, part.height_at(h.x, h.y)))
     for poly in part.cutouts:
         cutter = cq.Workplane("XY").workplane(offset=-1).polyline([tuple(p) for p in poly]).close() \
             .extrude(part.height + 2)
@@ -575,6 +599,26 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
                 lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dvars.get(round(h.d, 6), _fmt(h.d))}, "
                              f"{kvars[round(h.csk, 6)]}, {_fmt(part.height_at(h.x, h.y))}),")
         lines.append("]")
+    if any(h.cb > 0 for h in part.holes):
+        cvars: dict[tuple[float, float], tuple[str, str]] = {}
+        lines += ["", "# Kamerboringen: diameter en diepte van de kamer"]
+        for h in part.holes:
+            key = (round(h.cb, 6), round(h.cb_depth, 6))
+            if h.cb > 0 and key not in cvars:
+                k = len(cvars) + 1
+                cvars[key] = (f"kamer_d{k}", f"kamer_diepte{k}")
+                rec_d = next((s for s in snaps if s.name.startswith("kamerboring Ø") and abs(s.value - h.cb) < 1e-6),
+                             None)
+                rec_t = next((s for s in snaps if s.name.startswith("kamerboring diepte")
+                              and abs(s.value - h.cb_depth) < 1e-6), None)
+                lines.append(f"{cvars[key][0]} = {_fmt(h.cb)}{_comment(rec_d)}")
+                lines.append(f"{cvars[key][1]} = {_fmt(h.cb_depth)}{_comment(rec_t)}")
+        lines.append("kamerboringen = [  # (x, y, diameter van de kamer, diepte, hoogte van het bovenvlak)")
+        for h in part.holes:
+            if h.cb > 0:
+                dv, tv = cvars[(round(h.cb, 6), round(h.cb_depth, 6))]
+                lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dv}, {tv}, {_fmt(part.height_at(h.x, h.y))}),")
+        lines.append("]")
     if part.slots:
         lines += ["", "# Sleuven en rechthoekige uitsparingen"]
         rows = []
@@ -619,6 +663,9 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
     if any(h.csk > 0 for h in part.holes):
         lines += ["for x, y, d, dk, boven in verzinkingen:",
                   f"    model = model.cut(verzinking(cq, x, y, d, dk, boven, {_fmt(CSK_ANGLE_DEG)}))"]
+    if any(h.cb > 0 for h in part.holes):
+        lines += ["for x, y, dk, diepte, boven in kamerboringen:",
+                  "    model = model.cut(kamerboring(cq, x, y, dk, diepte, boven))"]
     if part.cutouts:
         lines += ["for punten in uitsparingen:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).polyline(punten).close()"

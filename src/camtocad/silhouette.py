@@ -36,6 +36,7 @@ class ViewData:
     alpha_w: np.ndarray | None = field(default=None, repr=False, compare=False)
     # grijswaarden in de ROI (NaN buiten de uitsnede van het masker): randen binnen het object (V16)
     gray: np.ndarray | None = field(default=None, repr=False, compare=False)
+    tone: float = 1.0  # toonkromme van de camera in deze foto (masks._tone_exponent), voor `gray`
 
     def sums(self) -> tuple:
         """Per rij de cumulatieve aantallen zekere-mat-, onbekende en objectpixels (met een 0-kolom vooraan),
@@ -86,6 +87,7 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
             vd.alpha_w = _crop(m.alpha_w, m.alpha_at, y0, y1, x0, x1, 0.0)
         if m.gray is not None:
             vd.gray = _crop(m.gray, m.alpha_at, y0, y1, x0, x1, np.nan)
+            vd.tone = m.tone
         out.append(vd)
     return out
 
@@ -252,24 +254,27 @@ def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np
         return _EMPTY, _EMPTY, _EMPTY
     solid = _union(*(np.concatenate(parts) for parts in zip(*faces)))
     # doorkijk: binnen de projectie van zowel de boven- als de onderrand van een gat; bij een verzinking (V16) is
-    # de bovenrand van het doorgaande gat de onderkant van de kegel (de kegel zelf wordt naar boven toe breder)
+    # de bovenrand van het doorgaande gat de onderkant van de kegel (de kegel zelf wordt naar boven toe breder), bij
+    # een kamerboring de bodem van de kamer, en dan moet een kijkstraal ook door de kamer zelf (haar rand aan het
+    # bovenvlak; in schuine foto's begrenst die de doorkijk aan de kant van de camera)
     rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
-    below = [hl.csk_depth for hl in part.holes]
+    below = [hl.bore_depth for hl in part.holes]
+    chamber = [circle_polygon((hl.x, hl.y), hl.cb / 2, 48) if hl.cb > 0 else None for hl in part.holes]
     rings += list(part.cutouts)
     rings += [s.outline() for s in part.slots]
     through = []
     for k, r2 in enumerate(rings):
-        m2 = len(r2)
         c2 = r2.mean(axis=0)
         z_top = part.height_at(float(c2[0]), float(c2[1])) if part.steps else part.height
-        if k < len(below):
-            z_top -= below[k]
-        uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, z_top)]),
-                                    np.column_stack([r2, np.zeros(m2)])]), v.pose, K)
+        loops = [(r2, z_top - (below[k] if k < len(below) else 0.0)), (r2, 0.0)]
+        if k < len(chamber) and chamber[k] is not None:
+            loops.append((chamber[k], z_top))
+        uv2, _ = project(np.vstack([np.column_stack([r, np.full(len(r), z)]) for r, z in loops]), v.pose, K)
         uv2 = uv2 - off
-        rt, a, b, cov = _cover([_scan_polys([uv2[:m2]], h, w), _scan_polys([uv2[m2:]], h, w)])
-        both = (cov[:, 0] > 0) & (cov[:, 1] > 0)
-        through.append((rt[both], a[both], b[both]))
+        cuts = np.cumsum([0] + [len(r) for r, _ in loops])
+        rt, a, b, cov = _cover([_scan_polys([uv2[cuts[j]:cuts[j + 1]]], h, w) for j in range(len(loops))])
+        inside = np.all(cov > 0, axis=1)
+        through.append((rt[inside], a[inside], b[inside]))
     if not through:
         return solid
     rt, a, b, cov = _cover([solid, tuple(np.concatenate(p) for p in zip(*through))])
@@ -394,6 +399,8 @@ def _params(part: Part2p5D) -> list[Param]:
         ps += [Param(f"hx{i}", 0.3, 0.01), Param(f"hy{i}", 0.3, 0.01), Param(f"hd{i}", 0.3, 0.01, 0.3)]
         if hl.csk > 0:  # verzinking (V16): de diameter aan het bovenvlak
             ps.append(Param(f"hk{i}", 0.3, 0.01, 0.5))
+        if hl.cb > 0:  # kamerboring (V16, v0.10): diameter en diepte van de kamer
+            ps += [Param(f"hc{i}", 0.3, 0.01, 0.5), Param(f"hz{i}", 0.4, 0.02, 0.2)]
     for i, s in enumerate(part.slots):  # sleuven en rechthoekige uitsparingen (V15)
         ps += [Param(f"sx{i}", 0.3, 0.01), Param(f"sy{i}", 0.3, 0.01), Param(f"sl{i}", 0.3, 0.01, 0.5),
                Param(f"sw{i}", 0.3, 0.01, 0.5), Param(f"sa{i}", math.radians(1.0), math.radians(0.02))]
@@ -437,7 +444,7 @@ def _get(part: Part2p5D, base_angles: np.ndarray, name: str) -> float:
         return {"sx": s.x, "sy": s.y, "sl": s.length, "sw": s.width, "sa": s.angle, "sr": s.r}[name[:2]]
     i = int(name[2:])
     h = part.holes[i]
-    return {"hx": h.x, "hy": h.y, "hd": h.d, "hk": h.csk}[name[:2]]
+    return {"hx": h.x, "hy": h.y, "hd": h.d, "hk": h.csk, "hc": h.cb, "hz": h.cb_depth}[name[:2]]
 
 
 def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Part2p5D:
@@ -469,7 +476,8 @@ def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Pa
         p.slots[i] = replace(p.slots[i], **{field_name: value})
     else:
         i = int(name[2:])
-        p.holes[i] = replace(p.holes[i], **{{"hx": "x", "hy": "y", "hd": "d", "hk": "csk"}[name[:2]]: value})
+        p.holes[i] = replace(p.holes[i], **{{"hx": "x", "hy": "y", "hd": "d", "hk": "csk", "hc": "cb",
+                                              "hz": "cb_depth"}[name[:2]]: value})
     return p
 
 

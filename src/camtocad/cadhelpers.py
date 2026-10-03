@@ -91,6 +91,12 @@ def verzinking(cq, x, y, d, dk, boven, hoek=90.0):
             .workplane(offset=diepte + 1).circle(dk / 2 + t).loft())
 
 
+def kamerboring(cq, x, y, dk, diepte, boven):
+    """Kamer van een kamerboring rond het gat (x, y): een cilinder met diameter `dk`, `diepte` diep onder het
+    bovenvlak (hoogte `boven`); 1 mm boven het bovenvlak doorgetrokken (geen samenvallende vlakken)."""
+    return cq.Workplane("XY").workplane(offset=boven - diepte).center(x, y).circle(dk / 2).extrude(diepte + 1)
+
+
 def trede(cq, model, x, y, hoek, hoogte, totaal):
     """Trede: voorbij de lijn door (x, y), in de richting `hoek` (graden, 0 = +X), is het deel maar `hoogte`
     hoog; `totaal` is de hoogte van het deel."""

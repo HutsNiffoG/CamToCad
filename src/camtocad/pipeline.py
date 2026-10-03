@@ -21,8 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import (__version__, cadmodel, calib, countersink, debug, edgefit, holes, hull, initial, masks, placement,
-               preflight, prismcheck, profile, report, silhouette, uncertainty)
+from . import (__version__, cadmodel, calib, counterbore, countersink, debug, edgefit, holes, hull, initial, masks,
+               placement, preflight, prismcheck, profile, report, silhouette, uncertainty)
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
@@ -262,8 +262,8 @@ def _effective_uncertainty(unc, snaps: list, scale_rel: float):
     def is_step(n: str, what: str) -> bool:
         return n.startswith("trede ") and n.endswith(what)
 
-    def is_inner_size(n: str) -> bool:  # gaten, verzinkingen, sleuven en uitsparingen: maat van een binnenvorm
-        return n.startswith(("gat Ø", "verzinking Ø")) or (n.startswith(("sleuf ", "uitsparing "))
+    def is_inner_size(n: str) -> bool:  # gaten, verzinkingen, kamers, sleuven en uitsparingen: binnenvormen
+        return n.startswith(("gat Ø", "verzinking Ø", "kamerboring Ø")) or (n.startswith(("sleuf ", "uitsparing "))
                                                            and n.endswith(("breedte", "hartafstand", "lengte")))
 
     return cadmodel.Uncertainty(
@@ -752,6 +752,34 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                                                       f"{profile.CSK_ANGLE_DEG:.0f}°" for i in sorted(sunk)))
             else:
                 log(f"verzinking niet gebruikt: {ef_csk.note}")
+    # V16 (v0.10): door een gat met een kamerboring kijk je in de schuine foto's veel verder dan door een gewoon gat
+    # (het doorgaande gat is korter). Per gat de silhouetten met en zonder kamer vergeleken (counterbore.detect), dan
+    # als model, en de randfit opnieuw
+    found_on = ef.part if ef.accepted else part
+    if found_on.holes:
+        notes = []
+        bored = counterbore.detect(found_on, cam.K, vd, log=notes.append)
+        if notes:
+            diag["kamerboringen"] = notes
+        trial = found_on.copy()
+        for i, (dk, t, d) in bored.items():
+            trial.holes[i] = replace(trial.holes[i], d=d, csk=0.0, cb=dk, cb_depth=t)
+        if bored and trial.is_valid():
+            t_fit = time.time()
+            ef_cb = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            # de diepte uit het silhouet staat soms meer dan het vertrouwensgebied verkeerd (een gat met weinig
+            # bewijs): stuit alleen een kamer op die grens, dan vanaf daar verder (hooguit twee keer)
+            for _ in range(2):
+                edge = ef_cb.extra.get("at_edge", [])
+                if ef_cb.accepted or not edge or not all(n.startswith(("hc", "hz")) for n in edge):
+                    break
+                ef_cb = edgefit.fit(ef_cb.extra["moved"], cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            if ef_cb.accepted:
+                ef, part = ef_cb, ef_cb.part
+                log("kamerboring herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].cb:.2f} x "
+                                                      f"{ef.part.holes[i].cb_depth:.2f} diep" for i in sorted(bored)))
+            else:
+                log(f"kamerboring niet gebruikt: {ef_cb.note}")
     if ef.accepted:
         part = ef.part
         energy = silhouette.energy(part, cam.K, vd)
@@ -852,7 +880,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         "objectklasse": "2,5D (extrusie met doorgaande gaten)" + (
             f", bovenrand rondom {'afgeschuind' if te.kind == 'afschuining' else 'afgerond'}" if te else "")
         + (f", {len(snapped.steps)} trede" if snapped.steps else "")
-        + (f", {n_sunk} verzonken gat(en)" if (n_sunk := sum(h.csk > 0 for h in snapped.holes)) else ""),
+        + (f", {n_sunk} verzonken gat(en)" if (n_sunk := sum(h.csk > 0 for h in snapped.holes)) else "")
+        + (f", {n_cb} kamerboring(en)" if (n_cb := sum(h.cb > 0 for h in snapped.holes)) else ""),
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",

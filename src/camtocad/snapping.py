@@ -27,6 +27,10 @@ STANDARD_RADII = (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 
 # bovenvlak (V16)
 DIN_74_A = {"M1.6": 3.7, "M2": 4.6, "M2.5": 5.7, "M3": 6.5, "M3.5": 7.6, "M4": 8.6, "M5": 10.4, "M6": 12.4,
             "M8": 16.4, "M10": 20.4}
+# DIN 974-1 (reeks 1) en DIN 974-2: kamerboringen voor cilinderkopschroeven (ISO 4762): diameter en diepte van de
+# kamer (v0.10)
+DIN_974 = {"M3": (6.5, 3.4), "M4": (8.0, 4.4), "M5": (10.0, 5.4), "M6": (11.0, 6.4), "M8": (15.0, 8.6),
+           "M10": (18.0, 10.6), "M12": (20.0, 12.6), "M16": (26.0, 16.6)}
 
 
 @dataclass
@@ -83,6 +87,14 @@ def hole_candidates(d: float) -> list[tuple[float, float, str]]:
 def countersink_candidates(d: float) -> list[tuple[float, float, str]]:
     """Diameter van een verzinking (V16): de DIN 74-1-maten, anders hele en halve mm."""
     out = [(v, 0.6, f"DIN 74-1 A verzinking {size}") for size, v in DIN_74_A.items() if abs(v - d) < 2.0]
+    return out + [(c, p * 0.6, r) for c, p, r in length_candidates(d)]
+
+
+def counterbore_candidates(d: float, depth: bool = False) -> list[tuple[float, float, str]]:
+    """Diameter (of met `depth` de diepte) van een kamerboring (v0.10): de DIN 974-maten, anders hele en halve
+    mm."""
+    out = [(v[1 if depth else 0], 0.6, f"DIN 974 kamerboring {size}") for size, v in DIN_974.items()
+           if abs(v[1 if depth else 0] - d) < 2.0]
     return out + [(c, p * 0.6, r) for c, p, r in length_candidates(d)]
 
 

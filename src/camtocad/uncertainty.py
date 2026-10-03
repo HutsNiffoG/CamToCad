@@ -32,7 +32,10 @@ SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afrondi
           # net iets anders, en dat trekt ook de buitenmaten mee: tot 0,08 mm in de stresstests (§3g)
           "bovenrand": 0.40, "hoogte bovenrand": 0.40, "lengte bovenrand": 0.20,
           # een verzinking (V16): de rand tussen kegel en bovenvlak in de grijswaarden, niet in het silhouet
-          "verzinking": 0.40}
+          "verzinking": 0.40,
+          # een kamerboring (v0.10): de rand van de kamer in de grijswaarden en de doorkijk in schuine foto's; de
+          # diepte alleen uit die doorkijk (waar het doorgaande gat begint)
+          "kamerboring": 0.40, "kamerboring diepte": 0.60}
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 
 

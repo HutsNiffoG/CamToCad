@@ -158,7 +158,8 @@ def layout(part: Part2p5D, density: float = DENSITY) -> dict:
     o = part.outer
     out = {"holes": [max(16, int(math.pi * h.d * density)) for h in part.holes],
            "slots": [_polygon_layout(s.corner_table(), density, 0) for s in part.slots],
-           "csk": [max(24, int(math.pi * h.csk * density)) if h.csk > 0 else 0 for h in part.holes]}
+           "csk": [max(24, int(math.pi * h.csk * density)) if h.csk > 0 else 0 for h in part.holes],
+           "cb": [max(24, int(math.pi * h.cb * density)) if h.cb > 0 else 0 for h in part.holes]}
     if o.kind == "circle":
         out["circle"] = max(48, int(2 * math.pi * o.radius * density))
     else:
@@ -290,13 +291,27 @@ def rims(part: Part2p5D, lay: dict) -> Rims:
                 for k, st in enumerate(part.steps):
                     zt[cells == k] = st.height
             start = no
-            for h, nh in zip(part.holes, lay["holes"]):  # verzinking (V16): het doorgaande gat eindigt eronder
-                zt[start:start + nh] -= h.csk_depth
+            for h, nh in zip(part.holes, lay["holes"]):  # verzinking, kamerboring (V16): het gat eindigt eronder
+                zt[start:start + nh] -= h.bore_depth
                 start += nh
             P.append(np.column_stack([np.vstack([q, p2[no:]]), zt]))
             point.append(np.arange(n))
             level.append(np.full(n, j))
             us.append(np.concatenate([u, use[no:]]))
+    # kamerboring (V16, v0.10): de rand van de kamer aan het bovenvlak, als extra niveau bij de punten van het gat. In
+    # schuine foto's begrenst die de doorkijk aan de kant van de camera, als hij verder in het gat ligt dan de
+    # bodem van de kamer (boundary_status kiest het niveau dat in beeld het verst naar buiten ligt)
+    start = no
+    for h, nh in zip(part.holes, lay["holes"]):
+        if h.cb > 0:
+            a = (np.arange(nh) + 0.5) / nh * 2 * math.pi
+            z = part.height_at(h.x, h.y) if part.steps else part.height
+            q = np.array([h.x, h.y]) + h.cb / 2 * np.column_stack([np.cos(a), np.sin(a)])
+            P.append(np.column_stack([q, np.full(nh, z)]))
+            point.append(np.arange(start, start + nh))
+            level.append(np.full(nh, len(levels)))
+            us.append(np.ones(nh, bool))
+        start += nh
     for st, ls in zip(part.steps, lay.get("steps", [])):
         q = part.step_crossings(st)
         if q is None:  # ongeldig model (de fit geeft dan een strafwaarde): punten op één plek
@@ -318,46 +333,80 @@ def points3d(part: Part2p5D, lay: dict) -> np.ndarray:
     return rims(part, lay).P
 
 
-def csk_points(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Randen binnen het object (V16): punten op de bovenrand van elke verzinking (3D, op het bovenvlak), hun
-    richting naar buiten (2D, radiaal) en per punt het gat."""
-    pts, dirs, owner = [], [], []
-    for i, (h, n) in enumerate(zip(part.holes, lay.get("csk", []))):
+def inner_edges(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Randen binnen het object (V16): punten (3D), hun richting naar buiten (2D), het andere einde van de band
+    ernaast (3D: hoe ver er in beeld gezocht mag worden) en de normaal van die band (3D: is hij in een foto te zien).
+
+    * De bovenrand van een verzinking: de band is de kegel, tot het doorgaande gat eronder.
+    * De bovenrand van een kamerboring: de band is de wand van de kamer, tot haar bodem; alleen de wand aan de
+      overkant is te zien (v0.10).
+    * De binnenrand van een afschuining van de bovenrand: de band is de afschuining, tot de schouder. In de foto's
+      van boven ligt die rand binnen het silhouet, maar het schuine vlak is anders belicht dan het bovenvlak.
+      (Een afronding gaat vloeiend over in het bovenvlak: daar is geen scherpe rand.)
+    Het aantal punten ligt vast bij een gegeven indeling (`lay`), ook als een afronding bij de afschuining scherp
+    wordt (dan herhaalde punten); measure_inner slaat punten zonder bruikbare rand over."""
+    s2 = math.sqrt(0.5)
+    pts, dirs, far, band = [], [], [], []
+    te = part.top_edge
+    if te is not None and te.kind == "afschuining" and not part.steps:
+        p2, nrm, _ = points2d(part, lay)
+        no = outer_count(lay)
+        q, _ = _outer_points(part, lay, te.size)
+        pts.append(np.column_stack([q, np.full(no, part.height)]))
+        dirs.append(nrm[:no])
+        far.append(np.column_stack([p2[:no], np.full(no, part.height - te.size)]))
+        band.append(np.column_stack([s2 * nrm[:no], np.full(no, s2)]))  # het schuine vlak kijkt naar buiten
+    for h, n in zip(part.holes, lay.get("csk", [])):
         if n == 0 or h.csk <= 0:
             continue
         a = (np.arange(n) + 0.5) / n * 2 * math.pi
         d = np.column_stack([np.cos(a), np.sin(a)])
         z = part.height_at(h.x, h.y) if part.steps else part.height
-        pts.append(np.column_stack([h.x + h.csk / 2 * d[:, 0], h.y + h.csk / 2 * d[:, 1], np.full(n, z)]))
+        c = np.array([h.x, h.y])
+        pts.append(np.column_stack([c + h.csk / 2 * d, np.full(n, z)]))
         dirs.append(d)
-        owner.append(np.full(n, i))
+        far.append(np.column_stack([c + h.d / 2 * d, np.full(n, z - h.csk_depth)]))
+        band.append(np.column_stack([-s2 * d, np.full(n, s2)]))  # de kegel kijkt naar de as
+    for h, n in zip(part.holes, lay.get("cb", [])):
+        if n == 0 or h.cb <= 0:
+            continue
+        a = (np.arange(n) + 0.5) / n * 2 * math.pi
+        d = np.column_stack([np.cos(a), np.sin(a)])
+        z = part.height_at(h.x, h.y) if part.steps else part.height
+        c = np.array([h.x, h.y])
+        pts.append(np.column_stack([c + h.cb / 2 * d, np.full(n, z)]))
+        dirs.append(d)
+        far.append(np.column_stack([c + h.cb / 2 * d, np.full(n, z - h.cb_depth)]))
+        band.append(np.column_stack([-d, np.zeros(n)]))  # de wand kijkt naar de as
     if not pts:
-        return np.zeros((0, 3)), np.zeros((0, 2)), np.zeros(0, int)
-    return np.vstack(pts), np.vstack(dirs), np.concatenate(owner)
+        e3 = np.zeros((0, 3))
+        return e3, np.zeros((0, 2)), e3, e3
+    return np.vstack(pts), np.vstack(dirs), np.vstack(far), np.vstack(band)
+
+
+def has_inner_edges(part: Part2p5D) -> bool:
+    return any(h.csk > 0 or h.cb > 0 for h in part.holes) or (
+        part.top_edge is not None and part.top_edge.kind == "afschuining" and not part.steps)
 
 
 def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
                   search_px: float = INNER_SEARCH_PX) -> list[tuple]:
     """Waar liggen de randen binnen het object in de foto's (V16)? Per foto (puntindex, gemeten randplaats in de ROI,
-    normaal in beeld, gewicht), voor de punten van csk_points.
+    normaal in beeld, gewicht), voor de punten van inner_edges.
 
-    Een verzinking is in de grijswaarden een ring: de kegel staat schuin en is dus anders belicht dan het bovenvlak.
-    Per punt het profiel langs de normaal (in beeld), tot `search_px` en hooguit 80% van de breedte van de kegel in
-    beeld aan beide kanten; de rand ligt waar het profiel halverwege de kegel en het bovenvlak is, het dichtst bij
-    het model. Zonder contrast (INNER_MIN_CONTRAST grijswaarden) of met een stuk zonder grijswaarden geen meting."""
-    P, D, owner = csk_points(part, lay)
+    Een verzinking of afschuining is in de grijswaarden een band naast het bovenvlak: hij staat schuin en is dus
+    anders belicht. Per punt het profiel langs de normaal (in beeld), tot `search_px` en hooguit 80% van de
+    breedte van de band in beeld aan beide kanten; de rand ligt waar het profiel halverwege de band en het
+    bovenvlak is, het dichtst bij het model. Alleen waar de band naar de camera kijkt. Zonder contrast
+    (INNER_MIN_CONTRAST grijswaarden) of met een stuk zonder grijswaarden geen meting."""
+    P, D, Q, B = inner_edges(part, lay)
     empty = (np.zeros(0, int), np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0))
     if not len(P):
         return [empty for _ in vd]
-    Q = P.copy()  # de onderkant van de kegel langs dezelfde richting: daar begint het doorgaande gat
-    for i in np.unique(owner):
-        h, sel = part.holes[i], owner == i
-        Q[sel, :2] = np.array([h.x, h.y]) + h.d / 2 * D[sel]
-        Q[sel, 2] = P[sel, 2] - h.csk_depth
     s = np.arange(-search_px, search_px + 1e-9, 0.25)
     out = []
     for v in vd:
-        g = getattr(v, "gray", None)
+        g, tone = getattr(v, "gray", None), getattr(v, "tone", 1.0)
         if g is None:
             out.append(empty)
             continue
@@ -367,11 +416,13 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
         uvq, _ = project(Q, v.pose, K)
         nrm = uv1 - uv0
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+        width = np.abs(np.sum((uv0 - uvq) * nrm, axis=1))  # breedte van de band in beeld, langs de normaal
         uv0 = uv0 - off
-        reach = np.minimum(search_px, 0.8 * np.sum((uv0 + off - uvq) * nrm, axis=1))
+        reach = np.minimum(search_px, 0.8 * width)
+        facing = np.sum((v.pose.center - P) * B, axis=1) > 0
         hh, ww = g.shape
         m = search_px + 1
-        ok = (z0 > 0) & (reach >= 2.0) & (uv0[:, 0] > m) & (uv0[:, 1] > m) & (uv0[:, 0] < ww - m - 1) \
+        ok = (z0 > 0) & facing & (reach >= 2.0) & (uv0[:, 0] > m) & (uv0[:, 1] > m) & (uv0[:, 0] < ww - m - 1) \
             & (uv0[:, 1] < hh - m - 1)
         idx = np.flatnonzero(ok)
         if not len(idx):
@@ -391,7 +442,10 @@ def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
             c = l_in - l_out
             if abs(c) < INNER_MIN_CONTRAST:
                 continue
-            a = (p - l_out) / c - 0.5
+            if tone != 1.0:  # halverwege in lineair licht (toonkromme van de camera, V2)
+                p, l_out, l_in = (255.0 * np.clip(np.asarray(x) / 255.0, 1e-6, 1.5) ** (1.0 / tone)
+                                  for x in (p, l_out, l_in))
+            a = (p - l_out) / (l_in - l_out) - 0.5
             cross = np.flatnonzero(span[:-1] & span[1:] & (np.sign(a[:-1]) != np.sign(a[1:])))
             if not len(cross):
                 continue
@@ -613,7 +667,7 @@ class _Problem:
             self.lay["cells"] = cell_of(part, points2d(part, self.lay)[0])
         self.status = boundary_status(part, self.K, self.vd, self.lay)
         # randen binnen het object: per ronde gemeten waar ze in de foto's liggen, dan als vaste doelen (V16)
-        self.inner = measure_inner(part, self.K, self.vd, self.lay) if any(self.lay.get("csk", [])) else []
+        self.inner = measure_inner(part, self.K, self.vd, self.lay) if has_inner_edges(part) else []
 
     def n_residuals(self, i: int) -> int:
         """Aantal residuen van foto i: punten op de silhouetrand en gemeten randen binnen het object."""
@@ -630,7 +684,7 @@ class _Problem:
         if not p.is_valid():
             return np.full(n_on, 20.0)
         P = points3d(p, self.lay)
-        P_in = csk_points(p, self.lay)[0] if self.inner else None
+        P_in = inner_edges(p, self.lay)[0] if self.inner else None
         out = []
         for i in views:
             v, (sf, band), on = self.vd[i], self.fields[i], self.status[i]
@@ -653,7 +707,8 @@ class _Problem:
         for p, v in zip(self.params, x0):
             d = (math.radians(TRUST_DEG) if p.name == "rot"
                  else math.radians(TRUST_SLOT_DEG) if p.name.startswith(("sa", "ta"))
-                 else TRUST_TOP_MM if p.name == "top" else TRUST_STEP_MM if p.name.startswith("to") else TRUST_MM)
+                 else TRUST_TOP_MM if p.name == "top" or p.name.startswith(("hc", "hz"))
+                 else TRUST_STEP_MM if p.name.startswith("to") else TRUST_MM)
             up = self.fillet_trust if p.name.startswith(("fil", "sr")) else d
             lo.append(max(v - d, p.lower))
             hi.append(v + up)
@@ -676,9 +731,11 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     ev = evidence(prob, prob.x_of(part))
     frozen_invalid = list(prob.frozen)
     weak = [(kind, i, names) for (kind, i, _, names, _, _) in features(part, prob.lay) if ev[(kind, i)].weak]
-    # met het gat ook zijn verzinking (V16): wat er rond zo'n gat in de foto's te zien is, is te zwak om op te fitten
+    # met het gat ook zijn verzinking of kamerboring (V16): wat er rond zo'n gat in de foto's te zien is, is te zwak
+    # om op te fitten
     prob.freeze([nm for kind, i, names in weak for nm in names
-                 + ([f"hk{i}"] if kind == "gat" and part.holes[i].csk > 0 else [])])
+                 + ([f"hk{i}"] if kind == "gat" and part.holes[i].csk > 0 else [])
+                 + ([f"hc{i}", f"hz{i}"] if kind == "gat" and part.holes[i].cb > 0 else [])])
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None
@@ -702,6 +759,8 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     if at_edge:
         ef.part, ef.accepted = part, False
         ef.note = "randfit liep tegen de grens van het vertrouwensgebied (" + ", ".join(names[i] for i in at_edge) + ")"
+        ef.extra["at_edge"] = [names[i] for i in at_edge]
+        ef.extra["moved"] = cur  # de oplossing op die grens (om vanaf daar verder te zoeken, zie pipeline)
     # het bewijs bij het resultaat (voor de U95 per maat); zonder randfit dat bij de pixelfit
     ef.extra["evidence"] = evidence(prob, res.x) if ef.accepted else ev
     if log:

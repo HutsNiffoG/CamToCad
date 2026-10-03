@@ -36,6 +36,8 @@ class Hole:
     y: float
     d: float
     csk: float = 0.0  # verzinking (V16): diameter aan het bovenvlak, kegel onder CSK_ANGLE_DEG; 0 = geen
+    cb: float = 0.0  # kamerboring (V16, v0.10): diameter van de kamer aan het bovenvlak; 0 = geen
+    cb_depth: float = 0.0  # diepte van de kamer onder het bovenvlak (vlakke bodem)
 
     @property
     def csk_depth(self) -> float:
@@ -43,6 +45,16 @@ class Hole:
         if self.csk <= self.d:
             return 0.0
         return (self.csk - self.d) / 2 / math.tan(math.radians(CSK_ANGLE_DEG / 2))
+
+    @property
+    def bore_depth(self) -> float:
+        """Waar het doorgaande gat begint, onder het bovenvlak (mm): onder een verzinking of een kamerboring."""
+        return self.cb_depth if self.cb > 0 else self.csk_depth
+
+    @property
+    def top_d(self) -> float:
+        """Diameter van het gat aan het bovenvlak."""
+        return max(self.d, self.csk, self.cb)
 
 
 @dataclass
@@ -330,8 +342,11 @@ class Part2p5D:
     def is_valid(self) -> bool:
         if not ((self.outer.kind != "polygon" or self.outer.is_valid()) and all(s.is_valid() for s in self.slots)):
             return False
-        # een verzinking (V16) is breder dan het gat en laat er een stuk doorgaand gat onder over
+        # een verzinking of kamerboring (V16) is breder dan het gat en laat er een stuk doorgaand gat onder over
         if any(h.csk > 0 and not (h.csk > h.d + 0.1 and h.csk_depth < 0.8 * self.height) for h in self.holes):
+            return False
+        if any(h.cb > 0 and not (h.csk == 0 and h.cb > h.d + 0.2 and 0.2 < h.cb_depth < 0.85 * self.height)
+               for h in self.holes):
             return False
         if self.top_edge is not None:
             s = self.top_edge.size
@@ -361,7 +376,8 @@ class Part2p5D:
         o = out.outer
         o.center, o.offsets, o.fillets, o.radius = o.center * factor, o.offsets * factor, o.fillets * factor, \
             o.radius * factor
-        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor, h.csk * factor) for h in self.holes]
+        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor, h.csk * factor, h.cb * factor, h.cb_depth * factor)
+                     for h in self.holes]
         out.cutouts = [c * factor for c in self.cutouts]
         out.slots = [s.scaled(factor) for s in self.slots]
         if self.top_edge is not None:
@@ -378,7 +394,7 @@ class Part2p5D:
         out = self.copy()
         out.outer.center = R @ self.outer.center + shift
         out.outer.angles = self.outer.angles + angle
-        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d, h.csk) for h in self.holes]
+        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d, h.csk, h.cb, h.cb_depth) for h in self.holes]
         out.cutouts = [(R @ cu.T).T + shift for cu in self.cutouts]
         out.slots = []
         for s in self.slots:
@@ -400,7 +416,9 @@ class Part2p5D:
                        "toelichting": "per hoek (x, y, afrondingsstraal), tegen de klok in"}
         return {"hoogte": float(self.height), "contour": contour,
                 "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d),
-                           **({"verzinking_d": float(h.csk), "verzinking_hoek": CSK_ANGLE_DEG} if h.csk > 0 else {})}
+                           **({"verzinking_d": float(h.csk), "verzinking_hoek": CSK_ANGLE_DEG} if h.csk > 0 else {}),
+                           **({"kamerboring_d": float(h.cb), "kamerboring_diepte": float(h.cb_depth)}
+                              if h.cb > 0 else {})}
                           for h in self.holes],
                 "sleuven": [s.to_dict() for s in self.slots],
                 "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts],

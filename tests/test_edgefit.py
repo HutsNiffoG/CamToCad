@@ -418,3 +418,74 @@ def test_a_countersink_is_found_in_the_top_views_and_fitted_on_its_inner_edge(pl
     for v in vd:  # zonder ring: een gewoon gat
         v.gray = top_face_gray(truth, v, 0.0)
     assert countersink.detect(truth, K, vd) == {}
+
+
+def test_the_inner_edge_of_a_top_chamfer_is_fitted_from_the_top_views(plate_scan):
+    """V16 (v0.10): de binnenrand van een afschuining van de bovenrand ligt in de foto's van boven binnen het silhouet,
+    maar het schuine vlak is anders belicht dan het bovenvlak. Met die rand komt de maat van de afschuining uit de
+    randfit, ook vanuit een startmodel dat 0,25 mm verkeerd staat."""
+    from camtocad.profile import TopEdge
+
+    truth = plate(hole=False)
+    truth.top_edge = TopEdge("afschuining", 1.0)
+    vd = []
+    for v in plate_scan:
+        nv = silhouette.ViewData(v.pose, exact_mask(truth, v), None, None, v.x0, v.y0)
+        nv.bg = ~cv2.dilate(nv.fg.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        hh, ww = nv.fg.shape
+        u, w_ = np.meshgrid(np.arange(ww) + v.x0, np.arange(hh) + v.y0)
+        rays = np.linalg.inv(K) @ np.vstack([u.ravel(), w_.ravel(), np.ones(u.size)])
+        d, c = v.pose.R.T @ rays, -v.pose.R.T @ v.pose.t
+        s = (truth.height - c[2]) / d[2]
+        X, Y = (c[0] + s * d[0]).reshape(hh, ww), (c[1] + s * d[1]).reshape(hh, ww)
+        top = truth.outer.inset(1.0)  # het bovenvlak: 1 mm binnen de buitencontour
+        inside = np.all([(np.cos(a) * (X - top.center[0]) + np.sin(a) * (Y - top.center[1])) <= off
+                         for a, off in zip(top.angles, top.offsets)], axis=0)
+        gray = np.where(nv.fg, np.where(inside, 150.0, 90.0), 200.0)
+        nv.gray = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.0)
+        vd.append(nv)
+    start = truth.copy()
+    start.top_edge = TopEdge("afschuining", 0.75)
+    start.height = truth.height - 0.25 + 0.0  # zelfde schouder (de pixelfit zet die goed)
+    ef = edgefit.fit(start, K, vd)
+    assert ef.accepted, ef.note
+    assert ef.part.top_edge.size == pytest.approx(1.0, abs=0.08)
+    assert ef.part.height == pytest.approx(truth.height, abs=0.08)
+
+
+# ----------------------------------------------------------------------------- kamerboringen (v0.10)
+
+def test_a_counterbore_is_found_from_the_silhouettes_and_fitted(plate_scan):
+    """Een kamer Ø10 x 3 diep in de plaat: door het gat kijk je in de schuine foto's veel verder dan door een gewoon
+    gat. counterbore.detect vindt haar uit de silhouetten, de randfit zet diameter en diepte; een gewoon gat krijgt
+    geen kamer."""
+    from camtocad import counterbore
+
+    truth = plate()
+    truth.holes[0] = Hole(110.0, 80.0, 6.0, cb=10.0, cb_depth=3.0)
+    poses = []
+    for k in range(8):  # ~51° en ~70° boven de mat, en drie van boven
+        az = 2 * np.pi * (k + 0.3) / 8
+        poses.append(look_at([120 + 200 * np.cos(az), 80 + 200 * np.sin(az), 250.0], [120.0, 80.0, 0.0]))
+        poses.append(look_at([120 + 100 * np.cos(az + 0.4), 80 + 100 * np.sin(az + 0.4), 280.0], [120.0, 80.0, 0.0]))
+    for k in range(3):
+        c = np.array([112.0 + 8 * k, 76.0 + 6 * (k % 2), 320.0])
+        poses.append(look_at(c, [c[0], c[1], 0.0]))
+    empty = np.zeros((H, W), bool)
+    views = [(Pose(f"v{k}", R, t), ViewMasks(fg=empty, bg=~empty, valid=~empty)) for k, (R, t) in enumerate(poses)]
+    vd = silhouette.prepare(views, K, truth)
+    for v in vd:
+        v.fg = exact_mask(truth, v)
+        v.bg = ~v.fg
+    found = counterbore.detect(plate(), K, vd)
+    assert list(found) == [0]
+    dk, t, d = found[0]
+    assert dk == pytest.approx(10.0, abs=0.5) and t == pytest.approx(3.0, abs=0.5) and d == pytest.approx(6.0, abs=0.15)
+    start = plate()
+    start.holes[0] = Hole(110.1, 79.9, 6.1, cb=dk + 0.3, cb_depth=t - 0.3)
+    ef = edgefit.fit(start, K, vd)
+    assert ef.accepted, ef.note
+    h = ef.part.holes[0]
+    assert h.d == pytest.approx(6.0, abs=0.05) and (h.x, h.y) == pytest.approx((110.0, 80.0), abs=0.05)
+    assert h.cb == pytest.approx(10.0, abs=0.1) and h.cb_depth == pytest.approx(3.0, abs=0.15)
+    assert counterbore.detect(plate(), K, plate_scan) == {}

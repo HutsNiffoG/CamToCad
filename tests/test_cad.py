@@ -352,3 +352,53 @@ def test_a_countersink_shortens_the_through_hole_in_oblique_views():
     n_plain, n_sunk = (int(silhouette.render(p, K, v).sum()) for p in (plain, sunk))
     # zelfde buitenkant, alleen de doorkijk wordt groter (een hol stuk kegel verandert het silhouet niet)
     assert 0 < n_plain - n_sunk < 0.05 * n_plain
+
+
+# ----------------------------------------------------------------------------- kamerboringen (v0.10)
+
+def test_counterbored_holes_build_snap_and_script():
+    """Een kamerboring M6 (DIN 974: Ø6,6 met een kamer Ø11 x 6,4): de kamer neemt precies haar volume weg, diameter en
+    diepte snappen naar DIN 974, en het script bouwt hetzelfde model."""
+    plain = Part2p5D(12.0, rect_profile(80, 40, 3.0, center=(40, 20)), [Hole(10, 20, 6.6), Hole(70, 20, 6.6)])
+    bored = plain.copy()
+    bored.holes = [Hole(10, 20, 6.6, cb=11.0, cb_depth=6.4), Hole(70, 20, 6.6, cb=11.0, cb_depth=6.4)]
+    assert bored.is_valid() and bored.holes[0].bore_depth == 6.4 and bored.holes[0].top_d == 11.0
+    assert not Part2p5D(6.0, bored.outer, [Hole(10, 20, 6.6, cb=11.0, cb_depth=6.4)]).is_valid()  # te diep
+    assert not Part2p5D(12.0, bored.outer, [Hole(10, 20, 6.6, cb=6.7, cb_depth=3.0)]).is_valid()  # te krap
+    model = cadmodel.build(bored)
+    assert model.val().isValid()
+    chamber = math.pi / 4 * (11.0 ** 2 - 6.6 ** 2) * 6.4
+    assert cadmodel.build(plain).val().Volume() - model.val().Volume() == pytest.approx(2 * chamber, rel=1e-3)
+    measured = bored.copy()
+    measured.holes = [Hole(10.01, 20.0, 6.61, cb=10.96, cb_depth=6.47), Hole(70.0, 19.99, 6.62, cb=11.05, cb_depth=6.36)]
+    out, snaps = cadmodel.snap_part(measured, cadmodel.estimate_uncertainty(0.25, 40, 6))
+    by = {s.name: s for s in snaps}
+    assert by["kamerboring Ø (2x)"].value == 11.0 and "DIN 974" in by["kamerboring Ø (2x)"].reason
+    assert by["kamerboring diepte (2x)"].value == 6.4
+    assert [(h.cb, h.cb_depth) for h in out.holes] == [(11.0, 6.4), (11.0, 6.4)]
+    ns = {"__name__": "test"}
+    exec(compile(cadmodel.script(out, snaps), "model.py", "exec"), ns)
+    assert abs(ns["model"].val().Volume() - cadmodel.build(out).val().Volume()) < 1e-3
+    g = out.to_dict()["gaten"][0]
+    assert (g["kamerboring_d"], g["kamerboring_diepte"]) == (11.0, 6.4)
+    # schalen en verplaatsen houden de kamer
+    assert out.scaled(2.0).holes[0].cb == 22.0 and out.transformed(0.3, (1, 2)).holes[0].cb_depth == 6.4
+
+
+def test_a_counterbore_lets_you_look_further_through_the_hole_in_oblique_views():
+    """In een schuine foto kijk je door een gat met een kamer veel verder: het doorgaande gat begint pas op de bodem
+    van de kamer. Bij een smalle kamer begrenst haar rand aan het bovenvlak de doorkijk aan de kant van de camera."""
+    from camtocad.calib import Pose
+    from camtocad.render import look_at
+
+    K = np.array([[1300.0, 0.0, 799.5], [0.0, 1300.0, 599.5], [0.0, 0.0, 1.0]])
+    outer = rect_profile(80, 40, 3.0, center=(40, 20))
+    plain = Part2p5D(12.0, outer, [Hole(40, 20, 6.6)])
+    bored = Part2p5D(12.0, outer, [Hole(40, 20, 6.6, cb=11.0, cb_depth=6.4)])
+    narrow = Part2p5D(12.0, outer, [Hole(40, 20, 6.6, cb=7.0, cb_depth=6.4)])
+    R, t = look_at([40.0 + 100.0, 20.0, 12.0 + 300.0], [40.0, 20.0, 6.0])  # ~72° boven de mat
+    v = silhouette.ViewData(Pose("v", R, t), np.zeros((1200, 1600), bool), None, None, 0, 0)
+    n_plain, n_bored, n_narrow = (int(silhouette.render(p, K, v).sum()) for p in (plain, bored, narrow))
+    # 6,6 mm breed en in beeld ~2 mm extra doorkijk (bij ~4 px/mm): honderden pixels
+    assert n_plain - n_bored > 150
+    assert n_bored < n_narrow < n_plain  # de smalle kamer laat minder door, maar nog altijd meer dan geen kamer

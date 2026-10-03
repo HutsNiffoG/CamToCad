@@ -235,3 +235,34 @@ def test_soft_alpha_in_a_color_photo():
     alpha, wgt = masks._soft_alpha(fg, o, bgv, valid, 1.0, mis, color=(usable, d, nvar))
     assert _crossing(alpha) == pytest.approx(edge, abs=0.05)
     assert np.nanmin(wgt.astype(float)[:, 38:43]) > 300  # de kleur weegt (tot 1 / ALPHA_SYS_COLOR²): contrast ~49
+
+
+def test_tone_curve_is_found_from_the_mat_and_alpha_is_computed_in_linear_light():
+    """V2 (v0.10): een telefoon slaat een kromme van het licht op (sRGB, ~1/2,2). De exponent komt uit de mat zelf:
+    zwart en wit passen bij elke kromme, de overgangen ertussen niet; de kromme na de belichting en het licht dat
+    zwart nog terugkaatst. Daarna ligt de alfarand weer op de rand, waar hij in de gecodeerde grijswaarden ernaast
+    lag."""
+    from scipy.special import ndtr
+
+    rng = np.random.default_rng(3)
+    yy, xx = np.mgrid[0:600, 0:800]
+    pattern = (((xx // 37) + (yy // 29)) % 2 == 0) | ((xx - 400) ** 2 + (yy - 300) ** 2 < 60 ** 2)
+    p = cv2.GaussianBlur(np.where(pattern, 240.0, 15.0).astype(np.float32), (0, 0), 1.3)
+    valid = np.ones(p.shape, bool)
+    for g in (1 / 2.2, 0.75):
+        o = (255.0 * ((0.9 * p + 8.0) / 255.0) ** g + rng.normal(0, 1.5, p.shape)).astype(np.float32)
+        assert masks._tone_exponent(o, p, valid)[0] == pytest.approx(g, abs=0.04)
+    linear = (0.9 * p + 8.0 + rng.normal(0, 1.5, p.shape)).astype(np.float32)
+    assert masks._tone_exponent(linear, p, valid)[0] == 1.0
+    # een grijs onderdeel (lineair 70) op wit (230), rand op x = 40,3, gecodeerd met een sRGB-kromme
+    h, w, edge, g = 40, 80, 40.3, 1 / 2.2
+    x = np.broadcast_to(np.arange(w, dtype=np.float32), (h, w))
+    frac = ndtr((edge - x) / 1.2)
+    enc = lambda v: 255.0 * (v / 255.0) ** g  # noqa: E731
+    o = enc(230.0 + (70.0 - 230.0) * frac).astype(np.float32)
+    bgv = np.full((h, w), enc(230.0), np.float32)
+    fg, mis = x < edge, np.zeros((h, w), np.float32)
+    plain, _ = masks._soft_alpha(fg, o, bgv, valid[:h, :w], 1.0, mis)
+    lin, _ = masks._soft_alpha(fg, o, bgv, valid[:h, :w], 1.0, mis, tone=g)
+    assert _crossing(lin) == pytest.approx(edge, abs=0.03)
+    assert abs(_crossing(plain) - edge) > 0.15  # gecodeerd ligt de halve-contrastrand ernaast

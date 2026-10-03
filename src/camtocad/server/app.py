@@ -27,6 +27,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .. import preflight
+from . import qr
 from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
 
@@ -403,18 +404,20 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
 
 
 def lan_addresses() -> list[str]:
-    ips = set()
+    """IPv4-adressen van deze pc op het netwerk; het adres waarlangs verkeer naar buiten gaat eerst."""
+    primary, ips = None, set()
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("192.0.2.1", 80))  # geen verkeer; alleen om het uitgaande adres te bepalen
-            ips.add(s.getsockname()[0])
+            primary = s.getsockname()[0]
     except OSError:
         pass
     try:
         ips.update(a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
     except OSError:
         pass
-    return sorted(ip for ip in ips if not ip.startswith("127."))
+    rest = sorted(ip for ip in ips if not ip.startswith("127.") and ip != primary)
+    return ([primary] if primary and not primary.startswith("127.") else []) + rest
 
 
 def serve(host: str, port: int, data_dir: Path, token: str | None) -> None:
@@ -424,8 +427,14 @@ def serve(host: str, port: int, data_dir: Path, token: str | None) -> None:
     app = create_app(data_dir, token)
     print("Cam-to-CAD lokale server")
     print(f"  datamap: {data_dir}")
-    for ip in lan_addresses() or ["<ip-adres-van-deze-pc>"]:
+    ips = lan_addresses() if host not in ("127.0.0.1", "localhost") else []
+    for ip in ips or (["<ip-adres-van-deze-pc>"] if host not in ("127.0.0.1", "localhost") else []):
         print(f"  open op je telefoon (zelfde wifi): http://{ip}:{port}/?token={token}")
     print(f"  op deze pc: http://127.0.0.1:{port}/?token={token}")
+    if ips:
+        if qr.print_qr(f"http://{ips[0]}:{port}/?token={token}"):
+            print(f"  scan de QR-code met de camera van je telefoon (zelfde wifi): {ips[0]}")
+        elif not qr.available():
+            print("  (met pip install segno staat hier een QR-code om te scannen met je telefoon)")
     print("  Stoppen: Ctrl+C")
     uvicorn.run(app, host=host, port=port, log_level="warning")
