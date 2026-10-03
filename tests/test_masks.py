@@ -221,8 +221,9 @@ def test_soft_alpha_puts_a_blurred_edge_between_two_pixels():
 
 def test_no_alpha_from_grey_where_the_photo_is_clipped():
     """Een wit vak dat boven 255 uitkomt (lokaal contrast, HDR): met het afgekapte niveau als mat ligt de halve-
-    contrastrand te ver naar het object; daarom daar geen alpha uit grijs (v0.11). Losse ruispixels op 255 tellen
-    niet als afgekapt."""
+    contrastrand te ver naar het object (hier 0,18 px); daarom daar geen alpha uit grijs (v0.11). Losse ruispixels op
+    255 tellen niet als afgekapt, en ook niet de smalle lijnen langs een matrand waar de verscherping door 0 en 255
+    schiet."""
     from scipy.special import ndtr
 
     h, w, edge = 40, 80, 40.3
@@ -239,6 +240,9 @@ def test_no_alpha_from_grey_where_the_photo_is_clipped():
     rng = np.random.default_rng(3)
     white = np.clip(np.round(249.0 + rng.normal(0, 2.0, (h, w))), 0, 255)
     assert (white >= 254).any() and not masks._clip_zone(white).any()
+    squares = cv2.GaussianBlur(np.where((x // 20) % 2 == 0, 15.0, 245.0).astype(np.float32), (0, 0), 1.0)
+    sharp = np.clip(squares + 0.8 * (squares - cv2.GaussianBlur(squares, (0, 0), 1.5)), 0, 255)
+    assert (sharp >= 254).sum() >= 2 * 3 * h and not masks._clip_zone(sharp).any()  # lijnen van 2 px op 255
 
 
 def test_soft_alpha_in_a_color_photo():
