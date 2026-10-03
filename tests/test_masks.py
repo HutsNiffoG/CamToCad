@@ -187,3 +187,51 @@ def test_a_grey_part_in_a_color_photo_gets_nothing_from_color():
     plain = masks.classify(gray, pred, valid, px_per_mm=ppm)
     color = masks.classify(bgr, pred, valid, px_per_mm=ppm)
     assert np.count_nonzero(color.fg ^ plain.fg) < 0.002 * np.count_nonzero(truth)
+
+
+def _crossing(alpha: np.ndarray) -> float:
+    """Waar het rijgemiddelde van alpha (NaN telt niet) door 0,5 gaat, lineair tussen twee pixels."""
+    a = alpha.astype(float)[5:-5]
+    ok = np.isfinite(a)
+    row = np.where(ok.any(axis=0), np.where(ok, a, 0.0).sum(axis=0) / np.maximum(ok.sum(axis=0), 1), np.nan)
+    i = int(np.flatnonzero((row[:-1] >= 0.5) & (row[1:] < 0.5))[0])
+    return i + (row[i] - 0.5) / (row[i] - row[i + 1])
+
+
+def test_soft_alpha_puts_a_blurred_edge_between_two_pixels():
+    """Zachte objectfractie (V2-open): een onscherpe rand op x = 40,3 px ligt waar alpha 0,5 is, ook tussen twee
+    pixels in, hoe het masker ook afrondt; zonder contrast (object even grijs als de mat) geen alpha."""
+    from scipy.special import ndtr
+
+    h, w, edge = 40, 80, 40.3
+    x = np.broadcast_to(np.arange(w, dtype=np.float32), (h, w))
+    rng = np.random.default_rng(0)
+    mat, obj = 200.0, 90.0
+    o = (mat + (obj - mat) * ndtr((edge - x) / 1.2) + rng.normal(0, 1.0, (h, w))).astype(np.float32)
+    bgv = np.full((h, w), mat, np.float32)
+    fg, valid, mis = x < edge, np.ones((h, w), bool), np.zeros((h, w), np.float32)
+    alpha, wgt = masks._soft_alpha(fg, o, bgv, valid, 1.0, mis)
+    a = alpha.astype(float)
+    assert _crossing(alpha) == pytest.approx(edge, abs=0.03)
+    assert np.all(wgt.astype(float)[np.isfinite(a)] > 100)  # ruis 1 op een contrast van 110
+    assert np.isnan(a[:, :30]).all() and np.isnan(a[:, 50:]).all()  # alleen rond de rand
+    same = (mat + rng.normal(0, 1.0, (h, w))).astype(np.float32)
+    assert np.isnan(masks._soft_alpha(fg, same, bgv, valid, 1.0, mis)[0].astype(float)).all()
+
+
+def test_soft_alpha_in_a_color_photo():
+    """Donkerblauw op een zwart vak: grijs zegt bijna niets, de kleur wel; de rand ligt dan op de halve kleur."""
+    from scipy.special import ndtr
+
+    h, w, edge = 40, 80, 40.6
+    x = np.broadcast_to(np.arange(w, dtype=np.float32), (h, w))
+    rng = np.random.default_rng(1)
+    frac = ndtr((edge - x) / 1.5)
+    o = (30.0 + 2.0 * frac + rng.normal(0, 1.0, (h, w))).astype(np.float32)  # 2 grijswaarden contrast
+    d = np.dstack([-20.0 * frac, -45.0 * frac]).astype(np.float32) + rng.normal(0, 1.0, (h, w, 2)).astype(np.float32)
+    usable, nvar = np.ones((h, w), bool), np.ones((h, w), np.float32)
+    fg, valid, mis = x < edge, np.ones((h, w), bool), np.zeros((h, w), np.float32)
+    bgv = np.full((h, w), 30.0, np.float32)
+    alpha, wgt = masks._soft_alpha(fg, o, bgv, valid, 1.0, mis, color=(usable, d, nvar))
+    assert _crossing(alpha) == pytest.approx(edge, abs=0.05)
+    assert np.nanmin(wgt.astype(float)[:, 38:43]) > 300  # de kleur weegt (tot 1 / ALPHA_SYS_COLOR²): contrast ~49

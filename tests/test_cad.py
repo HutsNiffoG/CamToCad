@@ -311,3 +311,44 @@ def test_slot_is_dimensioned_like_a_designer_would():
     assert (s.x, s.y, s.length, s.width, s.angle) == pytest.approx((48.0, 20.0, 21.5, 5.5, 0.0))
     assert (p.x, p.y, p.angle) == pytest.approx((70.0, 20.0, math.pi / 2))
     assert p.r == by["uitsparing 1 hoekstraal"].value  # een afronding snapt pas als ze zeker is
+
+
+# ----------------------------------------------------------------------------- verzinkingen (V16)
+
+def test_countersunk_holes_build_snap_and_script():
+    """Een verzonken gat (DIN 74-1 A, M6: Ø6,6 met Ø12,4 x 90°): de kegel neemt precies zijn volume weg, de maat
+    snapt naar DIN 74, en het script bouwt hetzelfde model."""
+    plain = Part2p5D(12.0, rect_profile(80, 40, 3.0, center=(40, 20)), [Hole(10, 20, 6.6), Hole(70, 20, 6.6)])
+    sunk = plain.copy()
+    sunk.holes = [Hole(10, 20, 6.6, 12.4), Hole(70, 20, 6.6, 12.4)]
+    assert sunk.is_valid() and sunk.holes[0].csk_depth == pytest.approx(2.9)
+    assert not Part2p5D(3.0, sunk.outer, [Hole(10, 20, 6.6, 12.4)]).is_valid()  # dieper dan het deel toelaat
+    cone = math.pi * 2.9 / 3 * (6.2 ** 2 + 6.2 * 3.3 + 3.3 ** 2) - math.pi * 3.3 ** 2 * 2.9
+    model = cadmodel.build(sunk)
+    assert model.val().isValid()
+    assert cadmodel.build(plain).val().Volume() - model.val().Volume() == pytest.approx(2 * cone, abs=0.5)
+    measured = sunk.copy()
+    measured.holes = [Hole(10.01, 20.0, 6.61, 12.37), Hole(70.0, 19.99, 6.62, 12.43)]
+    out, snaps = cadmodel.snap_part(measured, cadmodel.estimate_uncertainty(0.25, 40, 6))
+    s = next(s for s in snaps if s.name.startswith("verzinking Ø"))
+    assert s.name == "verzinking Ø (2x)" and s.snapped and s.value == 12.4 and "DIN 74" in s.reason
+    assert [h.csk for h in out.holes] == [12.4, 12.4]
+    ns = {"__name__": "test"}
+    exec(compile(cadmodel.script(out, snaps), "model.py", "exec"), ns)
+    assert abs(ns["model"].val().Volume() - cadmodel.build(out).val().Volume()) < 1e-3
+    assert out.to_dict()["gaten"][0]["verzinking_d"] == 12.4
+
+
+def test_a_countersink_shortens_the_through_hole_in_oblique_views():
+    """In een schuine foto kijk je door een verzonken gat verder naar binnen: het doorgaande deel is korter."""
+    from camtocad.calib import Pose
+    from camtocad.render import look_at
+
+    K = np.array([[1300.0, 0.0, 799.5], [0.0, 1300.0, 599.5], [0.0, 0.0, 1.0]])
+    plain = Part2p5D(12.0, rect_profile(80, 40, 3.0, center=(40, 20)), [Hole(40, 20, 6.6)])
+    sunk = Part2p5D(12.0, plain.outer, [Hole(40, 20, 6.6, 12.4)])
+    R, t = look_at([40.0 + 150.0, 20.0, 12.0 + 260.0], [40.0, 20.0, 6.0])
+    v = silhouette.ViewData(Pose("v", R, t), np.zeros((1200, 1600), bool), None, None, 0, 0)
+    n_plain, n_sunk = (int(silhouette.render(p, K, v).sum()) for p in (plain, sunk))
+    # zelfde buitenkant, alleen de doorkijk wordt groter (een hol stuk kegel verandert het silhouet niet)
+    assert 0 < n_plain - n_sunk < 0.05 * n_plain

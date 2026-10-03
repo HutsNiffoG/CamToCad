@@ -81,6 +81,16 @@ def extrudeer(schets, hoogte, bovenrand=None, maat=0.0):
     return model
 
 
+def verzinking(cq, x, y, d, dk, boven, hoek=90.0):
+    """Kegel voor een verzinking rond het gat (x, y) met diameter `d`: diameter `dk` aan het bovenvlak (hoogte
+    `boven`), onder een tophoek van `hoek` graden; 1 mm boven het bovenvlak doorgetrokken (geen samenvallende
+    vlakken)."""
+    t = math.tan(math.radians(hoek / 2))
+    diepte = (dk - d) / 2 / t
+    return (cq.Workplane("XY").workplane(offset=boven - diepte).center(x, y).circle(d / 2)
+            .workplane(offset=diepte + 1).circle(dk / 2 + t).loft())
+
+
 def trede(cq, model, x, y, hoek, hoogte, totaal):
     """Trede: voorbij de lijn door (x, y), in de richting `hoek` (graden, 0 = +X), is het deel maar `hoogte`
     hoog; `totaal` is de hoogte van het deel."""

@@ -315,3 +315,106 @@ def test_edge_fit_recovers_a_slot():
     s = ef.part.slots[0]
     assert (s.x, s.y, s.width) == pytest.approx((130.0, 80.0, 5.0), abs=0.05)
     assert s.length == pytest.approx(14.0, abs=0.12) and math.degrees(s.angle) == pytest.approx(90.0, abs=0.3)
+
+
+def test_edge_distance_from_alpha_is_subpixel_even_where_the_mask_is_off():
+    """V2-open: de afstand tot de rand komt uit de zachte objectfractie, lineair over de rand (dus ook tussen twee
+    pixels), ook waar het binaire masker een pixel te krap is; zonder alpha de BETA-regel op dat masker."""
+    from scipy.special import ndtr
+
+    h, w, edge = 30, 60, 30.3
+    x = np.broadcast_to(np.arange(w, dtype=np.float32), (h, w))
+    alpha = ndtr((edge - x) / 1.2).astype(np.float16)
+    aw = np.full((h, w), 4000.0, np.float16)
+    fg, bg = x < 29, x > 31  # masker 1,3 px te krap, strook zonder bewijs tot x = 31,5
+    sf, sb = edgefit.signed_dist(fg), edgefit.signed_dist(bg)
+    d = edgefit.edge_distance(sf, sf + sb, alpha, aw)
+    assert np.interp(edge, x[0], d[15]) == pytest.approx(0.0, abs=0.06)
+    assert d[15, 29] == pytest.approx(29 - edge, abs=0.15) and d[15, 31] == pytest.approx(31 - edge, abs=0.15)
+    assert np.all(np.diff(d[15]) > 0)  # verder weg (alpha verzadigd) beslist het masker, maar steeds oplopend
+    assert edgefit.edge_blur(alpha) == pytest.approx(1.2, abs=0.1)
+    beta = edgefit.edge_distance(sf, sf + sb, None, None)
+    assert np.interp(edge, x[0], beta[15]) == pytest.approx(1.8 - edgefit.BETA * 1.5, abs=0.01)
+
+
+def soft_views(truth: Part2p5D, vd: list[silhouette.ViewData], erode_px: int = 1, blur: float = 1.0):
+    """Zoals een foto: de zachte bedekking van `truth`, vervaagd, als alpha; het binaire masker `erode_px` te krap
+    (een drempel die net verkeerd ligt), zekere mat pas 1 px buiten de ware rand."""
+    out = []
+    for v in vd:
+        s = 5
+        Ks = K.copy()
+        Ks[:2, :2] *= s
+        Ks[:2, 2] = s * K[:2, 2] + 0.5 * (s - 1)
+        hh, ww = v.fg.shape
+        big = silhouette.ViewData(v.pose, np.zeros((s * hh, s * ww), bool), None, None, s * v.x0, s * v.y0)
+        cover = silhouette.render(truth, Ks, big).reshape(hh, s, ww, s).mean(axis=(1, 3)).astype(np.float32)
+        true = cover >= 0.5
+        k = np.ones((2 * erode_px + 1, 2 * erode_px + 1), np.uint8)
+        fg = cv2.erode(true.astype(np.uint8), k) > 0
+        bg = ~(cv2.dilate(true.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+        nv = silhouette.ViewData(v.pose, fg, bg, ~(fg | bg), v.x0, v.y0)
+        nv.alpha = cv2.GaussianBlur(cover, (0, 0), blur).astype(np.float16)
+        nv.alpha_w = np.full((hh, ww), 2000.0, np.float16)
+        out.append(nv)
+    return out
+
+
+def test_edge_fit_finds_the_soft_edge_where_the_mask_threshold_is_off(plate_scan, monkeypatch):
+    """Het masker ligt overal een pixel binnen de rand: met alpha vindt de randfit toch de ware maten, met alleen
+    de BETA-regel (de v0.8-fit) niet."""
+    truth = plate()
+    vd = soft_views(truth, plate_scan)
+    start = plate()
+    start.outer.offsets = start.outer.offsets + np.array([0.2, -0.15, 0.1, -0.2])
+    start.holes[0] = Hole(110.15, 79.9, 6.2)
+    ef = edgefit.fit(start, K, vd)
+    assert ef.accepted, ef.note
+    assert np.allclose(ef.part.outer.offsets, truth.outer.offsets, atol=0.05)
+    assert ef.part.holes[0].d == pytest.approx(6.0, abs=0.06)
+    monkeypatch.setattr(edgefit, "EDGE_MODEL", "beta")
+    old = edgefit.fit(start, K, vd)
+    assert np.mean(truth.outer.offsets - old.part.outer.offsets) > 0.1  # te klein: het masker is te krap
+
+
+# ----------------------------------------------------------------------------- verzinkingen (V16)
+
+def top_face_gray(part: Part2p5D, v: silhouette.ViewData, true_csk: float, blur: float = 1.0) -> np.ndarray:
+    """Grijswaarden zoals een foto: het bovenvlak 150, binnen de verzinking (de kegel) 90, het gat zelf 40, en de
+    mat 200; per pixel het snijpunt van de kijkstraal met het bovenvlak (de rand van de verzinking ligt daar)."""
+    hh, ww = v.fg.shape
+    u, w_ = np.meshgrid(np.arange(ww) + v.x0, np.arange(hh) + v.y0)
+    rays = np.linalg.inv(K) @ np.vstack([u.ravel(), w_.ravel(), np.ones(u.size)])
+    R, t = v.pose.R, v.pose.t
+    d = R.T @ rays
+    c = -R.T @ t
+    s = (part.height - c[2]) / d[2]
+    X, Y = c[0] + s * d[0], c[1] + s * d[1]
+    h = part.holes[0]
+    r = np.hypot(X - h.x, Y - h.y).reshape(hh, ww)
+    g = np.where(v.fg, 150.0, 200.0)
+    g = np.where(v.fg & (r < true_csk / 2), 90.0, g)
+    g = np.where(r < h.d / 2, 40.0, g)
+    return cv2.GaussianBlur(g.astype(np.float32), (0, 0), blur)
+
+
+def test_a_countersink_is_found_in_the_top_views_and_fitted_on_its_inner_edge(plate_scan):
+    """Een ring rond het gat in de grijswaarden wordt een verzinking (Ø 11 x 90°), de randfit zet de maat op die
+    rand; zonder ring geen verzinking."""
+    from camtocad import countersink
+
+    truth = plate()
+    vd = [silhouette.ViewData(v.pose, v.fg, v.bg, v.unk, v.x0, v.y0) for v in plate_scan]
+    for v in vd:
+        v.gray = top_face_gray(truth, v, 11.0)
+    found = countersink.detect(truth, K, vd)
+    assert list(found) == [0] and found[0] == pytest.approx(11.0, abs=0.2)
+    start = plate()
+    start.holes[0] = Hole(110.0, 80.0, 6.0, 10.7)
+    ef = edgefit.fit(start, K, vd)
+    assert ef.accepted, ef.note
+    assert ef.part.holes[0].csk == pytest.approx(11.0, abs=0.05)
+    assert ef.part.holes[0].d == pytest.approx(6.0, abs=0.05)
+    for v in vd:  # zonder ring: een gewoon gat
+        v.gray = top_face_gray(truth, v, 0.0)
+    assert countersink.detect(truth, K, vd) == {}

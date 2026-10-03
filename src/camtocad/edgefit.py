@@ -10,11 +10,15 @@ Deze fit verfijnt het resultaat daarna.
   afgeronde bovenrand (V17) geeft de buitencontour niveaus tussen onder- en bovenrand (de schouder, de
   boog), en dan telt het niveau dat in beeld het verst naar buiten ligt. Een trede (V17) geeft de
   bovenrand per stuk een eigen hoogte, plus punten op de verticale randen van de trede (zie `rims`).
-* Residu = afstand (px, subpixel via bilineaire interpolatie) van het punt tot de rand van het
-  objectmasker, alleen waar ook zekere mat vlakbij is (bewijs). De ware rand ligt in de strook zonder
-  bewijs tussen object en zekere mat: de maskerrand ligt gemiddeld iets naar binnen (vooral waar een
-  zichtbare wand boven een zwart vak de rand vormt). Daarom telt de rand op een fractie `BETA` van die
-  strook. BETA is afgesteld op gerenderde scans met zuivere silhouetten (ROUTE-A-VERBETERPUNTEN §3e).
+* Residu = afstand (px, subpixel via bilineaire interpolatie) van het punt tot de rand, alleen waar ook
+  zekere mat vlakbij is (bewijs). Sinds v0.9 (V2-open) komt die afstand uit de grijswaarden zelf: de zachte
+  objectfractie rond de rand (masks._soft_alpha) geeft per pixel de afstand tot de rand (edge_distance), ook
+  tussen twee pixels in. Waar die niets zegt (geen contrast, verzadigd), de afstand tot de maskerrand, met de
+  rand op een fractie `BETA` van de strook zonder bewijs tussen object en zekere mat (de regel van v0.5-v0.8,
+  afgesteld op grijze onderdelen; bij donkere en gekleurde paste hij niet, ROUTE-A-VERBETERPUNTEN §3h-§3i).
+* Randen binnen het object (V16, v0.9): de bovenrand van een verzinking is in het silhouet niet te zien, maar
+  in de grijswaarden wel. Per ronde gemeten waar die rand in elke foto ligt (measure_inner), daarna als vaste
+  doelen in dezelfde kleinste kwadraten.
 * Kleinste kwadraten met een Cauchy-verlies (schaal 0,5 px): een uitschieter (schaduw, een hap uit het
   masker) telt nauwelijks mee, en de fit gedraagt zich meer als een mediaan dan als een gemiddelde.
 * Alleen binnen een vertrouwensgebied rond de pixelfit (±0,5 mm, ±0,3°): zonder bewijs rond een gat
@@ -39,6 +43,7 @@ import cv2
 import numpy as np
 from scipy import ndimage
 from scipy.optimize import least_squares
+from scipy.special import ndtri
 
 from . import silhouette
 from .cadhelpers import afgeronde_hoeken
@@ -47,6 +52,10 @@ from .profile import Part2p5D
 
 BETA = 0.2  # waar in de strook zonder bewijs de rand ligt (0 = maskerrand, 1 = begin zekere mat)
 BAND_MAX = 1.5  # px: breder telt als gebrek aan bewijs, niet als menging
+# De rand uit de zachte objectfractie (V2-open, v0.9; zie edge_distance), per pixel gemengd met de maskerrand naar
+# hun informatie; de onzekerheid (1σ) van de maskerrand met de BETA-regel
+EDGE_MODEL = "alpha"  # "alpha" of "beta" (de regel van v0.5-v0.8)
+MASK_SIGMA_PX = 0.3
 LOSS, F_SCALE = "cauchy", 0.5  # px
 DENSITY = 1.0  # punten per mm contour
 TRUST_MM, TRUST_DEG = 0.5, 0.3
@@ -65,6 +74,9 @@ FREEZE_PROBE_MM = 0.1
 # Bewijs rond een gat of sleuf (zie `evidence`): minder dan dit deel van de randpunten met zekere mat ernaast,
 # of een systematische fout die hierdoor minstens AMP_MAX keer groter is dan met bewijs rondom: 'zonder bewijs'
 EVIDENCE_MIN, AMP_MAX = 0.10, 8.0
+# Randen binnen het object (V16, zie measure_inner): zo ver (px) langs de normaal gezocht, en alleen bij zoveel
+# contrast (grijswaarden) tussen de kegel van een verzinking en het bovenvlak
+INNER_SEARCH_PX, INNER_MIN_CONTRAST = 5.0, 10.0
 
 
 def signed_dist(mask: np.ndarray) -> np.ndarray:
@@ -73,6 +85,43 @@ def signed_dist(mask: np.ndarray) -> np.ndarray:
     d_out = cv2.distanceTransform(1 - m8, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     d_in = cv2.distanceTransform(m8, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
     return np.where(mask, 0.5 - d_in, d_out - 0.5).astype(np.float32)
+
+
+def edge_blur(alpha: np.ndarray, default: float = 1.2) -> float:
+    """Onscherpte σ (px) van de randen in een foto, uit de zachte objectfractie: bij een Gauss-vervaagde rand is
+    |∇alpha| op de rand 1 / (σ √(2π))."""
+    ok = np.isfinite(alpha)
+    a = np.where(ok, alpha, 0.0).astype(np.float32)
+    gy, gx = np.gradient(a)
+    sel = ok & (cv2.erode(ok.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0) & (np.abs(a - 0.5) < 0.15)
+    if np.count_nonzero(sel) < 50:
+        return default
+    return float(np.clip(0.3989 / max(float(np.median(np.hypot(gx, gy)[sel])), 1e-3), 0.5, 4.0))
+
+
+def edge_distance(sf: np.ndarray, band: np.ndarray, alpha: np.ndarray | None,
+                  alpha_w: np.ndarray | None) -> np.ndarray:
+    """Afstand tot de rand per pixel (px, + = buiten het object): het residu van de randfit (V2-open, v0.9).
+
+    Uit de zachte objectfractie (masks._soft_alpha): een Gauss-vervaagde rand op afstand d buiten een pixel geeft
+    daar alpha = Φ(−d/σ), dus d = −σ Φ⁻¹(alpha), met σ de onscherpte van de foto (edge_blur). Tussen twee pixels
+    is die afstand lineair, dus ook de bilineaire interpolatie: een subpixelrand, zonder de trappen en hapjes van
+    het binaire masker. Per pixel gemengd met de afstand tot de maskerrand volgens de BETA-regel (de rand op een
+    vaste fractie van de strook zonder bewijs), naar hun informatie: alpha telt waar ze de randplaats bepaalt
+    (1/variantie × de helling van Φ in het kwadraat: op de rand veel, verzadigd nauwelijks), het masker waar
+    alpha niets zegt (geen contrast, verzadigd, of geen alpha)."""
+    mask_d = sf - BETA * np.clip(band, 0.0, BAND_MAX)
+    if EDGE_MODEL != "alpha" or alpha is None or alpha_w is None:
+        return mask_d
+    a = alpha.astype(np.float32)
+    ok = np.isfinite(a)
+    if np.count_nonzero(ok) < 50:
+        return mask_d
+    sv = edge_blur(a)
+    z = ndtri(np.clip(np.where(ok, a, 0.5), 0.02, 0.98)).astype(np.float32)
+    info = np.where(ok, alpha_w.astype(np.float32) * np.exp(-z * z) / (2 * np.pi) / sv ** 2, 0.0)
+    lam = info / (info + 1.0 / MASK_SIGMA_PX ** 2)
+    return (lam * (-sv * z) + (1.0 - lam) * mask_d).astype(np.float32)
 
 
 def _bilinear(img: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -108,7 +157,8 @@ def layout(part: Part2p5D, density: float = DENSITY) -> dict:
     """Aantal punten per rand, boog, gat en sleuf; vast tijdens een oplossing (vaste lengte van de residuen)."""
     o = part.outer
     out = {"holes": [max(16, int(math.pi * h.d * density)) for h in part.holes],
-           "slots": [_polygon_layout(s.corner_table(), density, 0) for s in part.slots]}
+           "slots": [_polygon_layout(s.corner_table(), density, 0) for s in part.slots],
+           "csk": [max(24, int(math.pi * h.csk * density)) if h.csk > 0 else 0 for h in part.holes]}
     if o.kind == "circle":
         out["circle"] = max(48, int(2 * math.pi * o.radius * density))
     else:
@@ -239,6 +289,10 @@ def rims(part: Part2p5D, lay: dict) -> Rims:
                 cells = cell_of(part, p2) if cells is None or len(cells) != n else cells
                 for k, st in enumerate(part.steps):
                     zt[cells == k] = st.height
+            start = no
+            for h, nh in zip(part.holes, lay["holes"]):  # verzinking (V16): het doorgaande gat eindigt eronder
+                zt[start:start + nh] -= h.csk_depth
+                start += nh
             P.append(np.column_stack([np.vstack([q, p2[no:]]), zt]))
             point.append(np.arange(n))
             level.append(np.full(n, j))
@@ -262,6 +316,96 @@ def rims(part: Part2p5D, lay: dict) -> Rims:
 def points3d(part: Part2p5D, lay: dict) -> np.ndarray:
     """De modelpunten in 3D (zie rims)."""
     return rims(part, lay).P
+
+
+def csk_points(part: Part2p5D, lay: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Randen binnen het object (V16): punten op de bovenrand van elke verzinking (3D, op het bovenvlak), hun
+    richting naar buiten (2D, radiaal) en per punt het gat."""
+    pts, dirs, owner = [], [], []
+    for i, (h, n) in enumerate(zip(part.holes, lay.get("csk", []))):
+        if n == 0 or h.csk <= 0:
+            continue
+        a = (np.arange(n) + 0.5) / n * 2 * math.pi
+        d = np.column_stack([np.cos(a), np.sin(a)])
+        z = part.height_at(h.x, h.y) if part.steps else part.height
+        pts.append(np.column_stack([h.x + h.csk / 2 * d[:, 0], h.y + h.csk / 2 * d[:, 1], np.full(n, z)]))
+        dirs.append(d)
+        owner.append(np.full(n, i))
+    if not pts:
+        return np.zeros((0, 3)), np.zeros((0, 2)), np.zeros(0, int)
+    return np.vstack(pts), np.vstack(dirs), np.concatenate(owner)
+
+
+def measure_inner(part: Part2p5D, K: np.ndarray, vd: list, lay: dict,
+                  search_px: float = INNER_SEARCH_PX) -> list[tuple]:
+    """Waar liggen de randen binnen het object in de foto's (V16)? Per foto (puntindex, gemeten randplaats in de ROI,
+    normaal in beeld, gewicht), voor de punten van csk_points.
+
+    Een verzinking is in de grijswaarden een ring: de kegel staat schuin en is dus anders belicht dan het bovenvlak.
+    Per punt het profiel langs de normaal (in beeld), tot `search_px` en hooguit 80% van de breedte van de kegel in
+    beeld aan beide kanten; de rand ligt waar het profiel halverwege de kegel en het bovenvlak is, het dichtst bij
+    het model. Zonder contrast (INNER_MIN_CONTRAST grijswaarden) of met een stuk zonder grijswaarden geen meting."""
+    P, D, owner = csk_points(part, lay)
+    empty = (np.zeros(0, int), np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0))
+    if not len(P):
+        return [empty for _ in vd]
+    Q = P.copy()  # de onderkant van de kegel langs dezelfde richting: daar begint het doorgaande gat
+    for i in np.unique(owner):
+        h, sel = part.holes[i], owner == i
+        Q[sel, :2] = np.array([h.x, h.y]) + h.d / 2 * D[sel]
+        Q[sel, 2] = P[sel, 2] - h.csk_depth
+    s = np.arange(-search_px, search_px + 1e-9, 0.25)
+    out = []
+    for v in vd:
+        g = getattr(v, "gray", None)
+        if g is None:
+            out.append(empty)
+            continue
+        off = np.array([v.x0, v.y0], float)
+        uv0, z0 = project(P, v.pose, K)
+        uv1, _ = project(P + np.column_stack([0.3 * D, np.zeros(len(P))]), v.pose, K)
+        uvq, _ = project(Q, v.pose, K)
+        nrm = uv1 - uv0
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-9)
+        uv0 = uv0 - off
+        reach = np.minimum(search_px, 0.8 * np.sum((uv0 + off - uvq) * nrm, axis=1))
+        hh, ww = g.shape
+        m = search_px + 1
+        ok = (z0 > 0) & (reach >= 2.0) & (uv0[:, 0] > m) & (uv0[:, 1] > m) & (uv0[:, 0] < ww - m - 1) \
+            & (uv0[:, 1] < hh - m - 1)
+        idx = np.flatnonzero(ok)
+        if not len(idx):
+            out.append(empty)
+            continue
+        q = uv0[idx, None, :] + s[None, :, None] * nrm[idx, None, :]
+        prof = ndimage.map_coordinates(g.astype(np.float32), [q[..., 1].ravel(), q[..., 0].ravel()],
+                                       order=1).reshape(len(idx), len(s))
+        keep, pos, wts = [], [], []
+        for k, j in enumerate(idx):
+            p, r = prof[k], reach[j]
+            outside, inside = (s >= r / 2) & (s <= r), (s <= -r / 2) & (s >= -r)
+            span = np.abs(s) <= r
+            if not np.all(np.isfinite(p[span])):
+                continue
+            l_out, l_in = float(np.median(p[outside])), float(np.median(p[inside]))
+            c = l_in - l_out
+            if abs(c) < INNER_MIN_CONTRAST:
+                continue
+            a = (p - l_out) / c - 0.5
+            cross = np.flatnonzero(span[:-1] & span[1:] & (np.sign(a[:-1]) != np.sign(a[1:])))
+            if not len(cross):
+                continue
+            t = cross[np.argmin(np.abs(s[cross]))]
+            se = s[t] + a[t] / (a[t] - a[t + 1]) * (s[t + 1] - s[t])
+            keep.append(j)
+            pos.append(uv0[j] + se * nrm[j])
+            wts.append(min(1.0, (abs(c) - INNER_MIN_CONTRAST) / INNER_MIN_CONTRAST))
+        if not keep:
+            out.append(empty)
+            continue
+        keep = np.array(keep)
+        out.append((keep, np.array(pos), nrm[keep], np.array(wts)))
+    return out
 
 
 def boundary_status(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, tol: float = 1.0) -> list[np.ndarray]:
@@ -444,8 +588,11 @@ class _Problem:
         self.fields = []
         for v in vd:
             sf, sb = signed_dist(v.fg), signed_dist(v.bg)
-            self.fields.append((sf, sf + sb))  # afstand tot de maskerrand; breedte van de strook zonder bewijs
+            band = sf + sb  # breedte van de strook zonder bewijs
+            self.fields.append((edge_distance(sf, band, getattr(v, "alpha", None), getattr(v, "alpha_w", None)),
+                                band))
         self.status: list[np.ndarray] = []
+        self.inner: list[tuple] = []  # randen binnen het object (V16), per foto; zie measure_inner
 
     def freeze(self, names: list[str]) -> None:
         """Deze parameters niet meer fitten (ze houden de waarde van het startmodel)."""
@@ -465,18 +612,25 @@ class _Problem:
         if part.steps:  # welk punt bij welk stuk hoort, ligt per ronde vast (zie rims)
             self.lay["cells"] = cell_of(part, points2d(part, self.lay)[0])
         self.status = boundary_status(part, self.K, self.vd, self.lay)
+        # randen binnen het object: per ronde gemeten waar ze in de foto's liggen, dan als vaste doelen (V16)
+        self.inner = measure_inner(part, self.K, self.vd, self.lay) if any(self.lay.get("csk", [])) else []
+
+    def n_residuals(self, i: int) -> int:
+        """Aantal residuen van foto i: punten op de silhouetrand en gemeten randen binnen het object."""
+        return int(self.status[i].sum()) + (len(self.inner[i][0]) if self.inner else 0)
 
     def view_index(self, views: list[int] | None = None) -> np.ndarray:
         views = range(len(self.vd)) if views is None else views
-        return np.concatenate([np.full(int(self.status[i].sum()), i) for i in views])
+        return np.concatenate([np.full(self.n_residuals(i), i) for i in views])
 
     def residuals(self, x: np.ndarray, views: list[int] | None = None) -> np.ndarray:
         views = range(len(self.vd)) if views is None else views
-        n_on = sum(int(self.status[i].sum()) for i in views)
+        n_on = sum(self.n_residuals(i) for i in views)
         p = self.build(x)
         if not p.is_valid():
             return np.full(n_on, 20.0)
         P = points3d(p, self.lay)
+        P_in = csk_points(p, self.lay)[0] if self.inner else None
         out = []
         for i in views:
             v, (sf, band), on = self.vd[i], self.fields[i], self.status[i]
@@ -486,8 +640,12 @@ class _Problem:
             r = _bilinear(sf, uv)
             g = _bilinear(band, uv)
             wgt = np.clip((4.0 - g) / 2.0, 0.0, 1.0)  # geen zekere mat binnen ~3 px: geen bewijs
-            # verder dan ~1,5 px is de strook geen menging van object en mat meer, maar gebrek aan bewijs
-            out.append(wgt * np.clip(r - BETA * np.clip(g, 0.0, BAND_MAX), -15.0, 15.0))
+            out.append(wgt * np.clip(r, -15.0, 15.0))
+            if P_in is not None and len(self.inner[i][0]):
+                # afstand (px, + = naar buiten) van het modelpunt tot de gemeten rand, langs de normaal in beeld
+                idx, e, nrm, wt = self.inner[i]
+                uvi, _ = project(P_in[idx], v.pose, self.K)
+                out.append(wt * np.clip(np.sum((uvi - [v.x0, v.y0] - e) * nrm, axis=1), -15.0, 15.0))
         return np.concatenate(out) if out else np.zeros(0)
 
     def bounds(self, x0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -518,7 +676,9 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     ev = evidence(prob, prob.x_of(part))
     frozen_invalid = list(prob.frozen)
     weak = [(kind, i, names) for (kind, i, _, names, _, _) in features(part, prob.lay) if ev[(kind, i)].weak]
-    prob.freeze([nm for _, _, names in weak for nm in names])
+    # met het gat ook zijn verzinking (V16): wat er rond zo'n gat in de foto's te zien is, is te zwak om op te fitten
+    prob.freeze([nm for kind, i, names in weak for nm in names
+                 + ([f"hk{i}"] if kind == "gat" and part.holes[i].csk > 0 else [])])
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None

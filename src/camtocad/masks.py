@@ -36,6 +36,12 @@ class ViewMasks:
     edge_bg: np.ndarray | None = None  # zekere mat zonder marge (voor de modelverfijning)
     sigma: float = 0.0  # ruisniveau van het residu (grijswaarden)
     amb: np.ndarray | None = None  # object zou hier onzichtbaar zijn (zelfde grijs als de mat): geen bewijs
+    # zachte objectfractie rond het object (V2, v0.9; zie _soft_alpha), als uitsnede vanaf `alpha_at` (rij, kolom)
+    alpha: np.ndarray | None = None
+    alpha_w: np.ndarray | None = None  # gewicht: 1 / variantie van alpha, 0 zonder bewijs
+    alpha_at: tuple[int, int] = (0, 0)
+    # de grijswaarden (vervaagd, belichting gecorrigeerd) in dezelfde uitsnede: randen binnen het object (V16)
+    gray: np.ndarray | None = None
 
 
 def predict_background(raster: BoardRaster, K: np.ndarray, pose: Pose, size: tuple[int, int]):
@@ -114,7 +120,8 @@ def _refine_boundary(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.n
 
 def _chroma_evidence(chroma: np.ndarray, lum: np.ndarray, ref: np.ndarray, valid: np.ndarray, radius: float,
                      min_area: float, k_sigma: float = 6.0, tau_min: float = 6.0):
-    """Kleur als bewijs (V8): geeft (object, bruikbaar, beslissing) of None.
+    """Kleur als bewijs (V8): geeft (object, bruikbaar, fractie objectkleur, kleurverschil met de mat (2 kanalen),
+    ruisvariantie van dat verschil per pixel) of None.
 
     `chroma`: R - G en (R + G)/2 - B per pixel (imgio.split_chroma, terug op volle resolutie), `lum` de
     grijswaarde, `ref` zekere mat. De mat is zwart-wit, maar het licht en de witbalans van de camera geven
@@ -162,7 +169,94 @@ def _chroma_evidence(chroma: np.ndarray, lum: np.ndarray, ref: np.ndarray, valid
     frac = (d[..., 0] * level[..., 0] + d[..., 1] * level[..., 1]) / np.maximum(strength ** 2, 1e-6)
     # het object volgens de kleur: de 50%-regel (de rand op het halve kleurcontrast, dus op de echte rand)
     obj = _drop_small(usable & (frac > 0.5) & (seen > 0), min_area)
-    return obj, usable, frac
+    return obj, usable, frac, d, sig * sig + (fringe * grad) ** 2
+
+
+# Systematische onzekerheid (1σ) van de zachte objectfractie, bovenop ruis en posefout: verscherping en afkappen op
+# zwart, en voor kleur ook de halve resolutie, verschuiven de halve-contrastrand een beetje (§3i). Zo beslist de kleur
+# alleen waar grijs weinig zegt (blauw boven zwart), niet ook waar grijs een scherpe rand geeft.
+ALPHA_SYS_GRAY, ALPHA_SYS_COLOR = 0.02, 0.05
+# voorkennis voor de versterking van de mat vlak buiten de rand (_soft_alpha): pas bij een patroon met meer dan
+# ~5 grijswaarden spreiding telt de gemeten versterking, op een egaal vak blijft het een verschuiving
+MAT_GAIN_PRIOR = 25.0
+
+
+def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarray, sigma: float,
+                mis: np.ndarray, color=None, reach: int = 5) -> tuple[np.ndarray, np.ndarray]:
+    """Zachte objectfractie rond de rand (V2, v0.9): per pixel welk deel ervan object is, uit de grijswaarde zelf.
+
+    alpha = (foto − mat) / (object − mat), met de voorspelde mat `bgv` en de grijswaarde van het object vlak
+    binnen de rand (3,5-7,5 px binnen het masker, σ 3 px: een wand in beeld heeft zijn eigen grijs), en de mat zoals
+    gemeten vlak buiten de rand (3,5-7,5 px erbuiten, als correctie op de voorspelling). Een onscherpe
+    rand gaat daarin geleidelijk van 1 naar 0, en ligt waar alpha 0,5 is: ook tussen twee pixels in, en zonder de
+    strook zonder bewijs met een vaste fractie te verdelen (die fractie paste niet bij donkere en gekleurde
+    onderdelen, ROUTE-A-VERBETERPUNTEN §3h). Variantie: ruis `sigma` en posefout `mis` (grijswaarden: posefout ×
+    helling van de mat, groot aan patroonranden), gedeeld door het contrast². Met kleur (`color`: bruikbaar,
+    kleurverschil met de mat, ruisvariantie; zie _chroma_evidence) ook de fractie objectkleur, met een eigen
+    kleurniveau vlak binnen de rand, en beide gewogen naar hun variantie. Alleen binnen `reach` px van de
+    maskerrand en waar het object in de buurt is. Geeft (alpha, gewicht = 1/variantie) als float16; NaN en 0
+    zonder bewijs."""
+    fg8 = fg.astype(np.uint8)
+    k = np.ones((2 * reach + 1, 2 * reach + 1), np.uint8)
+    band = (cv2.dilate(fg8, k) > 0) & ~(cv2.erode(fg8, k) > 0) & valid
+    ring = (cv2.erode(fg8, np.ones((7, 7), np.uint8)) > 0) & ~(cv2.erode(fg8, np.ones((15, 15), np.uint8)) > 0)
+    inner = cv2.erode(fg8, np.ones((5, 5), np.uint8)) > 0  # voor smalle stukken zonder ring
+
+    def level(values, where):
+        near = np.full(values.shape[:2], False)
+        out = np.zeros_like(values, dtype=np.float32)
+        for src in (ring & where, inner & where):
+            wgt = src.astype(np.float32)
+            den = cv2.GaussianBlur(wgt, (0, 0), 3.0)
+            fill = ~near & (den > 0.02)
+            if values.ndim == 2:
+                out[fill] = (cv2.GaussianBlur(values * wgt, (0, 0), 3.0) / np.maximum(den, 1e-6))[fill]
+            else:
+                for c in range(values.shape[2]):
+                    out[..., c][fill] = (cv2.GaussianBlur(values[..., c] * wgt, (0, 0), 3.0)
+                                         / np.maximum(den, 1e-6))[fill]
+            near |= fill
+        return out, near
+
+    lev, near = level(o.astype(np.float32), np.ones_like(fg))
+    # De mat vlak buiten de rand (3,5-7,5 px) zoals gemeten: de voorspelde mat wijkt daar een paar grijswaarden af
+    # (verscherping maakt het contrast van het matpatroon groter dan in de voorspelling, en de belichtingscorrectie
+    # is grof), en dat schuift de halve-contrastrand bij een contrast van 100-200 al 0,05-0,1 px op (§3i). Daarom
+    # daar per pixel een lineaire aanpassing foto ≈ a · voorspelling + b (gewogen, σ 3 px), met a naar 1 getrokken
+    # waar de mat egaal is (dan alleen een verschuiving).
+    outer = (cv2.dilate(fg8, np.ones((15, 15), np.uint8)) > 0) & ~(cv2.dilate(fg8, np.ones((7, 7), np.uint8)) > 0)
+    b32, o32 = bgv.astype(np.float32), o.astype(np.float32)
+    mat_like = outer & valid & (np.abs(o32 - b32) < np.maximum(4.0 * sigma, 0.25 * np.abs(lev - b32)))
+    wm = mat_like.astype(np.float32)
+    s0 = cv2.GaussianBlur(wm, (0, 0), 3.0)
+    have = s0 > 0.02
+    s0 = np.maximum(s0, 1e-6)
+    m_b, m_o = cv2.GaussianBlur(wm * b32, (0, 0), 3.0) / s0, cv2.GaussianBlur(wm * o32, (0, 0), 3.0) / s0
+    var_b = cv2.GaussianBlur(wm * b32 * b32, (0, 0), 3.0) / s0 - m_b * m_b
+    cov = cv2.GaussianBlur(wm * o32 * b32, (0, 0), 3.0) / s0 - m_b * m_o
+    gain = np.clip((cov + MAT_GAIN_PRIOR) / (np.maximum(var_b, 0.0) + MAT_GAIN_PRIOR), 0.8, 1.25)
+    bgv = np.where(have, m_o + gain * (b32 - m_b), bgv)
+    c = lev - bgv
+    c = np.where(np.abs(c) < 1e-3, 1e-3, c)
+    a = (o - bgv) / c
+    var = (sigma * sigma + mis * mis) / (c * c) + ALPHA_SYS_GRAY ** 2
+    ok = band & near & (var < 0.25)
+    if color is not None:
+        usable, d, nvar = color
+        lev_c, near_c = level(d, usable)
+        strength2 = np.maximum(lev_c[..., 0] ** 2 + lev_c[..., 1] ** 2, 1e-6)
+        frac = (d[..., 0] * lev_c[..., 0] + d[..., 1] * lev_c[..., 1]) / strength2
+        var_c = nvar / strength2 + ALPHA_SYS_COLOR ** 2
+        okc = band & near_c & usable & (var_c < 0.25)
+        wg = np.where(ok, 1.0 / np.maximum(var, 1e-6), 0.0)
+        wc = np.where(okc, 1.0 / np.maximum(var_c, 1e-6), 0.0)
+        wsum = wg + wc
+        a = np.where(wsum > 0, (wg * a + wc * frac) / np.maximum(wsum, 1e-12), a)
+        var = np.where(wsum > 0, 1.0 / np.maximum(wsum, 1e-12), var)
+        ok = ok | okc
+    alpha = np.where(ok, np.clip(a, -1.0, 2.0), np.nan).astype(np.float16)
+    w = np.where(ok, 1.0 / np.maximum(var, 1e-4), 0.0).astype(np.float16)
+    return alpha, w
 
 
 def _drop_small(mask: np.ndarray, min_area: float) -> np.ndarray:
@@ -524,4 +618,13 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         ring = (cv2.dilate(fg.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0) & outside
         edge_bg |= match & color_mat & ring
     near_fg = cv2.dilate(fg.astype(np.uint8), k3) > 0
-    return ViewMasks(fg=fg, bg=match & mat_ok & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma, amb=amb)
+    out = ViewMasks(fg=fg, bg=match & mat_ok & ~near_fg, valid=valid, edge_bg=edge_bg, sigma=sigma, amb=amb)
+    if fg.any():  # zachte objectfractie rond het object (V2), als uitsnede: dat scheelt geheugen
+        x, y, w, h = cv2.boundingRect(fg.astype(np.uint8))
+        y0, x0 = max(y - 12, 0), max(x - 12, 0)
+        sl = (slice(y0, y + h + 12), slice(x0, x + w + 12))
+        out.alpha, out.alpha_w = _soft_alpha(fg[sl], o[sl], bgv[sl], valid[sl], sigma, misreg * gmag[sl],
+                                             None if color is None else (color[1][sl], color[3][sl], color[4][sl]))
+        out.alpha_at = (y0, x0)
+        out.gray = o[sl].astype(np.float16)
+    return out

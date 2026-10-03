@@ -54,11 +54,12 @@ KINDS = {  # soort → (enkelvoud/meervoud in maten.json, lengte-achtig voor de 
     "lengte": ("lengte", True), "breedte": ("breedte", True), "hoogte": ("hoogte", False),
     "diameter": ("diameter", True), "gat": ("gaten", False), "hartafstand": ("hartafstanden", True),
     "afronding": ("afrondingen", False), "bovenrand": ("afschuining", False), "trede": ("treden", False),
+    "verzinking": ("verzinkingen", False),
 }
 ALIASES = {"gat": "gat", "gaten": "gat", "hartafstand": "hartafstand", "hartafstanden": "hartafstand",
            "afronding": "afronding", "afrondingen": "afronding", "lengte": "lengte", "breedte": "breedte",
            "hoogte": "hoogte", "diameter": "diameter", "afschuining": "bovenrand", "bovenrand": "bovenrand",
-           "trede": "trede", "treden": "trede"}
+           "trede": "trede", "treden": "trede", "verzinking": "verzinking", "verzinkingen": "verzinking"}
 
 
 @dataclass
@@ -180,6 +181,8 @@ def model_measures(geometry: dict, unc: dict) -> dict[str, list[tuple[float, flo
     holes = geometry.get("gaten", [])
     for g in holes:
         out["gat"].append((float(g["d"]), u95(unc["hole_d"], g["d"])))
+        if g.get("verzinking_d"):  # diameter van de verzinking aan het bovenvlak (V16)
+            out["verzinking"].append((float(g["verzinking_d"]), u95(unc["hole_d"], g["verzinking_d"])))
     for a, b in combinations(holes, 2):
         dist = math.hypot(a["x"] - b["x"], a["y"] - b["y"])
         out["hartafstand"].append((dist, u95(unc["hole_xy"] * math.sqrt(2), dist)))

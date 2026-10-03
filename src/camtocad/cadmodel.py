@@ -18,8 +18,8 @@ import cadquery as cq
 import numpy as np
 
 from . import __version__, cadhelpers
-from .profile import Hole, Part2p5D, Profile, Step, dominant_angle
-from .snapping import Snap, hole_candidates, length_candidates, radius_candidates, snap
+from .profile import CSK_ANGLE_DEG, Hole, Part2p5D, Profile, Step, dominant_angle
+from .snapping import Snap, countersink_candidates, hole_candidates, length_candidates, radius_candidates, snap
 from .uncertainty import Budget, edge_position
 
 
@@ -266,7 +266,23 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
         s = do_snap(f"gat Ø ({label})", d, unc.hole_d / math.sqrt(len(g)) + 0.02, hole_candidates(d),
                     lambda p, g=g, wts=wts: float(wts @ [p.holes[i].d for i in g]), "gat", amp)
         for i in g:
-            out.holes[i] = Hole(out.holes[i].x, out.holes[i].y, s.value)
+            out.holes[i] = replace(out.holes[i], d=s.value)
+        snaps.append(s)
+
+    # verzinkingen (V16): de diameter aan het bovenvlak (90°), per groep gelijke; gewogen naar het bewijs rond het
+    # gat, zoals de gaten zelf (een gat zonder bewijs heeft ook rond zijn verzinking weinig te zien)
+    sunk = [i for i, h in enumerate(part.holes) if h.csk > 0]
+    for g in _groups([part.holes[i].csk for i in sunk], 3.0 * unc.hole_d + 0.5):
+        g = [sunk[j] for j in g]
+        wts = np.array([1.0 / amps("gat", i)[0] ** 2 for i in g])
+        wts /= wts.sum()
+        dk = float(wts @ [part.holes[i].csk for i in g])
+        amp = 1.0 / math.sqrt(float(np.mean([1.0 / amps("gat", i)[0] ** 2 for i in g])))
+        label = f"{len(g)}x" if len(g) > 1 else f"gat {g[0] + 1}"
+        s = do_snap(f"verzinking Ø ({label})", dk, unc.hole_d / math.sqrt(len(g)) + 0.03, countersink_candidates(dk),
+                    lambda p, g=g, wts=wts: float(wts @ [p.holes[i].csk for i in g]), "verzinking", amp)
+        for i in g:
+            out.holes[i] = replace(out.holes[i], csk=max(s.value, out.holes[i].d + 0.2))
         snaps.append(s)
 
     def origin(p: Part2p5D, axis: str, at: float) -> float:
@@ -295,7 +311,7 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             order = np.argsort([(math.atan2(h.y, h.x) - ang0 + half) % (2 * math.pi) for h in out.holes])
             for k, i in enumerate(order):
                 a = ang0 + 2 * math.pi * k / n
-                out.holes[i] = Hole(s.value / 2 * math.cos(a), s.value / 2 * math.sin(a), out.holes[i].d)
+                out.holes[i] = replace(out.holes[i], x=s.value / 2 * math.cos(a), y=s.value / 2 * math.sin(a))
                 patterned.add(int(i))
     for i, h in enumerate(out.holes):
         if i in patterned:
@@ -305,7 +321,7 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
                      lambda p, i=i: p.holes[i].x - origin(p, "x", p.holes[i].y), "positie", amp)
         sy = do_snap(f"gat {i + 1} y", h.y, unc.hole_xy, length_candidates(h.y, imperial),
                      lambda p, i=i: p.holes[i].y - origin(p, "y", p.holes[i].x), "positie", amp)
-        out.holes[i] = Hole(sx.value, sy.value, h.d)
+        out.holes[i] = replace(out.holes[i], x=sx.value, y=sy.value)
         snaps += [sx, sy]
 
     # sleuven en rechthoekige uitsparingen (V15), zoals een ontwerper ze maatvoert: een sleuf met breedte
@@ -395,6 +411,8 @@ def build(part: Part2p5D) -> cq.Workplane:
     for h in part.holes:
         cutter = cq.Workplane("XY").workplane(offset=-1).center(h.x, h.y).circle(h.d / 2).extrude(part.height + 2)
         model = model.cut(cutter)
+        if h.csk > 0:  # verzinking (V16): een kegel vanaf het bovenvlak
+            model = model.cut(cadhelpers.verzinking(cq, h.x, h.y, h.d, h.csk, part.height_at(h.x, h.y)))
     for poly in part.cutouts:
         cutter = cq.Workplane("XY").workplane(offset=-1).polyline([tuple(p) for p in poly]).close() \
             .extrude(part.height + 2)
@@ -540,6 +558,22 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
                 note = f"  # gemeten ({sx.measured:.3f}, {sy.measured:.3f}) ± {max(sx.u95, sy.u95):.3f}"
             lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dvars[round(h.d, 6)]}),{note}")
         lines.append("]")
+    if any(h.csk > 0 for h in part.holes):
+        kvars: dict[float, str] = {}
+        lines += ["", f"# Verzinkingen ({CSK_ANGLE_DEG:.0f}°): diameter aan het bovenvlak"]
+        for h in part.holes:
+            key = round(h.csk, 6)
+            if h.csk > 0 and key not in kvars:
+                kvars[key] = f"verzinking_d{len(kvars) + 1}"
+                rec = next((s for s in snaps if s.name.startswith("verzinking Ø") and abs(s.value - h.csk) < 1e-6),
+                           None)
+                lines.append(f"{kvars[key]} = {_fmt(h.csk)}{_comment(rec)}")
+        lines.append("verzinkingen = [  # (x, y, gatdiameter, diameter aan het bovenvlak, hoogte van het bovenvlak)")
+        for h in part.holes:
+            if h.csk > 0:
+                lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {_fmt(h.d)}, {kvars[round(h.csk, 6)]}, "
+                             f"{_fmt(part.height_at(h.x, h.y))}),")
+        lines.append("]")
     if part.slots:
         lines += ["", "# Sleuven en rechthoekige uitsparingen"]
         rows = []
@@ -581,6 +615,9 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         lines += ["for x, y, d in gaten:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).center(x, y)"
                   ".circle(d / 2).extrude(hoogte + 2))"]
+    if any(h.csk > 0 for h in part.holes):
+        lines += ["for x, y, d, dk, boven in verzinkingen:",
+                  f"    model = model.cut(verzinking(cq, x, y, d, dk, boven, {_fmt(CSK_ANGLE_DEG)}))"]
     if part.cutouts:
         lines += ["for punten in uitsparingen:",
                   "    model = model.cut(cq.Workplane(\"XY\").workplane(offset=-1).polyline(punten).close()"

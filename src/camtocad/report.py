@@ -55,9 +55,13 @@ def _svg_top_view(part: Part2p5D, width: int = 560) -> str:
     for h in part.holes:
         body.append(f'<path d="{path(np.column_stack([h.x + h.d / 2 * np.cos(a), h.y + h.d / 2 * np.sin(a)]))}" '
                     f'class="hole"/>')
+        top = max(h.d, h.csk) / 2
+        if h.csk > 0:  # verzinking (V16): de rand aan het bovenvlak
+            body.append(f'<path d="{path(np.column_stack([h.x + top * np.cos(a), h.y + top * np.sin(a)]))}" '
+                        f'class="edge"/>')
         x, y = tr(np.array([[h.x, h.y]]))
-        body.append(f'<text x="{x[0]:.1f}" y="{y[0] - h.d / 2 * scale - 6:.1f}" class="lbl">'
-                    f'Ø {h.d:.2f}</text>')
+        body.append(f'<text x="{x[0]:.1f}" y="{y[0] - top * scale - 6:.1f}" class="lbl">'
+                    f'Ø {h.d:.2f}' + (f' ⌵ Ø {h.csk:.2f}' if h.csk > 0 else '') + '</text>')
     for s in part.slots:
         body.append(f'<path d="{path(s.outline(5.0))}" class="hole"/>')
         x, y = tr(np.array([[s.x, s.y]]))

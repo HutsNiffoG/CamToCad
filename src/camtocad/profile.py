@@ -27,11 +27,22 @@ def circle_polygon(center, radius: float, n: int) -> np.ndarray:
     return np.asarray(center, float) + r * np.column_stack([np.cos(a), np.sin(a)])
 
 
+CSK_ANGLE_DEG = 90.0  # tophoek van een verzinking (V16): 90° voor verzonken schroeven (ISO 10642, ISO 2009)
+
+
 @dataclass
 class Hole:
     x: float
     y: float
     d: float
+    csk: float = 0.0  # verzinking (V16): diameter aan het bovenvlak, kegel onder CSK_ANGLE_DEG; 0 = geen
+
+    @property
+    def csk_depth(self) -> float:
+        """Diepte van de verzinking onder het bovenvlak (mm); het doorgaande gat eronder is zoveel korter."""
+        if self.csk <= self.d:
+            return 0.0
+        return (self.csk - self.d) / 2 / math.tan(math.radians(CSK_ANGLE_DEG / 2))
 
 
 @dataclass
@@ -272,7 +283,7 @@ class Part2p5D:
     steps: list[Step] = field(default_factory=list)  # treden: voorbij een lijn lager (V17)
 
     def copy(self) -> "Part2p5D":
-        return Part2p5D(self.height, self.outer.copy(), [Hole(h.x, h.y, h.d) for h in self.holes],
+        return Part2p5D(self.height, self.outer.copy(), [replace(h) for h in self.holes],
                         [c.copy() for c in self.cutouts], [replace(s) for s in self.slots],
                         replace(self.top_edge) if self.top_edge is not None else None, [replace(s) for s in self.steps])
 
@@ -319,6 +330,9 @@ class Part2p5D:
     def is_valid(self) -> bool:
         if not ((self.outer.kind != "polygon" or self.outer.is_valid()) and all(s.is_valid() for s in self.slots)):
             return False
+        # een verzinking (V16) is breder dan het gat en laat er een stuk doorgaand gat onder over
+        if any(h.csk > 0 and not (h.csk > h.d + 0.1 and h.csk_depth < 0.8 * self.height) for h in self.holes):
+            return False
         if self.top_edge is not None:
             s = self.top_edge.size
             if self.steps or not 0.0 < s < 0.8 * self.height:
@@ -347,7 +361,7 @@ class Part2p5D:
         o = out.outer
         o.center, o.offsets, o.fillets, o.radius = o.center * factor, o.offsets * factor, o.fillets * factor, \
             o.radius * factor
-        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor) for h in self.holes]
+        out.holes = [Hole(h.x * factor, h.y * factor, h.d * factor, h.csk * factor) for h in self.holes]
         out.cutouts = [c * factor for c in self.cutouts]
         out.slots = [s.scaled(factor) for s in self.slots]
         if self.top_edge is not None:
@@ -364,7 +378,7 @@ class Part2p5D:
         out = self.copy()
         out.outer.center = R @ self.outer.center + shift
         out.outer.angles = self.outer.angles + angle
-        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d) for h in self.holes]
+        out.holes = [Hole(*(R @ [h.x, h.y] + shift), h.d, h.csk) for h in self.holes]
         out.cutouts = [(R @ cu.T).T + shift for cu in self.cutouts]
         out.slots = []
         for s in self.slots:
@@ -385,7 +399,9 @@ class Part2p5D:
             contour = {"soort": "polygoon", "hoekpunten": [list(c) for c in o.corner_table()],
                        "toelichting": "per hoek (x, y, afrondingsstraal), tegen de klok in"}
         return {"hoogte": float(self.height), "contour": contour,
-                "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d)} for h in self.holes],
+                "gaten": [{"x": float(h.x), "y": float(h.y), "d": float(h.d),
+                           **({"verzinking_d": float(h.csk), "verzinking_hoek": CSK_ANGLE_DEG} if h.csk > 0 else {})}
+                          for h in self.holes],
                 "sleuven": [s.to_dict() for s in self.slots],
                 "uitsparingen": [np.asarray(c, float).tolist() for c in self.cutouts],
                 "bovenrand": None if self.top_edge is None else {"soort": self.top_edge.kind,

@@ -82,11 +82,11 @@ def _deviations(prob, x: np.ndarray):
         uv, z = project(P[on], v.pose, prob.K)
         h, w = v.fg.shape
         uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
-        sf, band = prob.fields[i]
-        r = edgefit._bilinear(sf, uv)
+        dist, band = prob.fields[i]  # afstand tot de rand (px, + = buiten; zie edgefit.edge_distance)
+        r = edgefit._bilinear(dist, uv)
         g = edgefit._bilinear(band, uv)
         ok = (g < 4.0) | (r > g + 1.0)
-        mm = (r - edgefit.BETA * np.clip(g, 0.0, edgefit.BAND_MAX)) * z / f
+        mm = r * z / f
         for j, val in zip(on[ok], mm[ok]):
             per_point[j].append(float(val))
         per_view.append((elev, on[ok], mm[ok]))

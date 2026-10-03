@@ -19,7 +19,7 @@ import numpy as np
 from .calib import Pose, project
 from .masks import ViewMasks
 from .cadhelpers import afgeronde_hoeken
-from .profile import Hole, Part2p5D, Step, TopEdge, circle_polygon
+from .profile import Part2p5D, Step, TopEdge, circle_polygon
 
 
 @dataclass
@@ -31,6 +31,11 @@ class ViewData:
     x0: int
     y0: int
     _sums: tuple | None = field(default=None, repr=False, compare=False)  # zie sums()
+    # zachte objectfractie en haar gewicht in de ROI (masks._soft_alpha; NaN en 0 zonder bewijs), voor de randfit
+    alpha: np.ndarray | None = field(default=None, repr=False, compare=False)
+    alpha_w: np.ndarray | None = field(default=None, repr=False, compare=False)
+    # grijswaarden in de ROI (NaN buiten de uitsnede van het masker): randen binnen het object (V16)
+    gray: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     def sums(self) -> tuple:
         """Per rij de cumulatieve aantallen zekere-mat-, onbekende en objectpixels (met een 0-kolom vooraan),
@@ -75,7 +80,24 @@ def prepare(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, part: Part2p5D, 
             # een gat niet groter of een buitenrand niet naar binnen, en bepaalt het bewijs eromheen de vorm.
             amb = m.amb[sl]
             fg, unk = fg & ~amb, unk & ~amb
-        out.append(ViewData(pose, fg, bg, unk, x0, y0))
+        vd = ViewData(pose, fg, bg, unk, x0, y0)
+        if m.alpha is not None:
+            vd.alpha = _crop(m.alpha, m.alpha_at, y0, y1, x0, x1, np.nan)
+            vd.alpha_w = _crop(m.alpha_w, m.alpha_at, y0, y1, x0, x1, 0.0)
+        if m.gray is not None:
+            vd.gray = _crop(m.gray, m.alpha_at, y0, y1, x0, x1, np.nan)
+        out.append(vd)
+    return out
+
+
+def _crop(a: np.ndarray, at: tuple[int, int], y0: int, y1: int, x0: int, x1: int, fill: float) -> np.ndarray:
+    """Een uitsnede van het beeld (vanaf `at`, rij en kolom) in de ROI; `fill` daarbuiten."""
+    out = np.full((y1 - y0, x1 - x0), fill, a.dtype)
+    ay, ax = at
+    h, wd = a.shape
+    ty0, tx0, ty1, tx1 = max(y0, ay), max(x0, ax), min(y1, ay + h), min(x1, ax + wd)
+    if ty1 > ty0 and tx1 > tx0:
+        out[ty0 - y0:ty1 - y0, tx0 - x0:tx1 - x0] = a[ty0 - ay:ty1 - ay, tx0 - ax:tx1 - ax]
     return out
 
 
@@ -229,15 +251,19 @@ def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np
     if not faces:
         return _EMPTY, _EMPTY, _EMPTY
     solid = _union(*(np.concatenate(parts) for parts in zip(*faces)))
-    # doorkijk: binnen de projectie van zowel de boven- als de onderrand van een gat
+    # doorkijk: binnen de projectie van zowel de boven- als de onderrand van een gat; bij een verzinking (V16) is
+    # de bovenrand van het doorgaande gat de onderkant van de kegel (de kegel zelf wordt naar boven toe breder)
     rings = [circle_polygon((hl.x, hl.y), hl.d / 2, 48) for hl in part.holes]
+    below = [hl.csk_depth for hl in part.holes]
     rings += list(part.cutouts)
     rings += [s.outline() for s in part.slots]
     through = []
-    for r2 in rings:
+    for k, r2 in enumerate(rings):
         m2 = len(r2)
         c2 = r2.mean(axis=0)
         z_top = part.height_at(float(c2[0]), float(c2[1])) if part.steps else part.height
+        if k < len(below):
+            z_top -= below[k]
         uv2, _ = project(np.vstack([np.column_stack([r2, np.full(m2, z_top)]),
                                     np.column_stack([r2, np.zeros(m2)])]), v.pose, K)
         uv2 = uv2 - off
@@ -364,8 +390,10 @@ def _params(part: Part2p5D) -> list[Param]:
         ps.append(Param("rot", math.radians(0.5), math.radians(0.01)))
         ps += [Param(f"off{k}", 0.4, 0.01) for k in range(part.outer.n)]
         ps += [Param(f"fil{k}", 0.4, 0.02, 0.0) for k in range(part.outer.n)]
-    for i in range(len(part.holes)):
+    for i, hl in enumerate(part.holes):
         ps += [Param(f"hx{i}", 0.3, 0.01), Param(f"hy{i}", 0.3, 0.01), Param(f"hd{i}", 0.3, 0.01, 0.3)]
+        if hl.csk > 0:  # verzinking (V16): de diameter aan het bovenvlak
+            ps.append(Param(f"hk{i}", 0.3, 0.01, 0.5))
     for i, s in enumerate(part.slots):  # sleuven en rechthoekige uitsparingen (V15)
         ps += [Param(f"sx{i}", 0.3, 0.01), Param(f"sy{i}", 0.3, 0.01), Param(f"sl{i}", 0.3, 0.01, 0.5),
                Param(f"sw{i}", 0.3, 0.01, 0.5), Param(f"sa{i}", math.radians(1.0), math.radians(0.02))]
@@ -408,7 +436,8 @@ def _get(part: Part2p5D, base_angles: np.ndarray, name: str) -> float:
         s = part.slots[int(name[2:])]
         return {"sx": s.x, "sy": s.y, "sl": s.length, "sw": s.width, "sa": s.angle, "sr": s.r}[name[:2]]
     i = int(name[2:])
-    return {"hx": part.holes[i].x, "hy": part.holes[i].y, "hd": part.holes[i].d}[name[:2]]
+    h = part.holes[i]
+    return {"hx": h.x, "hy": h.y, "hd": h.d, "hk": h.csk}[name[:2]]
 
 
 def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Part2p5D:
@@ -440,9 +469,7 @@ def _set(part: Part2p5D, base_angles: np.ndarray, name: str, value: float) -> Pa
         p.slots[i] = replace(p.slots[i], **{field_name: value})
     else:
         i = int(name[2:])
-        h = p.holes[i]
-        p.holes[i] = Hole(value if name[:2] == "hx" else h.x, value if name[:2] == "hy" else h.y,
-                          value if name[:2] == "hd" else h.d)
+        p.holes[i] = replace(p.holes[i], **{{"hx": "x", "hy": "y", "hd": "d", "hk": "csk"}[name[:2]]: value})
     return p
 
 

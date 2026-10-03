@@ -21,8 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import (__version__, cadmodel, calib, debug, edgefit, holes, hull, initial, masks, placement, preflight,
-               prismcheck, profile, report, silhouette, uncertainty)
+from . import (__version__, cadmodel, calib, countersink, debug, edgefit, holes, hull, initial, masks, placement,
+               preflight, prismcheck, profile, report, silhouette, uncertainty)
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
@@ -262,9 +262,9 @@ def _effective_uncertainty(unc, snaps: list, scale_rel: float):
     def is_step(n: str, what: str) -> bool:
         return n.startswith("trede ") and n.endswith(what)
 
-    def is_inner_size(n: str) -> bool:  # gaten, sleuven en uitsparingen: maat van een binnenvorm
-        return n.startswith("gat Ø") or (n.startswith(("sleuf ", "uitsparing "))
-                                         and n.endswith(("breedte", "hartafstand", "lengte")))
+    def is_inner_size(n: str) -> bool:  # gaten, verzinkingen, sleuven en uitsparingen: maat van een binnenvorm
+        return n.startswith(("gat Ø", "verzinking Ø")) or (n.startswith(("sleuf ", "uitsparing "))
+                                                           and n.endswith(("breedte", "hartafstand", "lengte")))
 
     return cadmodel.Uncertainty(
         edge=worst(lambda n: n.startswith(("x-maat", "y-maat", "diameter")) or is_step(n, "positie"),
@@ -731,6 +731,27 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             t_fit = time.time()
             ef = edgefit.fit(part, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
             shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
+    # V16: een verzinking is een ring rond een gat in de foto's van boven; dan als model, en de randfit opnieuw. Ook
+    # als de randfit niet gebruikt is: een verzonken gat laat in schuine foto's meer doorkijken dan een gewoon gat,
+    # en dan loopt de diameter van dat gat in de randfit tegen de grens van het vertrouwensgebied
+    found_on = ef.part if ef.accepted else part
+    if found_on.holes:
+        notes: list[str] = []
+        sunk = countersink.detect(found_on, cam.K, vd, log=notes.append)
+        if notes:
+            diag["verzinkingen"] = notes
+        trial = found_on.copy()
+        for i, dk in sunk.items():
+            trial.holes[i] = replace(trial.holes[i], csk=dk)
+        if sunk and trial.is_valid():
+            t_fit = time.time()
+            ef_csk = edgefit.fit(trial, cam.K, vd, log=fit_log, mm_per_px=mm_per_px)
+            if ef_csk.accepted:
+                ef, part = ef_csk, trial
+                log("verzinking herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].csk:.2f} x "
+                                                      f"{profile.CSK_ANGLE_DEG:.0f}°" for i in sorted(sunk)))
+            else:
+                log(f"verzinking niet gebruikt: {ef_csk.note}")
     if ef.accepted:
         part = ef.part
         energy = silhouette.energy(part, cam.K, vd)
@@ -830,7 +851,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     summary = {
         "objectklasse": "2,5D (extrusie met doorgaande gaten)" + (
             f", bovenrand rondom {'afgeschuind' if te.kind == 'afschuining' else 'afgerond'}" if te else "")
-        + (f", {len(snapped.steps)} trede" if snapped.steps else ""),
+        + (f", {len(snapped.steps)} trede" if snapped.steps else "")
+        + (f", {n_sunk} verzonken gat(en)" if (n_sunk := sum(h.csk > 0 for h in snapped.holes)) else ""),
         "contour": "cirkel" if snapped.outer.kind == "circle" else f"polygoon, {snapped.outer.n} randen",
         "gaten": len(snapped.holes),
         "foto's gebruikt": f"{len(views)} van {len(images)} (waarvan {n_top} bovenaanzicht)",
