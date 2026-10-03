@@ -530,6 +530,7 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         lines += ["treden = [  # (x, y) op de lijn, hoek naar het lage deel, hoogte"] + rows + ["]"]
 
     pattern = bolt_circle(part.holes) if o.kind == "circle" else None
+    dvars: dict[float, str] = {}  # gatdiameter → naam in het script
     if pattern and abs(pattern[1]) < 1e-6:
         r, _, n = pattern
         rec = next((s for s in snaps if s.name.startswith("steekcirkel")), None)
@@ -541,8 +542,8 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
                   "gaten = [(steekcirkel_d / 2 * math.cos(2 * math.pi * k / aantal_gaten),",
                   "          steekcirkel_d / 2 * math.sin(2 * math.pi * k / aantal_gaten), gat_d1)",
                   "         for k in range(aantal_gaten)]"]
+        dvars = {round(h.d, 6): "gat_d1" for h in part.holes}
     elif part.holes:
-        dvars: dict[float, str] = {}
         lines += ["", "# Doorgaande gaten"]
         for h in part.holes:
             key = round(h.d, 6)
@@ -571,8 +572,8 @@ def script(part: Part2p5D, snaps: list[Snap], meta: dict | None = None) -> str:
         lines.append("verzinkingen = [  # (x, y, gatdiameter, diameter aan het bovenvlak, hoogte van het bovenvlak)")
         for h in part.holes:
             if h.csk > 0:
-                lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {_fmt(h.d)}, {kvars[round(h.csk, 6)]}, "
-                             f"{_fmt(part.height_at(h.x, h.y))}),")
+                lines.append(f"    ({_fmt(h.x)}, {_fmt(h.y)}, {dvars.get(round(h.d, 6), _fmt(h.d))}, "
+                             f"{kvars[round(h.csk, 6)]}, {_fmt(part.height_at(h.x, h.y))}),")
         lines.append("]")
     if part.slots:
         lines += ["", "# Sleuven en rechthoekige uitsparingen"]

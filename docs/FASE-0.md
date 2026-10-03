@@ -30,6 +30,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 - **Afrondingen:** alleen als je een radiusmal hebt; anders weglaten.
 - **Afschuining of afronding van de bovenrand** (`afschuining` in `maten.json`): bij een afschuining het been (hoogteverschil tussen bovenkant en onderkant van de afschuining, met de diepte-uitsteker), bij een afronding de straal met een radiusmal.
 - **Trede** (`treden`): de hoogte van het lage deel, met de diepte-uitsteker of de schuifmaat vanaf de onderkant.
+- **Verzinking** (`verzinkingen`): de diameter van de kegel aan het bovenvlak, met de binnenbekken van de schuifmaat plat op het bovenvlak, of met een verzinkingsmeter.
 
 ## 3. Fotograferen
 
@@ -79,7 +80,7 @@ Een `maten.json`:
 | `mat` | Optioneel: `A4`, `A3`, `Letter`, `A4-v1` of `A3-v1`. Standaard wordt de mat herkend aan de markers |
 | `lengte`, `breedte`, `hoogte`, `diameter` | Eén waarde. De hoogte is de totale hoogte, ook bij een afschuining of trede |
 | `afschuining` | Eén waarde: het been van een afschuining, of de straal van een afronding, van de bovenrand rondom |
-| `gaten`, `hartafstanden`, `afrondingen`, `treden` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen |
+| `gaten`, `hartafstanden`, `afrondingen`, `treden`, `verzinkingen` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen, `verzinkingen` de diameters van verzinkingen aan het bovenvlak (v0.9) |
 
 ## 5. Draaien
 
