@@ -9,7 +9,9 @@ Deze fit verfijnt het resultaat daarna.
   de bovenrand; punten die in het modelsilhouet verborgen liggen tellen niet. Een afgeschuinde of
   afgeronde bovenrand (V17) geeft de buitencontour niveaus tussen onder- en bovenrand (de schouder, de
   boog), en dan telt het niveau dat in beeld het verst naar buiten ligt. Een trede (V17) geeft de
-  bovenrand per stuk een eigen hoogte, plus punten op de verticale randen van de trede (zie `rims`).
+  bovenrand per stuk een eigen hoogte, plus punten op de verticale randen van de trede (zie `rims`). Een
+  kamerboring (v0.10) geeft een gat een extra niveau: de rand van de kamer aan het bovenvlak, boven de bodem
+  van de kamer waar het doorgaande gat begint.
 * Residu = afstand (px, subpixel via bilineaire interpolatie) van het punt tot de rand, alleen waar ook
   zekere mat vlakbij is (bewijs). Sinds v0.9 (V2-open) komt die afstand uit de grijswaarden zelf: de zachte
   objectfractie rond de rand (masks._soft_alpha) geeft per pixel de afstand tot de rand (edge_distance), ook
@@ -17,15 +19,17 @@ Deze fit verfijnt het resultaat daarna.
   rand op een fractie `BETA` van de strook zonder bewijs tussen object en zekere mat (de regel van v0.5-v0.8,
   afgesteld op grijze onderdelen; bij donkere en gekleurde paste hij niet, ROUTE-A-VERBETERPUNTEN §3h-§3i).
 * Randen binnen het object (V16, v0.9): de bovenrand van een verzinking is in het silhouet niet te zien, maar
-  in de grijswaarden wel. Per ronde gemeten waar die rand in elke foto ligt (measure_inner), daarna als vaste
-  doelen in dezelfde kleinste kwadraten.
+  in de grijswaarden wel; sinds v0.10 ook de binnenrand van een afschuining van de bovenrand en de bovenrand van
+  de wand van een kamerboring. Per ronde gemeten waar die rand in elke foto ligt (measure_inner, halverwege in
+  lineair licht als de foto een toonkromme heeft), daarna als vaste doelen in dezelfde kleinste kwadraten.
 * Kleinste kwadraten met een Cauchy-verlies (schaal 0,5 px): een uitschieter (schaduw, een hap uit het
   masker) telt nauwelijks mee, en de fit gedraagt zich meer als een mediaan dan als een gemiddelde.
 * Alleen binnen een vertrouwensgebied rond de pixelfit (±0,5 mm, ±0,3°): zonder bewijs rond een gat
   (zwart op zwart) kan een parameter anders wegdrijven. Raakt de oplossing de rand van dat gebied, dan
   blijft de pixelfit staan. Ruimer waar de pixelfit zelf onnauwkeurig is: de as van een sleuf (±2°), de
-  maat van een afschuining of afronding van de bovenrand (±1 mm), de lijn van een trede (±1 mm, ±2°), en
-  een afronding mag tot 5 px groeien (onscherpte maakt van een scherpe hoek een kleine afronding).
+  maat van een afschuining of afronding van de bovenrand (±1 mm), de lijn van een trede (±1 mm, ±2°), de kamer
+  van een kamerboring (±1 mm), en een afronding mag tot 5 px groeien (onscherpte maakt van een scherpe hoek een
+  kleine afronding).
 * Een parameter die de contour bij een kleine stap (0,1 mm) ongeldig maakt, blijft staan: een afronding
   die net past, de randjes van een hap uit het masker. Zijn afgeleide is onbruikbaar (een sprong naar de
   strafwaarde) en zou de hele oplossing vastzetten.

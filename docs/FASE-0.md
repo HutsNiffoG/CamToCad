@@ -16,7 +16,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - formaat: van ~20 mm (klein plaatje) tot 100–150 mm;
   - vorm: rechthoekig met afgeronde hoeken, een L- of U-vorm, een ring of flens;
   - dikte 3–20 mm, met doorgaande gaten van verschillende diameters.
-  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak. Sinds v0.9 worden verzonken gaten (90°, voor verzonken schroeven) herkend: neem een onderdeel met een paar verzinkingen mee, en meet de diameter van de verzinking aan het bovenvlak (in `maten.json` als `verzinkingen`).
+  Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak. Sinds v0.9 worden verzonken gaten (90°, voor verzonken schroeven) herkend: neem een onderdeel met een paar verzinkingen mee, en meet de diameter van de verzinking aan het bovenvlak (in `maten.json` als `verzinkingen`). Sinds v0.10 ook kamerboringen (een cilindrische kamer voor een cilinderkopschroef): neem een onderdeel met een paar kamerboringen mee, en meet de diameter en de diepte van de kamer (`kamerboringen` en `kamerdieptes`). Sinds v0.10 schat de scan ook de toonkromme van de camera uit de mat zelf; daarvoor hoef je niets te doen, maar gebruik geen filters of HDR-effecten.
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
 
 ## 2. Meten met de schuifmaat
@@ -31,6 +31,7 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 - **Afschuining of afronding van de bovenrand** (`afschuining` in `maten.json`): bij een afschuining het been (hoogteverschil tussen bovenkant en onderkant van de afschuining, met de diepte-uitsteker), bij een afronding de straal met een radiusmal.
 - **Trede** (`treden`): de hoogte van het lage deel, met de diepte-uitsteker of de schuifmaat vanaf de onderkant.
 - **Verzinking** (`verzinkingen`): de diameter van de kegel aan het bovenvlak, met de binnenbekken van de schuifmaat plat op het bovenvlak, of met een verzinkingsmeter.
+- **Kamerboring** (`kamerboringen`, `kamerdieptes`): de diameter van de kamer met de binnenbekken, en de diepte (bovenvlak tot de bodem van de kamer) met de diepte-uitsteker.
 
 ## 3. Fotograferen
 
@@ -80,7 +81,7 @@ Een `maten.json`:
 | `mat` | Optioneel: `A4`, `A3`, `Letter`, `A4-v1` of `A3-v1`. Standaard wordt de mat herkend aan de markers |
 | `lengte`, `breedte`, `hoogte`, `diameter` | Eén waarde. De hoogte is de totale hoogte, ook bij een afschuining of trede |
 | `afschuining` | Eén waarde: het been van een afschuining, of de straal van een afronding, van de bovenrand rondom |
-| `gaten`, `hartafstanden`, `afrondingen`, `treden`, `verzinkingen` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen, `verzinkingen` de diameters van verzinkingen aan het bovenvlak (v0.9) |
+| `gaten`, `hartafstanden`, `afrondingen`, `treden`, `verzinkingen`, `kamerboringen`, `kamerdieptes` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen, `verzinkingen` de diameters van verzinkingen aan het bovenvlak (v0.9), `kamerboringen` en `kamerdieptes` de diameter en de diepte van de kamer van een kamerboring (v0.10) |
 
 ## 5. Draaien
 

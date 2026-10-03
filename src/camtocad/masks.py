@@ -250,8 +250,10 @@ def _chroma_evidence(chroma: np.ndarray, lum: np.ndarray, ref: np.ndarray, valid
 # alleen waar grijs weinig zegt (blauw boven zwart), niet ook waar grijs een scherpe rand geeft.
 ALPHA_SYS_GRAY, ALPHA_SYS_COLOR = 0.02, 0.05
 # Toonkromme (_tone_exponent): alleen als de exponent minstens zoveel van 1 afwijkt en de residuen op de overgangen
-# van de mat er minstens zoveel kleiner door worden
-TONE_MIN_DEV, TONE_MIN_GAIN = 0.05, 0.05
+# van de mat er minstens zoveel kleiner door worden. Verscherping geeft op lineaire foto's 0,92-1,02, een mat die
+# niet vlak ligt tot 0,90 (§3j); een telefoon (sRGB) zit rond 0,45. Eén foto met een kromme die er niet is,
+# veranderde in een stresstest de startcontour
+TONE_MIN_DEV, TONE_MIN_GAIN = 0.15, 0.05
 TONE_BLUR_PX = (0.0, 0.35, 0.7, 1.05)  # extra vervaging (σ, px) van de voorspelling die _tone_exponent probeert
 # voorkennis voor de versterking van de mat vlak buiten de rand (_soft_alpha): pas bij een patroon met meer dan
 # ~5 grijswaarden spreiding telt de gemeten versterking, op een egaal vak blijft het een verschuiving

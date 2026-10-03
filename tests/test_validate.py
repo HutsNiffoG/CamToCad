@@ -88,3 +88,15 @@ def test_systematic_length_error_points_at_the_print_scale(tmp_path):
     _, summary = validate.validate(tmp_path, run=lambda *a, **k: None, log=lambda m: None)
     assert summary["schaal_bias_pct"] == pytest.approx(0.2, abs=0.01)  # lengtes +0,4%, breedtes kloppen
     assert any("printschaal" in n for n in summary["opmerkingen"])
+
+
+def test_counterbores_are_compared_with_diameter_and_depth(tmp_path):
+    """v0.10: de kamer van een kamerboring als twee maten, diameter en diepte (`kamerboringen`, `kamerdieptes`)."""
+    part = bracket()
+    part.holes = [Hole(10.0, 20.0, 6.6, cb=11.02, cb_depth=6.35), Hole(70.0, 20.0, 6.6)]
+    m = validate.model_measures(part.to_dict(), UNC)
+    assert [v for v, _ in m["kamerboring"]] == [11.02] and [v for v, _ in m["kamerdiepte"]] == [6.35]
+    assert m["kamerdiepte"][0][1] == pytest.approx(2 * np.hypot(0.05, 5e-4 * 6.35))
+    p = tmp_path / "maten.json"
+    p.write_text(json.dumps({"maten": {"kamerboring": 11.0, "kamerdieptes": [6.4]}}), encoding="utf-8")
+    assert validate.read_reference(p)["maten"] == {"kamerboring": [11.0], "kamerdiepte": [6.4]}
