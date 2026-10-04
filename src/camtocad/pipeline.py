@@ -992,9 +992,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         ev_diag[label] = {"randpunten met bewijs": round(e.fraction, 3), "vergroting maat": round(e.amp_size, 2),
                           "vergroting plaats": round(e.amp_pos, 2), "zonder bewijs": e.weak}
         if e.weak:
-            warnings.append(f"{label}: te weinig bewijs rond de rand (zwart op zwart: langs de rand is bijna nergens "
-                            "mat te zien): maat en plaats komen uit de pixelfit, met een ruime U95. Controleer ze, of "
-                            "leg het onderdeel anders op de mat")
+            warnings.append(f"{label}: te weinig bewijs rond de rand (zwart op zwart, of wit dat in de foto's is "
+                            "afgekapt: langs de rand is bijna nergens bruikbare mat te zien): maat en plaats komen uit "
+                            "de pixelfit, met een ruime U95. Controleer ze, of leg het onderdeel anders op de mat")
     if ev_diag:
         write_debug({"bewijs binnenvormen": ev_diag})
     snapped, snaps = cadmodel.snap_part(part_pf, unc, threshold=opts.snap_threshold, imperial=opts.imperial,

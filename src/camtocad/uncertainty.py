@@ -29,8 +29,9 @@ from .profile import Part2p5D
 SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afronding": 0.80,
           # een afgeschuinde of afgeronde bovenrand (V17): alleen de lage foto's zien de bovenkant; de maat van de
           # afschuining of afronding, en de hoogte die ervan afhangt. Het masker ligt bij zo'n schuin belichte rand
-          # net iets anders, en dat trekt ook de buitenmaten mee: tot 0,08 mm in de stresstests (§3g)
-          "bovenrand": 0.40, "hoogte bovenrand": 0.40, "lengte bovenrand": 0.20,
+          # net iets anders, en dat trekt ook de buitenmaten mee: tot 0,08 mm in de stresstests (§3g), bij de
+          # afronding van 2 mm in v0.10-v0.11 0,10-0,11 mm (met 0,20 px net buiten U95, §3k)
+          "bovenrand": 0.40, "hoogte bovenrand": 0.40, "lengte bovenrand": 0.25,
           # een verzinking (V16): de rand tussen kegel en bovenvlak in de grijswaarden, niet in het silhouet
           "verzinking": 0.40,
           # een kamerboring (v0.10): de rand van de kamer in de grijswaarden en de doorkijk in schuine foto's; de
