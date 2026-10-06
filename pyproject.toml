@@ -45,4 +45,5 @@ camtocad = ["server/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: end-to-end tests that render and reconstruct a synthetic scan"]
+markers = ["slow: end-to-end tests that render and reconstruct a synthetic scan",
+           "stress: a small stress test from rendering to the comparison with the truth (own CI job)"]

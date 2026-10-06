@@ -1,4 +1,4 @@
-"""Opdrachtregel: `camtocad mat | controleer | scan | valideer | demo | server`."""
+"""Opdrachtregel: `camtocad mat | controleer | scan | valideer | demo | server | stresstest`."""
 
 from __future__ import annotations
 
@@ -56,6 +56,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--data", default=str(Path.home() / "camtocad-data"))
     p.add_argument("--token", default=None, help="toegangscode (standaard: willekeurig gegenereerd)")
 
+    p = sub.add_parser("stresstest", help="synthetische stresstests draaien en met de waarheid vergelijken "
+                                          "(voor ontwikkelaars, zie docs/STRESSTEST.md)")
+    p.add_argument("scenarios", nargs="*", help="scenario's: naam of naam:zaad (standaard alle, zie --lijst)")
+    p.add_argument("--uit", default="stresstest", help="uitvoermap (standaard: stresstest)")
+    p.add_argument("--cache", default=None, help="map om gerenderde scans te bewaren en te hergebruiken")
+    p.add_argument("--grijs", action="store_true", help="kleurscans als grijsbeelden verwerken (controle)")
+    p.add_argument("--parallel", type=int, default=1, metavar="N",
+                   help="N scenario's tegelijk, elk in een eigen proces (~4-5 GB geheugen per scenario)")
+    p.add_argument("--vergelijk", nargs=2, metavar=("OUD", "NIEUW"),
+                   help="twee uitvoermappen naast elkaar zetten en met de waarheid vergelijken")
+    p.add_argument("--lijst", action="store_true", help="de scenario's tonen")
+
     args = parser.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):  # Windows-console (cp1252) kent o.a. '≤' niet
         try:
@@ -102,6 +114,22 @@ def main(argv: list[str] | None = None) -> int:
         elif args.cmd == "server":
             from .server.app import serve
             serve(args.host, args.poort, Path(args.data), args.token)
+        elif args.cmd == "stresstest":
+            from . import stresstest
+            if args.lijst:
+                for name in stresstest.SCENARIOS:
+                    print(f"  {name:20s} {stresstest.describe(name)}")
+            elif args.vergelijk:
+                stresstest.compare(*args.vergelijk)
+            else:
+                results = stresstest.run_many(args.scenarios or list(stresstest.SCENARIOS), args.uit, args.cache,
+                                              args.grijs, parallel=args.parallel)
+                print("\nSamenvatting:")
+                for r in sorted(results, key=lambda r: r["scenario"]):
+                    print(f"  {r['scenario']:20s} {r['status'][:90]}  ({r['time']} s)")
+                print(f"\nVergelijken met een eerdere run: camtocad stresstest --vergelijk <oud> {args.uit}")
+                if any(r["status"] != "OK" for r in results):
+                    return 1
     except ValueError as e:  # ScanError en andere invoerfouten: nette melding, geen traceback
         print(f"Fout: {e}", file=sys.stderr)
         return 1

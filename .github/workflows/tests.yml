@@ -17,4 +17,19 @@ jobs:
       - name: Installeren
         run: pip install -e ".[server,dev]"
       - name: Tests
-        run: pytest -q
+        run: pytest -q -m "not stress"
+
+  stresstest:
+    # een kleine stresstest van begin tot eind (ruis, JPEG, vignettering, verscherping), naast de gewone tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Systeembibliotheek voor OpenCascade/VTK
+        run: sudo apt-get update && sudo apt-get install -y libgl1
+      - name: Installeren
+        run: pip install -e ".[server,dev]"
+      - name: Stresstest
+        run: pytest -q -m stress
