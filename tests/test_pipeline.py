@@ -169,6 +169,60 @@ def test_a_kink_without_evidence_is_removed_but_a_real_one_stays():
     assert removed == 0 and part.outer.n == 5
 
 
+def test_a_small_v_shaped_notch_becomes_rectangular_when_that_fits_better():
+    """Een kleine rechthoekige inham (4 x 3 mm) komt uit de startcontour als V (v0.12, stresstest "inham"): als
+    rechthoek geprobeerd past hij beter, en dan blijft de rechthoek. Een echte V blijft een V."""
+    from camtocad import silhouette
+    from camtocad.calib import Pose
+    from camtocad.profile import Part2p5D, Profile
+    from camtocad.render import look_at
+
+    def from_vertices(V):
+        V = np.asarray(V, float)
+        d = np.roll(V, -1, axis=0) - V
+        n = np.column_stack([d[:, 1], -d[:, 0]]) / np.linalg.norm(d, axis=1, keepdims=True)
+        c = V.mean(axis=0)
+        return Profile("polygon", c, np.arctan2(n[:, 1], n[:, 0]), np.einsum("ij,ij->i", n, V - c), np.zeros(len(V)))
+
+    K = np.array([[1300.0, 0.0, 799.5], [0.0, 1300.0, 599.5], [0.0, 0.0, 1.0]])
+
+    def views_of(part):
+        poses = [look_at([120 + 200 * np.cos(a), 80 + 200 * np.sin(a), 250.0], [120.0, 80.0, 0.0])
+                 for a in 2 * np.pi * np.arange(6) / 6 + 0.3]
+        poses += [look_at([118.0 + 6 * k, 82.0, 320.0], [118.0 + 6 * k, 82.0, 0.0]) for k in range(3)]
+        out = []
+        for k, (R, t) in enumerate(poses):
+            v = silhouette.ViewData(Pose(f"v{k}", R, t), np.zeros((1200, 1600), bool), np.ones((1200, 1600), bool),
+                                    np.zeros((1200, 1600), bool), 0, 0)
+            v.fg = silhouette.render(part, K, v).astype(bool)
+            v.bg = ~v.fg
+            out.append(v)
+        return out
+
+    rect = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 100), (122, 100), (122, 97), (118, 97),
+                                        (118, 100), (90, 100)]))
+    vee = Part2p5D(8.0, from_vertices([(90, 60), (150, 60), (150, 100), (122.8, 100), (120, 96.2), (117.2, 100),
+                                       (90, 100)]))
+    lines = []
+    views = views_of(rect)
+    e = silhouette.energy(vee, K, views)
+    part, e2, notches = pipeline._notch_alternatives(vee, K, views, e, log=lines.append)
+    assert part.outer.n == 8 and e2 < 0.5 * e, lines
+    V = part.outer.vertices()
+    for corner in [(122, 100), (122, 97), (118, 97), (118, 100)]:
+        assert np.min(np.linalg.norm(V - corner, axis=1)) < 0.3, (corner, V)
+        assert np.min(np.linalg.norm(notches[0] - corner, axis=1)) < 0.3
+    # de korte wanden van zo'n inham zijn geen teken van een schaduw (kwaliteitspoort; bij 0,35 mm/px telt een rand
+    # tot 3,5 mm als kort)
+    stats = {"iou_median": 0.999, "iou_min": 0.99}
+    assert not pipeline._quality_issues(part, stats, 10, 100, 0.35, notches)
+    assert any("korte randen" in i for i in pipeline._quality_issues(part, stats, 10, 100, 0.35))
+    views = views_of(vee)  # een echte V-inham blijft een V
+    part, _, notches = pipeline._notch_alternatives(vee, K, views, silhouette.energy(vee, K, views),
+                                                    log=lines.append)
+    assert part.outer.n == 7 and not notches
+
+
 @pytest.mark.slow
 def test_a_part_moved_halfway_through_the_photos_is_reported(tmp_path):
     """Eerst rondom in de ene ligging, dan verschoven en gedraaid: melden, niet een half model maken."""

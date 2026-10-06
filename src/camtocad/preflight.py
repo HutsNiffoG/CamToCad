@@ -34,6 +34,7 @@ from .mat import MatSpec, board_to_mat, get_spec, make_board, rasterize_board
 WORK_SIDE = 2000  # dezelfde werkresolutie als de pipeline
 MIN_CORNERS = 12
 BLUR_WARN, BLUR_BAD = 1.8, 3.0  # onscherpte σ in pixels
+CLOSE_MM = 150.0  # een camera dichter bij de mat (mm boven de mat): weinig scherptediepte, soms de macrolens (V28)
 # richting van de camera gezien vanaf het onderdeel; boven = kant met de titel, onder = meetlijn X
 SECTORS = ("rechts", "rechtsboven", "boven", "linksboven", "links", "linksonder", "onder", "rechtsonder")
 BANDS = (("hoog", 50.0, 80.0, 60), ("laag", 20.0, 50.0, 35))  # naam, elevatie van-tot, richtwaarde (graden)
@@ -497,6 +498,11 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
     if poses and not located:
         advice.append("Het onderdeel is nog niet gevonden op de mat: leg het midden op het geblokte deel en maak "
                       "foto's recht van boven.")
+    close = sum(1 for p in poses.values() if p.center[2] < CLOSE_MM)
+    if close:
+        verb = "is" if close == 1 else "zijn"
+        advice.append(f"{_photos(close)} {verb} van dichterbij dan {CLOSE_MM / 10:.0f} cm gemaakt: houd 25-35 cm aan "
+                      "(meer scherptediepte, en een iPhone schakelt dichtbij vanzelf naar de macrolens).")
     blurry = sum(1 for c in checks if c.blur_px and c.blur_px > BLUR_WARN)
     if blurry:
         verb = "is" if blurry == 1 else "zijn"

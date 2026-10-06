@@ -89,6 +89,7 @@ class ViewMasks:
     tone: float = 1.0  # exponent van de toonkromme van de camera (V2, v0.10; zie _tone_exponent); 1 = lineair
     tone_params: Tone | None = None  # alles wat er over de camera bekend is (v0.11; tone.py)
     tone_map: np.ndarray | None = None  # g per pixel in de uitsnede van `gray`, bij lokale toonbewerking (v0.11)
+    shadow: float = 0.0  # slagschaduw naast het object (_cast_shadow, v0.12)
 
 
 def predict_background(raster: BoardRaster, K: np.ndarray, pose: Pose, size: tuple[int, int]):
@@ -314,6 +315,11 @@ TONE_BLUR_PX = (0.0, 0.35, 0.7, 1.05, 1.5, 2.1, 3.0)
 # voorkennis voor de versterking van de mat vlak buiten de rand (_soft_alpha): pas bij een patroon met meer dan
 # ~5 grijswaarden spreiding telt de gemeten versterking, op een egaal vak blijft het een verschuiving
 MAT_GAIN_PRIOR = 25.0
+# lokale versterking (schaduw) op een fijne schaal (σ in px) waar het gewicht van de bronnen minstens GAIN_FINE_MIN is
+GAIN_FINE_PX, GAIN_FINE_MIN = 2.5, 0.25
+# slagschaduw naast het object (_cast_shadow): mat met een versterking onder SHADOW_GAIN, in een ring vlak om het object
+# tegen een ring verder weg (px)
+SHADOW_GAIN, SHADOW_RING_PX = 0.85, ((3, 15), (30, 45))
 # Afgekapte grijswaarden (v0.11): waar de foto op 255 staat is het echte contrast onbekend, en dan ligt de halve-
 # contrastrand ernaast verkeerd. Een stuk telt als afgekapt als minstens CLIP_FRAC van de pixels in een venster van
 # 5 x 5 px op CLIP_HI staat, en het minstens 5 px breed is: een wit vak dat lokaal contrast (HDR) boven 255 duwt, niet
@@ -416,6 +422,21 @@ def _soft_alpha(fg: np.ndarray, o: np.ndarray, bgv: np.ndarray, valid: np.ndarra
     alpha = np.where(ok, np.clip(a, -1.0, 2.0), np.nan).astype(np.float16)
     w = np.where(ok, 1.0 / np.maximum(var, 1e-4), 0.0).astype(np.float16)
     return alpha, w
+
+
+def _cast_shadow(fg: np.ndarray, gain: np.ndarray, valid: np.ndarray) -> float:
+    """Slagschaduw naast het object (v0.12): welk deel van de mat in een ring van SHADOW_RING_PX om het object
+    duidelijk donkerder is (lokale versterking onder SHADOW_GAIN), min hetzelfde verder weg (een schaduw van hand of
+    telefoon over een groot stuk mat is geen slagschaduw van het onderdeel)."""
+    if not fg.any():
+        return 0.0
+    d = cv2.distanceTransform((~fg).astype(np.uint8), cv2.DIST_L2, 5)
+    (n0, n1), (f0, f1) = SHADOW_RING_PX
+    near, far = valid & (d >= n0) & (d < n1), valid & (d >= f0) & (d < f1)
+    if np.count_nonzero(near) < 200 or np.count_nonzero(far) < 200:
+        return 0.0
+    dark = gain < SHADOW_GAIN
+    return round(float(dark[near].mean() - dark[far].mean()), 3)
 
 
 def _clip_zone(gray: np.ndarray) -> np.ndarray:
@@ -740,6 +761,14 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
                              / np.maximum(_normconv(den_img, src, 40.0, 1.0, min_weight=0.002), 1e-3), 0.2, 2.5)
             coarse = np.where(obj_zone, 1.0, coarse)
             gain = np.where(wsum > 0.05, np.clip(num / np.maximum(den, 1e-3), 0.2, 2.5), coarse).astype(np.float32)
+            if GAIN_FINE_PX > 0:
+                # Waar veel bronnen dicht bij elkaar liggen de fijne schaal: een smalle slagschaduw (een paar mm naast
+                # een laag onderdeel) werd op 6 px uitgesmeerd met de belichte mat ernaast (v0.12)
+                w_f = cv2.GaussianBlur(src, (0, 0), GAIN_FINE_PX)
+                num_f = cv2.GaussianBlur(o * src, (0, 0), GAIN_FINE_PX)
+                den_f = cv2.GaussianBlur(den_img * src, (0, 0), GAIN_FINE_PX)
+                gain = np.where(w_f > GAIN_FINE_MIN, np.clip(num_f / np.maximum(den_f, 1e-3), 0.2, 2.5),
+                                gain).astype(np.float32)
             fit = np.abs(o - gain * den_img) < np.maximum(3.0 * sigma, 0.08 * gain * den_img)
             src = (gain_src & fit).astype(np.float32)
         dev = gain - 1.0
@@ -850,4 +879,5 @@ def classify(observed: np.ndarray, pred: np.ndarray, valid: np.ndarray, *, k_sig
         out.gray = raw.astype(np.float16)
         if not np.isscalar(tone_sl):
             out.tone_map = tone_sl.astype(np.float16)
+        out.shadow = _cast_shadow(fg, gain, valid)
     return out

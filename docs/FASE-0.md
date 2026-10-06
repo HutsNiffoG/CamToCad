@@ -36,7 +36,11 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
 
 ## 3. Fotograferen
 
-- Leg het onderdeel plat in het midden van de mat, bij diffuus licht (bewolkt daglicht, of een lamp tegen het plafond).
+- Leg het onderdeel plat in het midden van de mat, bij diffuus licht (bewolkt daglicht, of een lamp tegen het plafond), met minstens 2 cm mat eromheen en niets anders op de mat. Raak het niet aan tot de laatste foto.
+- **Drie extra scans om v0.12 op echte foto's te toetsen** (elk een aparte map, met dezelfde `maten.json`):
+  - *duwtje*: schuif het onderdeel halverwege de foto's bewust ~1 mm opzij (tik er met een potlood tegen) en fotografeer verder. Het rapport hoort te melden "het onderdeel is tijdens het fotograferen verschoven", met de maten binnen hun U95;
+  - *slagschaduw*: één scan met een lamp of zon schuin op de mat, zodat het onderdeel een scherpe schaduw werpt. Het rapport hoort "slagschaduw naast het onderdeel" te melden, en de maten horen binnen hun (ruimere) U95 te vallen;
+  - *liniaal*: een liniaal of munt naast het onderdeel op de mat. Het rapport hoort die te melden en alleen het onderdeel te verwerken.
 - Maak 30–60 foto's met dezelfde telefoon, zonder zoom:
   - 4–6 recht van boven, met de hele mat in beeld;
   - rondom op ongeveer 35° en 60° boven de mat, om de ~45°;

@@ -113,3 +113,36 @@ def test_print_scale_is_part_of_the_calibration(mat_scan):
     err_naive = max(np.linalg.norm(naive.poses[v.name].center - v.pose.center) for v in views)
     assert err_good < 0.6 and err_naive > 1.0
     assert good.camera.rms_px < naive.camera.rms_px
+
+
+def test_blurry_photos_stay_out_of_the_calibration_but_get_a_pose(mat_scan):
+    """V28 (v0.12): een bewogen of niet scherpgestelde foto (σ > 3 px) gaat niet de kalibratie in; zijn pose komt
+    uit de camera van de scherpe foto's. Met te weinig scherpe foto's toch allemaal."""
+    import cv2
+
+    from camtocad import pipeline, preflight
+
+    spec, cam, views = mat_scan
+    board = mat.make_board(spec)
+    detector = calib.make_detector(board)
+    images = {v.name: v.image for v in views}
+    soft = [v.name for v in views[::5]]
+    for n in soft:
+        images[n] = cv2.GaussianBlur(images[n], (0, 0), 4.5)
+    dets = [d for d in (calib.detect(images[v.name], board, v.name, detector) for v in views) if d is not None]
+    blur = {d.name: preflight.measure_blur(images[d.name], d, spec) for d in dets}
+    found = [d.name for d in dets if blur[d.name] is not None and blur[d.name] > pipeline.CALIB_BLUR_MAX]
+    assert found and set(found) <= set(soft)
+    lines = []
+    res = pipeline.calibrate_sharp(dets, blur, spec, log=lines.append)
+    assert any("niet in de kalibratie" in line for line in lines)
+    assert res.camera.rms_px < 0.3 and abs(res.camera.K[0, 0] / cam.K[0, 0] - 1) < 0.003
+    by_name = {v.name: v for v in views}
+    posed = [n for n in found if n in res.poses]
+    assert len(posed) >= 2 and all(n in res.rejected for n in found if n not in res.poses)  # te weinig hoeken
+    for n in posed:
+        assert np.linalg.norm(res.poses[n].center - by_name[n].pose.center) < 2.0  # mm, uit een onscherpe foto
+    lines.clear()
+    few = [d for d in dets if d.name in found] + [d for d in dets if d.name not in found][:5]
+    pipeline.calibrate_sharp(few, blur, spec, log=lines.append)
+    assert not lines  # te weinig scherpe foto's: gewoon allemaal

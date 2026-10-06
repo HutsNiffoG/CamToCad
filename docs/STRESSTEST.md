@@ -16,10 +16,11 @@ camtocad stresstest --vergelijk run0 run1             # twee runs naast elkaar, 
   - een slagschaduw of een handschaduw;
   - een toonkromme zoals van een telefoon (sRGB), ook met lokale toonbewerking (HDR);
   - een zwart, wit of gekleurd onderdeel;
-  - weinig lage foto's.
+  - weinig lage foto's;
+  - een onderdeel dat halverwege even is aangestoten (0,6 of 2,5 mm), of een kleine inham in de rand (v0.12).
 - `naam:zaad` draait een scenario met een ander zaad: andere ruis en andere poses. De uitvoer heet dan `naam_zaad`.
 - `--cache MAP` bewaart de gerenderde foto's. Een volgende run gebruikt ze opnieuw, en dan vergelijk je twee versies op precies dezelfde foto's. Renderen kost 20–60 s per scenario.
-- Eén scenario kost 1,5–5 minuten op een gewone CPU met 4 kernen, en ~4–5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB gaat 3 tegelijk nog net. Alle 49 scenario's tegelijk in drie groepen kosten ~35 minuten.
+- Eén scenario kost 1,5–5 minuten op een gewone CPU met 4 kernen, en ~5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB is 2 tegelijk veilig; bij 3 tegelijk schoot de kernel in v0.12 soms een proces af (dan stopt de hele run met `BrokenProcessPool`, en draai je de ontbrekende scenario's opnieuw). Alle 52 scenario's kosten zo ~40–90 minuten, afhankelijk van de machine.
 - De cijfers in ROUTE-A-VERBETERPUNTEN.md zijn gedraaid met `OMP_NUM_THREADS=1`, met de foto's uit de cache. Kalibratie en poses rekenen met één thread, dus een scan geeft bij herhaling dezelfde maten (op een paar duizendsten na).
 
 ## Uitvoer

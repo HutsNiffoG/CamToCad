@@ -40,6 +40,10 @@ SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afrondi
           # een blind gat (v0.11): de diepte uit de onderrand van de wand in de grijswaarden
           "gat diepte": 0.60}
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
+# een slagschaduw naast het onderdeel (masks._cast_shadow, v0.12): de rand aan de schaduwkant ligt tot ~0,8 px te ver
+# naar buiten (stresstest zwaar_klein: een zwart plaatje van 5 mm met een harde schaduw, 0,19 mm). Extra systematiek
+# (px) voor de buitenmaten
+SHADOW_PX = {"lengte": 0.6, "lengte bovenrand": 0.6}
 
 
 @dataclass
@@ -89,9 +93,10 @@ class Budget:
     mm_per_px: float
     scale_rel: float
     datum: dict = field(default_factory=dict)  # as -> index van de datumrand
+    extra_px: dict = field(default_factory=dict)  # soort -> extra systematiek (px) voor deze scan, bijv. SHADOW_PX
 
     def sys(self, kind: str) -> float:
-        return SYS_PX[kind] * self.mm_per_px
+        return math.hypot(SYS_PX[kind], self.extra_px.get(kind, 0.0)) * self.mm_per_px
 
     def rel(self, fn: Callable[[Part2p5D], float], kind: str, amp: float = 1.0) -> float | None:
         """1σ voor snappen (zonder printschaal), of None als er geen covariantie is. `amp`: vergroting van het

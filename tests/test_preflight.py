@@ -102,3 +102,21 @@ def test_summary_warns_about_photos_from_another_lens(box_scan):
     advice = [a for a in s["advies"] if "andere camera, lens of zoom" in a]
     assert len(advice) == 1 and advice[0].startswith("2 foto's zijn") and "macrolens" in advice[0]
     assert s["bruikbaar"] == len(views) - 2  # die twee tellen niet mee in de dekking
+
+
+def test_summary_warns_about_photos_taken_too_close(box_scan):
+    """V28 (v0.12): een foto van dichterbij dan 15 cm boven de mat krijgt een aanwijzing (scherptediepte, macrolens)."""
+    import cadquery as cq
+
+    spec, views = box_scan
+    checks = [preflight.check_image(v.name, v.image, spec) for v in views]
+    assert not any("dichterbij" in a for a in preflight.summarize(checks)["advies"])
+    box = render.place(cq.Workplane("XY").box(50, 30, 10, centered=(True, True, False)), spec, angle_deg=10,
+                       offset=(30, 15))
+    R, t = render.look_at([110.0, 60.0, 120.0], [110.0, 62.0, 0.0])
+    img, _ = render.render_view(render.rasterize_board(spec, 10.0, 3.0), render.default_camera(), R, t,
+                                render.tessellate(box), rng=np.random.default_rng(0))
+    close = preflight.check_image("dichtbij", img, spec)
+    assert close.mat and close.corners >= 12
+    advice = [a for a in preflight.summarize(checks + [close])["advies"] if "dichterbij" in a]
+    assert len(advice) == 1 and advice[0].startswith("1 foto is")

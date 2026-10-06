@@ -23,6 +23,7 @@ import numpy as np
 
 from . import (__version__, blindhole, cadmodel, calib, counterbore, countersink, debug, edgefit, holes, hull, initial,
                masks, placement, preflight, prismcheck, profile, report, silhouette, tone, uncertainty)
+from .cadhelpers import afgeronde_hoeken
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
@@ -192,6 +193,85 @@ def _turns_deg(outer) -> np.ndarray:
     return np.degrees(np.abs((outer.angles - np.roll(outer.angles, 1) + np.pi) % (2 * np.pi) - np.pi))
 
 
+# V14/V15 (v0.12): een inham van hooguit zoveel mm breed en diep, in een rechte rand, wordt ook als rechthoek geprobeerd
+NOTCH_MAX_MM, NOTCH_STRAIGHT_DEG = 12.0, 10.0
+
+
+def _u_notch(o, t: int):
+    """De V-vormige inham met de punt in hoekpunt `t` als rechthoekige inham: de twee schuine randen worden een wand,
+    een bodem en een wand, haaks op de rand eromheen. Bodem op de diepte van de (afgeronde) punt, breedte die van de
+    V op halve diepte. Geeft een Profile, of None als het geen V-inham in een rechte rand is."""
+    n = o.n
+    V = o.vertices()
+    if n < 5:
+        return None
+    d = np.roll(V, -1, axis=0) - V  # rand k: hoekpunt k -> k+1
+    prev = np.roll(d, 1, axis=0)
+    cross = prev[:, 0] * d[:, 1] - prev[:, 1] * d[:, 0]  # < 0: holle hoek (tegen de klok in)
+    a, b = (t - 1) % n, (t + 1) % n
+    if not (cross[t] < 0 and cross[a] > 0 and cross[b] > 0):
+        return None
+    if max(np.linalg.norm(d[a]), np.linalg.norm(d[t])) > NOTCH_MAX_MM:
+        return None
+    before, after = (t - 2) % n, (t + 1) % n  # de rand voor en na de inham
+    gap = abs((o.angles[before] - o.angles[after] + np.pi) % (2 * np.pi) - np.pi)
+    if np.degrees(gap) > NOTCH_STRAIGHT_DEG:
+        return None
+    ang = float(o.angles[before] + ((o.angles[after] - o.angles[before] + np.pi) % (2 * np.pi) - np.pi) / 2)
+    n_o = np.array([math.cos(ang), math.sin(ang)])  # buitennormaal van de rand
+    tau = np.array([-n_o[1], n_o[0]])  # looprichting (tegen de klok in)
+    hoeken = afgeronde_hoeken(o.corner_table())
+    apex = np.asarray(hoeken[t][1] if hoeken[t][1] is not None else V[t], float)  # diepste punt van de punt
+    mouth = (V[a] + V[b]) / 2
+    depth_v = float(n_o @ (mouth - V[t]))  # diepte van de scherpe V
+    depth = float(n_o @ (mouth - apex))
+    if depth_v <= 0 or depth <= 0:
+        return None
+    width = float(np.linalg.norm(V[a] - V[b])) * (1.0 - 0.5 * depth / depth_v)
+    c = o.center
+    u = float(tau @ (apex - c))
+    angles = [ang + math.pi / 2, ang, ang - math.pi / 2]  # wand (normaal = looprichting), bodem, wand
+    offsets = [u - width / 2, float(n_o @ (apex - c)), -u - width / 2]
+    # randen in de volgorde van de contour, met de punt op plaats 2: [.., rand voor, wand, bodem, wand, rand na, ..]
+    order = [(t - 2 + k) % n for k in range(n)]
+    ang_r, off_r, fil_r = o.angles[order], o.offsets[order], o.fillets[order]  # rand 0 = rand voor de inham
+    new_angles = np.concatenate([[ang_r[0]], angles, ang_r[3:]])
+    new_offsets = np.concatenate([[off_r[0]], offsets, off_r[3:]])
+    # hoekpunt k ligt tussen rand k-1 en k: de ingang houdt zijn afronding, de bodemhoeken beginnen scherp
+    new_fillets = np.concatenate([[fil_r[0], fil_r[1], 0.0, 0.0, fil_r[3]], fil_r[4:]])
+    out = profile.Profile("polygon", c.copy(), np.unwrap(new_angles), new_offsets, new_fillets)
+    return out if out.is_valid() else None
+
+
+def _notch_alternatives(part, K: np.ndarray, vd: list, energy: float, log=print):
+    """Een kleine rechthoekige inham in de buitenrand komt uit de startcontour vaak als V met een afgeronde punt
+    (de hoeken van de bodem zijn een paar pixels groot). Per V-inham in een rechte rand ook de rechthoek proberen
+    (_u_notch, kort gefit); past die duidelijk beter (de energie daalt meer dan de straf voor een hoekpunt extra),
+    dan verder met de rechthoek. Geeft (model, energie, de vier hoekpunten (mat) van elke aangenomen inham)."""
+    notches: list[np.ndarray] = []
+    if part.outer.kind != "polygon":
+        return part, energy, notches
+    for _ in range(3):
+        best = None
+        for t in range(part.outer.n):
+            outer = _u_notch(part.outer, t)
+            if outer is None:
+                continue
+            cand = part.copy()
+            cand.outer = outer
+            cand, e, _ = silhouette.refine(cand, K, vd, max_evals=400)
+            penalty = max(0.005 * min(e, energy), float(len(vd)))
+            log(f"inham bij hoek {t + 1} als rechthoek geprobeerd: energie {e:.0f} tegen {energy:.0f}"
+                + ("; verder met de rechthoek" if e + penalty < energy else ""))
+            if e + penalty < energy and (best is None or e < best[1]):
+                best = (cand, e, t)
+        if best is None:
+            break
+        part, energy, _ = best
+        notches.append(part.outer.vertices()[1:5])  # _u_notch zet de rand voor de inham op plaats 0
+    return part, energy, notches
+
+
 def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg: float = 10.0,
                       max_edge_mm: float = 5.0, max_failures: int = 6, log=print):
     """Haalt hoekpunten weg die het model niet nodig heeft: een knik van een paar graden in een rechte
@@ -316,6 +396,26 @@ def _refine_start(part, K: np.ndarray, vd: list, max_evals: int, log=print):
         if better:
             best, e_best, evals = cand, e, n
     return best, e_best, evals
+
+
+# V27: een duwtje wordt alleen gecorrigeerd als het gemiddelde verlies van de randfit daardoor minstens zoveel kleiner wordt;
+# hooguit zoveel rondes (een nieuwe sprong, of dezelfde verder verfijnd)
+NUDGE_GAIN, NUDGE_ROUNDS = 0.9, 4
+
+
+def _fit_cost(ef) -> float:
+    """Het gemiddelde verlies per randpunt (Cauchy, zoals in de randfit); oneindig zonder randfit."""
+    if not ef.accepted or len(ef.residuals) == 0:
+        return math.inf
+    return float(np.mean(np.log1p((ef.residuals / edgefit.F_SCALE) ** 2)))
+
+
+def _find_nudge(part, K: np.ndarray, vd: list, ef, order: list[str], info: dict):
+    """V27: per foto de verschuiving van het model (edgefit.view_offsets) en de toets op een duwtje
+    (placement.find_nudge). `info` krijgt de toets en de verschuivingen (voor diagnose.json)."""
+    D, c = edgefit.view_offsets(part, K, vd, prob=ef.extra.get("problem"))
+    radius = float(np.max(np.linalg.norm(part.outer.outline() - c, axis=1)))
+    return placement.find_nudge(D, [v.pose.name for v in vd], order, c, radius, info)
 
 
 HOLE_PARAMS = ("hx", "hy", "hd", "hk", "hc", "hz", "hp")  # maat, plaats, verzinking, kamer en diepte van een gat
@@ -521,14 +621,21 @@ def _non_prism(part, K: np.ndarray, vd: list, energy: float, shape, mm_per_px: f
     return None
 
 
-def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25) -> list[str]:
-    """Signalen dat het model niet klopt, ook al is er een model uitgekomen."""
+def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: float = 0.25,
+                    notches: list | None = None) -> list[str]:
+    """Signalen dat het model niet klopt, ook al is er een model uitgekomen. `notches`: de hoekpunten van rechthoekige
+    inhammen die de fit heeft aangenomen (_notch_alternatives): hun korte wanden zijn geen teken van een schaduw."""
     issues = []
     if part.outer.kind == "polygon":
         # een uitstulping of inham van een paar pixels (schaduw, rommelig masker) geeft korte randen
         V = part.outer.vertices()
         short_mm = max(2.0, 10.0 * mm_per_px)
-        short = int(np.sum(np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1) < short_mm))
+        is_short = np.linalg.norm(np.roll(V, -1, axis=0) - V, axis=1) < short_mm  # rand k: hoekpunt k -> k+1
+
+        def in_notch(k: int) -> bool:
+            ends = (V[k], V[(k + 1) % len(V)])
+            return any(all(np.min(np.linalg.norm(nt - e, axis=1)) < 0.5 for e in ends) for nt in notches or [])
+        short = sum(1 for k in np.flatnonzero(is_short) if not in_notch(k))
         if short >= 2:
             issues.append(f"{short} zeer korte randen (< {short_mm:.1f} mm): mogelijk een uitstulping of inham die "
                           "er niet is")
@@ -554,6 +661,31 @@ def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: fl
     if part.cutouts:
         issues.append(f"{len(part.cutouts)} niet-ronde uitsparing(en): controleer of dat klopt")
     return issues
+
+
+# V8 (v0.12): een slagschaduw naast het onderdeel telt als de mediaan over de foto's van masks._cast_shadow minstens
+# zo groot is
+SHADOW_WARN = 0.10
+# V28: foto's met een onscherpte boven CALIB_BLUR_MAX (px, gemeten aan de mat) niet in de kalibratie, als er
+# minstens CALIB_MIN_SHARP scherpe overblijven; een camera dichter dan CLOSE_MM boven de mat geeft een waarschuwing
+CALIB_BLUR_MAX, CALIB_MIN_SHARP, CLOSE_MM = preflight.BLUR_BAD, 8, preflight.CLOSE_MM
+
+
+def calibrate_sharp(dets: list, blur: dict, spec, log=print) -> calib.CalibrationResult:
+    """Zelfkalibratie op de scherpe foto's; de pose van de onscherpe daarna uit die camera (V28). Bewogen of niet
+    scherpgestelde foto's hebben onnauwkeurige mathoeken, en die trokken de camera mee (de eerste echte fotoset had een
+    reprojectiefout van 1,6 px, vooral door zulke foto's). Voor de maskers zijn ze vaak nog bruikbaar: die passen zich
+    aan de onscherpte aan."""
+    soft = [d for d in dets if blur.get(d.name) is not None and blur[d.name] > CALIB_BLUR_MAX]
+    if not soft or len(dets) - len(soft) < CALIB_MIN_SHARP:
+        return calib.calibrate(dets, spec)
+    cal = calib.calibrate([d for d in dets if d not in soft], spec)
+    extra = calib.calibrate(soft, spec, camera=cal.camera)
+    cal.poses.update(extra.poses)
+    cal.rejected.update(extra.rejected)
+    log(f"{len(soft)} onscherpe foto('s) (σ > {CALIB_BLUR_MAX:.0f} px) niet in de kalibratie; hun pose komt uit de "
+        f"camera van de andere {len(dets) - len(soft)}")
+    return cal
 
 
 def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=print, scan_name: str = "") -> dict:
@@ -610,8 +742,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         dets = [d for d in dets if d.name not in other_lens]
         log(f"{len(other_lens)} foto('s) van een andere camera, lens of zoom niet gebruikt: "
             + next(iter(other_lens.values())))
+    # V28: de onscherpte per foto, gemeten aan de mat (preflight.py); onscherpe foto's niet in de kalibratie
+    blur = {d.name: preflight.measure_blur(lookup[d.name], d, spec) for d in dets}
     try:
-        cal = calib.calibrate(dets, spec)
+        cal = calibrate_sharp(dets, blur, spec, log)
     except ValueError as e:
         raise ScanError(str(e)) from e
     cal.rejected.update(other_lens)
@@ -638,6 +772,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                                                              else 1))
             cal.rejected.pop(name, None)
             dets.append(best[2])
+            blur[name] = preflight.measure_blur(best[1], best[2], spec)
             n_turned += 1
     if n_turned:
         log(f"{n_turned} foto('s) waren gedraaid opgeslagen en zijn teruggedraaid")
@@ -647,11 +782,15 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append(f"{name}: niet gebruikt ({reason})")
     log(f"camera gekalibreerd: f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px, "
         f"{len(cal.poses)} poses")
+    close = sorted(n for n, pose in cal.poses.items() if pose.center[2] < CLOSE_MM)
+    if close:  # V28
+        warnings.append(f"{len(close)} foto('s) van dichterbij dan {CLOSE_MM / 10:.0f} cm boven de mat ("
+                        + ", ".join(close[:6]) + (" ..." if len(close) > 6 else "") + "): de scherptediepte is "
+                        "dan klein en een telefoon schakelt soms naar de macrolens. Houd 25-35 cm aan")
     if cam.f_std_rel > F_STD_WARN:  # V10: de brandpuntsafstand is slecht bepaald (weinig verschillende hoeken)
         warnings.append(f"brandpuntsafstand onzeker (σ {100 * cam.f_std_rel:.2f}%, goed is < {100 * F_STD_WARN:.1f}%): "
                         "maak foto's van meer verschillende hoeken en hoogtes, met de mat steeds grotendeels in beeld")
-    # onscherpte per foto, gemeten aan de mat (preflight.py)
-    blur = {d.name: preflight.measure_blur(lookup[d.name], d, spec) for d in dets if d.name in cal.poses}
+    blur = {n: b for n, b in blur.items() if n in cal.poses}
     blurry = sorted(n for n, b in blur.items() if b is not None and b > preflight.BLUR_WARN)
     if blurry:
         warnings.append(f"{len(blurry)} foto('s) onscherp (σ > {preflight.BLUR_WARN:.1f} px): "
@@ -751,6 +890,20 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     diag["dekking"] = cov
     write_overlays()
     log(f"object gelokaliseerd: {hi[0] - lo[0]:.0f} x {hi[1] - lo[1]:.0f} mm, hoogte ≤ {z_top:.0f} mm")
+    # V12 (v0.12): meer voorwerpen op de mat, of een onderdeel tegen of over de rand van de mat
+    for b in coarse.others:
+        log(f"nog een voorwerp op de mat bij ({b.center[0]:.0f}, {b.center[1]:.0f}) mm, ~{b.size[0]:.0f} x "
+            f"{b.size[1]:.0f} mm: niet verwerkt")
+    if coarse.others:
+        where = "; ".join(f"bij ({b.center[0]:.0f}, {b.center[1]:.0f}) mm, ~{b.size[0]:.0f} x {b.size[1]:.0f} mm"
+                          for b in coarse.others[:3])
+        warnings.append(f"er {'ligt' if len(coarse.others) == 1 else 'liggen'} nog {len(coarse.others)} "
+                        f"voorwerp{'' if len(coarse.others) == 1 else 'en'} op de mat ({where}). Alleen het onderdeel "
+                        "waar de foto's van boven op gericht zijn is verwerkt; haal de rest van de mat, want vlak "
+                        "naast het onderdeel verstoort een ander voorwerp de rand.")
+    if coarse.chosen is not None and coarse.chosen.at_edge:
+        warnings.append("het onderdeel ligt tegen of over de rand van de mat: daarbuiten ziet de verwerking geen mat "
+                        "en dus geen rand. Leg het onderdeel midden op de mat, met minstens 2 cm mat eromheen.")
     if opts.debug_images:
         imwrite(dbg / "lokalisatie.png",
                     debug.hull_image(coarse, board_bounds, (lo[0] - 6, hi[0] + 6, lo[1] - 6, hi[1] + 6)))
@@ -801,15 +954,23 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "hoogtes_mm": sweep.heights.round(2).tolist(), "overeenstemming": sweep.agreement.round(4).tolist(),
             "oppervlak_mm2": sweep.area.round(1).tolist(), "beste_mm": sweep.best, "informatief": sweep.informative},
     }})
-    vd = silhouette.prepare(views, cam.K, part, z_max=part.height * 1.4 + 4)
-    part, energy, evals = _refine_start(part, cam.K, vd, opts.max_evals, log=log)
-    probed, e_probed, changed = silhouette.probe_fillets(part, cam.K, vd, energy)
-    if changed:  # een afronding die de kompaszoektocht vanuit een (bijna) scherpe hoek niet vond
-        probed, e_probed, _ = silhouette.refine(probed, cam.K, vd, max_evals=200)
-        log(f"afrondingen opnieuw bepaald: energie {energy:.0f} → {e_probed:.0f}")
-        part, energy = probed, e_probed
-    part, energy, _ = _simplify_outline(part, cam.K, vd, energy, log=log)
-    part, energy = _add_missed_holes(part, cam.K, vd, energy, log=log)
+    part0 = part  # het startmodel; na een duwtje (V27) begint de fit hier opnieuw
+
+    def fit_shape(views):
+        """De pixelfit vanaf het startmodel: vorm, afrondingen, overbodige hoekpunten weg, gemiste gaten erbij."""
+        vd = silhouette.prepare(views, cam.K, part0, z_max=part0.height * 1.4 + 4)
+        part, energy, evals = _refine_start(part0, cam.K, vd, opts.max_evals, log=log)
+        probed, e_probed, changed = silhouette.probe_fillets(part, cam.K, vd, energy)
+        if changed:  # een afronding die de kompaszoektocht vanuit een (bijna) scherpe hoek niet vond
+            probed, e_probed, _ = silhouette.refine(probed, cam.K, vd, max_evals=200)
+            log(f"afrondingen opnieuw bepaald: energie {energy:.0f} → {e_probed:.0f}")
+            part, energy = probed, e_probed
+        part, energy, _ = _simplify_outline(part, cam.K, vd, energy, log=log)
+        part, energy, notches = _notch_alternatives(part, cam.K, vd, energy, log=log)
+        part, energy = _add_missed_holes(part, cam.K, vd, energy, log=log)
+        return vd, part, energy, evals, notches
+
+    vd, part, energy, evals, notches = fit_shape(views)
     oc = part.outer.outline()
     center = np.array([*(oc.min(axis=0) + oc.max(axis=0)) / 2, part.height / 2])
     mm_per_px = _object_distance(cal.poses.values(), center) / cam.K[0, 0]
@@ -820,6 +981,59 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         log(f"{m} ({time.time() - t_fit:.0f} s)")
 
     ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
+    # V27 (v0.12): het onderdeel tussendoor even aangestoten? Dan liggen de foto's erna net iets anders dan die ervoor.
+    # De poses van de foto's erna verschuiven dan met het onderdeel mee. Een nieuw duwtje: de hele fit opnieuw (de
+    # eerste fit was een compromis, met bijvoorbeeld een spookgat waar de ene groep foto's mat zag). Daarna wordt
+    # dezelfde sprong nog verfijnd: het compromis vervormde het model, en dan meet de eerste ronde maar een deel
+    nudges: dict[str, float] = {}  # per sprong (de laatste foto ervoor) de grootte, opgeteld over de rondes
+    diag["duwtje"] = []
+    order = [n for n, _ in images]
+    for _ in range(NUDGE_ROUNDS):
+        info: dict = {}
+        t_nudge = time.time()
+        nd = _find_nudge(ef.part if ef.accepted else part, cam.K, vd, ef, order, info)
+        diag["duwtje"].append(info)
+        if nd is None:
+            log(f"duwtje: geen (toets {info.get('toets', 0):.1f}, sprong {info.get('grootte_mm', 0):.3f} mm; "
+                f"{time.time() - t_nudge:.0f} s)")
+            break
+        again = nd.before in nudges
+        log(f"onderdeel verschoven na foto {nd.before}: {nd.motion[0]:+.2f}, {nd.motion[1]:+.2f} mm, "
+            f"{math.degrees(nd.motion[2]):+.2f}° (toets {nd.t:.0f}); de poses van de "
+            f"{sum(p.name in set(nd.moved) for p, _ in views)} foto's erna "
+            + ("verder gecorrigeerd" if again else "gecorrigeerd, alles opnieuw gefit"))
+        before = (views, top_views, vd, part, energy, evals, notches, ef)
+        top_names = {p.name for p, _ in top_views}
+        views = placement.apply_nudge(views, nd)
+        top_views = [v for v in views if v[0].name in top_names]
+        if again:
+            start = ef.part if ef.accepted else part
+            vd = silhouette.prepare(views, cam.K, start, z_max=start.height * 1.4 + 4)
+            part, energy, _ = silhouette.refine(start, cam.K, vd, max_evals=max(300, opts.max_evals // 2))
+        else:
+            vd, part, energy, evals, notches = fit_shape(views)
+        t_fit = time.time()
+        ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
+        # alleen als de fit er duidelijk beter door past (een verfijning: niet slechter): een sprong in de
+        # verschuivingen die van iets anders komt (een maskerfout in een reeks foto's) maakt de fit niet beter
+        c0, c1 = _fit_cost(before[-1]), _fit_cost(ef)
+        e0 = before[4]  # energie
+        info["verlies"] = [round(c, 4) if math.isfinite(c) else None for c in (c0, c1)]
+        info["energie"] = [round(e0), round(energy)]
+        gain = 1.0 if again else NUDGE_GAIN
+        better = c1 < gain * c0 if math.isfinite(c0) or math.isfinite(c1) else energy < gain * e0  # zonder randfit
+        if not better:
+            log(f"duwtje niet gecorrigeerd: de fit past daarmee niet beter (verlies {c0:.4f} → {c1:.4f}, energie "
+                f"{e0:.0f} → {energy:.0f})")
+            views, top_views, vd, part, energy, evals, notches, ef = before
+            break
+        log(f"na de correctie: verlies {c0:.4f} → {c1:.4f}, energie {e0:.0f} → {energy:.0f}")
+        nudges[nd.before] = nudges.get(nd.before, 0.0) + nd.size_mm
+    diag["duwtjes"] = {k: round(v, 3) for k, v in nudges.items()}
+    if nudges:
+        warnings.append("het onderdeel is tijdens het fotograferen verschoven (aangestoten?): " + "; ".join(
+            f"na foto {k} ~{v:.1f} mm" for k, v in nudges.items()) + ". De foto's erna zijn daarvoor "
+            "gecorrigeerd; controleer de maten, of maak de foto's opnieuw zonder het onderdeel aan te raken.")
     # V19: past een prisma wel? Een trede of afschuining geeft anders een stil compromis (vooral in de hoogte).
     # V17: zo'n vorm dan als model proberen, en de randfit en de toets opnieuw
     shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
@@ -946,7 +1160,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     stats_fit = silhouette.view_stats(part, cam.K, vd)
     log(f"model gefit: hoogte {part.height:.3f} mm, {len(part.holes)} gat(en), "
         f"silhouet-IoU mediaan {stats_fit['iou_median']:.4f}")
-    issues = _quality_issues(part, stats_fit, evals, opts.max_evals, mm_per_px)
+    issues = _quality_issues(part, stats_fit, evals, opts.max_evals, mm_per_px, notches)
     if shape is not None:
         diag["prisma"] = shape.details
         issues += [f"geen 2,5D-vorm? {m}" for m in shape.issues]
@@ -954,6 +1168,25 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if ghosts:
         issues.append(f"{len(ghosts)} gat(en) waardoor in geen bovenaanzicht mat te zien is: mogelijk spookgaten "
                       "(controleer ze; bij een oude mat v1 kan dit ook een echt gat boven een egaal zwart vak zijn)")
+    # V14 (v0.12): plekken waar de foto's van boven iets anders zien dan het model: een gemiste inham, uitstulping of
+    # gat, of iets dat tegen het onderdeel aan ligt
+    clusters = holes.residual_clusters(part, cam.K, vd)
+    diag["restclusters"] = clusters
+    for c in clusters[:3]:
+        what = ("mat waar het model materiaal heeft (een gemiste inham of een gemist gat)" if c["soort"] == "inham"
+                else "materiaal buiten het model (een gemiste uitstulping, of iets dat tegen het onderdeel aan ligt)")
+        issues.append(f"de foto's van boven zien op ({c['x']:.1f}, {c['y']:.1f}) mm (mat) {what}, ~{c['oppervlak']:.0f} "
+                      f"mm² in {c['fotos']} foto's")
+    # en stukken buitenrand die het model niet volgt (een vorm die het mist of anders heeft, zoals een kleine
+    # rechthoekige inham die als V-vorm in het model kwam)
+    misfit_info: dict = {}
+    misfits = edgefit.contour_misfit(part, cam.K, vd, mm_per_px, prob=ef.extra.get("problem"), info=misfit_info)
+    diag["randafwijkingen"] = misfits
+    diag["randafwijking_max"] = misfit_info
+    for m in misfits[:3]:
+        issues.append(f"de rand bij ({m['x']:.1f}, {m['y']:.1f}) mm (mat) ligt in de foto's over {m['lengte']:.1f} mm "
+                      f"tot {abs(m['afwijking']):.2f} mm verder naar {'buiten' if m['afwijking'] > 0 else 'binnen'} dan "
+                      "in het model: een vorm die het model mist of anders heeft")
     if stats_fit["iou_median"] < 0.9:
         write_debug({"kwaliteit": issues})
         raise ScanError("Het gevonden model past niet bij de foto's (silhouet-IoU mediaan "
@@ -966,6 +1199,14 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append("fotoset onvolledig: " + " ".join(cov["advies"]))
 
     # 7. onzekerheid, werkassenstelsel, snappen (de printschaal zit al in de poses)
+    # V8 (v0.12): een slagschaduw naast het onderdeel in de meeste foto's (masks._cast_shadow)
+    shadow = float(np.median([m.shadow for _, m in views])) if views else 0.0
+    cast_shadow = shadow >= SHADOW_WARN
+    if cast_shadow:
+        warnings.append(f"slagschaduw naast het onderdeel (in de meeste foto's {100 * shadow:.0f}% van de mat er vlak "
+                        "omheen duidelijk donkerder): de rand aan de schaduwkant kan iets te ver naar buiten liggen, "
+                        "buitenmaten tot ~0,2 mm te groot. De U95 is daarvoor ruimer. Gebruik diffuus licht (geen "
+                        "lamp of zon recht op de mat) voor de beste nauwkeurigheid")
     unc = cadmodel.estimate_uncertainty(mm_per_px, len(vd), n_top)
     # printschaal: zonder gemeten meetlijnen is de schaal van de print niet bekend (printers wijken 0,1-1% af)
     unc.scale_rel = uncertainty.SCALE_REL_MEASURED if opts.scale_measured else uncertainty.SCALE_REL_ASSUMED
@@ -983,6 +1224,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             budget = uncertainty.Budget(uncertainty.Sensitivity(prob.build, ef.x, C, angle, shift), mm_per_px,
                                         unc.scale_rel)
             unc_method = "per maat: jackknife over groepen foto's (randfit), systematiek, " + scale_note
+            if cast_shadow:
+                budget.extra_px.update(uncertainty.SHADOW_PX)
+                unc_method += ", slagschaduw"
     # bewijs rond gaten en sleuven (edgefit.evidence): zonder bewijs rondom zijn maat en plaats onzekerder
     evidence = ef.extra.get("evidence") or {}
     slot_label = [n for n, _ in cadmodel.slot_names(part_pf)]

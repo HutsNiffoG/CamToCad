@@ -828,7 +828,7 @@ class _Problem:
     """De residuen als functie van de parametervector, met vaste punten en vaste randstatus."""
 
     def __init__(self, part: Part2p5D, K: np.ndarray, vd: list, density: float = DENSITY,
-                 mm_per_px: float | None = None):
+                 mm_per_px: float | None = None, fields: list | None = None):
         self.K, self.vd = K, vd
         self.fillet_trust = max(TRUST_MM, TRUST_FILLET_PX * mm_per_px) if mm_per_px else TRUST_MM
         self.base = part.outer.angles.copy()
@@ -836,8 +836,8 @@ class _Problem:
         self.frozen = [p.name for p in silhouette._params(part) if p.name not in {q.name for q in self.params}]
         self.template = part
         self.lay = layout(part, density)
-        self.fields = []
-        for v in vd:
+        self.fields = fields if fields is not None else []
+        for v in vd if fields is None else []:
             sf, sb = signed_dist(v.fg), signed_dist(v.bg)
             band = sf + sb  # breedte van de strook zonder bewijs
             self.fields.append((edge_distance(sf, band, getattr(v, "alpha", None), getattr(v, "alpha_w", None)),
@@ -875,9 +875,15 @@ class _Problem:
         return np.concatenate([np.full(self.n_residuals(i), i) for i in views])
 
     def residuals(self, x: np.ndarray, views: list[int] | None = None) -> np.ndarray:
+        return self.residuals_of(self.build(x), views)
+
+    def residuals_of(self, p: Part2p5D, views: list[int] | None = None, clip: float = 15.0,
+                     evidence: bool = True) -> np.ndarray:
+        """De residuen van model `p` (dezelfde vorm als de template; zie `residuals`), afgekapt op ±`clip` px.
+        Zonder `evidence` telt elk punt even zwaar, ook waar geen zekere mat in de buurt is (view_offsets: een
+        model dat een paar millimeter naast het silhouet ligt, valt met zijn rand vaak op egale mat)."""
         views = range(len(self.vd)) if views is None else views
         n_on = sum(self.n_residuals(i) for i in views)
-        p = self.build(x)
         if not p.is_valid():
             return np.full(n_on, 20.0)
         rim = rims(p, self.lay)
@@ -891,16 +897,16 @@ class _Problem:
             uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
             r = _bilinear(sf, uv)
             g = _bilinear(band, uv)
-            wgt = np.clip((4.0 - g) / 2.0, 0.0, 1.0)  # geen zekere mat binnen ~3 px: geen bewijs
+            wgt = np.clip((4.0 - g) / 2.0, 0.0, 1.0) if evidence else np.ones(len(g))  # geen zekere mat binnen ~3 px
             # gaten en sleuven: geen bewijs waar de foto afgekapt is (zie _clip_free); de buitencontour houdt daar de
             # maskerrand (zonder bewijs zou ze kunnen wegdrijven, en er is geen pixelfit om op terug te vallen per rand)
             wgt = np.where(feat[on], _clip_free(v, uv, wgt), wgt)
-            out.append(wgt * np.clip(r, -15.0, 15.0))
+            out.append(wgt * np.clip(r, -clip, clip))
             if P_in is not None and len(self.inner[i][0]):
                 # afstand (px, + = naar buiten) van het modelpunt tot de gemeten rand, langs de normaal in beeld
                 idx, e, nrm, wt = self.inner[i]
                 uvi, _ = project(P_in[idx], v.pose, self.K)
-                out.append(wt * np.clip(np.sum((uvi - [v.x0, v.y0] - e) * nrm, axis=1), -15.0, 15.0))
+                out.append(wt * np.clip(np.sum((uvi - [v.x0, v.y0] - e) * nrm, axis=1), -clip, clip))
         return np.concatenate(out) if out else np.zeros(0)
 
     def bounds(self, x0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -914,6 +920,124 @@ class _Problem:
             lo.append(max(v - d, p.lower))
             hi.append(v + up)
         return np.array(lo), np.array(hi)
+
+
+def moved(part: Part2p5D, c: np.ndarray, d) -> Part2p5D:
+    """Het model, verschoven over (dx, dy) mm en gedraaid over dθ rad om het punt `c` (mat): een duwtje (V27)."""
+    ca, sa = math.cos(d[2]), math.sin(d[2])
+    R = np.array([[ca, -sa], [sa, ca]])
+    return part.transformed(float(d[2]), c - R @ c + np.asarray(d[:2], float))
+
+
+def view_offsets(part: Part2p5D, K: np.ndarray, vd: list, prob: _Problem | None = None, iters: int = 8,
+                 min_points: int = 30) -> tuple[np.ndarray, np.ndarray]:
+    """Per foto de starre beweging in het matvlak die het model het best op die foto legt (V27, v0.12): (dx, dy) in
+    mm en dθ in rad, om het midden van de omhullende rechthoek. Ligt het onderdeel stil, dan is die overal bijna 0
+    (wat overblijft komt van poses en maskers); is het tussendoor aangestoten, dan verschilt hij tussen de foto's
+    van voor en na. Gauss-Newton per foto vanuit `part`, met Cauchy-gewichten op de schaal van de residuen zelf en
+    zonder ze af te kappen: ook een duwtje van een paar millimeter (meer dan 15 px) wordt zo gevolgd. `prob`: een
+    randfitprobleem op dezelfde foto's (hergebruikt de randafstanden). Geeft (n_fotos, 3) en het midden; NaN voor
+    een foto met minder dan `min_points` randpunten."""
+    q = _Problem(part, K, vd, fields=prob.fields if prob is not None and prob.vd is vd else None)
+    q.set_status(part)
+    oc = part.outer.outline()
+    c = (oc.min(axis=0) + oc.max(axis=0)) / 2
+    radius = max(float(np.max(np.linalg.norm(oc - c, axis=1))), 1.0)
+    steps = np.array([0.02, 0.02, 0.02 / radius])  # ~0,02 mm aan de rand: ruim binnen het lineaire bereik
+    out = np.full((len(vd), 3), np.nan)
+    for i in range(len(vd)):
+        if q.n_residuals(i) < min_points:
+            continue
+        d = np.zeros(3)
+        # eerst grof, met elk randpunt even zwaar (een flinke duw zet de modelrand op egale mat, zonder bewijs), dan
+        # fijn, met het bewijs zoals in de randfit
+        for evidence, n_iter, tol in ((False, iters, 0.01), (True, 3, 0.002)):
+            for _ in range(n_iter):
+                r0 = q.residuals_of(moved(part, c, d), [i], clip=np.inf, evidence=evidence)
+                J = np.column_stack([(q.residuals_of(moved(part, c, d + e), [i], clip=np.inf, evidence=evidence)
+                                      - r0) / h for e, h in zip(np.diag(steps), steps)])
+                f = max(F_SCALE, 1.4826 * float(np.median(np.abs(r0))))
+                w = 1.0 / (1.0 + (r0 / f) ** 2)
+                A, b = J.T @ (w[:, None] * J), J.T @ (w * r0)
+                # een rond onderdeel met de gaten in het midden: een draaiing verandert niets, dus alleen dx en dy
+                scale = np.array([1.0, 1.0, 1.0 / radius])
+                ev = np.linalg.eigvalsh(A * np.outer(scale, scale))
+                free = 3 if ev[0] > 1e-4 * ev[-1] else 2
+                step = np.zeros(3)
+                try:
+                    step[:free] = np.linalg.solve(A[:free, :free] + 1e-9 * np.trace(A) * np.eye(free), b[:free])
+                except np.linalg.LinAlgError:
+                    break
+                d = d - step
+                if np.max(np.abs(step * [1.0, 1.0, radius])) < tol:
+                    break
+        out[i] = d
+    return out, c
+
+
+# V14 (v0.12): een stuk buitenrand waar de foto's het eens zijn dat de rand ergens anders ligt: de mediaan van het residu
+# over de foto's (met bewijs, minstens MISFIT_VIEWS) is groter dan MISFIT_MM en MISFIT_PX pixels, in dezelfde richting,
+# over minstens MISFIT_LEN_MM langs de rand
+MISFIT_MM, MISFIT_PX, MISFIT_LEN_MM, MISFIT_VIEWS = 0.25, 1.5, 1.5, 4
+
+
+def contour_misfit(part: Part2p5D, K: np.ndarray, vd: list, mm_per_px: float, prob: _Problem | None = None,
+                   density: float = 4.0, info: dict | None = None) -> list[dict]:
+    """Stukken van de buitenrand die het model niet volgt (V14, v0.12): een vorm die het model mist of verkeerd heeft,
+    zoals een kleine rechthoekige inham die als V-vorm in het model kwam. Per punt van de buitencontour (`density`
+    per mm) het residu van de randfit (px, omgerekend naar mm met de afstand van elke foto) in de foto's waarin het
+    de silhouetrand is en zekere mat naast zich heeft; de mediaan daarvan. Geeft per stuk {x, y (mat, mm), lengte
+    (mm), afwijking (mm; + = de foto's zien de rand verder naar buiten dan het model), fotos}. `info` krijgt de grootste
+    mediaan en waar die ligt, ook als niets de drempel haalt (om de drempels op echte foto's af te stellen)."""
+    q = _Problem(part, K, vd, density=density, fields=prob.fields if prob is not None and prob.vd is vd else None)
+    q.set_status(part)
+    rim = rims(part, q.lay)
+    n_out = outer_count(q.lay)
+    p2 = points2d(part, q.lay)[0][:n_out]
+    center = np.array([*p2.mean(axis=0), part.height / 2])
+    per_pt: list[list[float]] = [[] for _ in range(n_out)]
+    for i, v in enumerate(vd):
+        sel = np.flatnonzero(q.status[i] & (rim.point >= 0) & (rim.point < n_out))
+        if not len(sel):
+            continue
+        sf, band = q.fields[i]
+        uv, _ = project(rim.P[sel], v.pose, K)
+        uv = uv - [v.x0, v.y0]
+        h, w = v.fg.shape
+        ok = (uv[:, 0] >= 0) & (uv[:, 0] <= w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h - 1)
+        r = _bilinear(sf, uv[ok])
+        ok_ev = _bilinear(band, uv[ok]) <= 2.0  # zekere mat binnen ~1 px: bewijs (gewicht 1 in de randfit)
+        scale = float(np.linalg.norm(v.pose.center - center)) / K[0, 0]  # mm per px op het onderdeel
+        for j, rr in zip(rim.point[sel][ok][ok_ev], r[ok_ev]):
+            per_pt[j].append(-rr * scale)  # + = de rand ligt in de foto verder naar buiten dan het model
+    med = np.array([np.median(x) if len(x) >= MISFIT_VIEWS else 0.0 for x in per_pt])
+    cnt = np.array([len(x) for x in per_pt])
+    limit = max(MISFIT_MM, MISFIT_PX * mm_per_px)
+    if info is not None and n_out:
+        j = int(np.argmax(np.abs(med)))
+        info.update({"grootste_mm": round(float(med[j]), 3), "bij": [round(float(v), 2) for v in p2[j]],
+                     "grens_mm": round(limit, 3)})
+    sign = np.where(med > limit, 1, np.where(med < -limit, -1, 0))
+    if not sign.any():
+        return []
+    # aaneengesloten stukken met hetzelfde teken, rond de contour (begin bij een punt zonder afwijking)
+    start = int(np.flatnonzero(sign == 0)[0]) if (sign == 0).any() else 0
+    order = np.roll(np.arange(n_out), -start)
+    out, run = [], []
+    for k in list(order) + [None]:
+        if k is not None and sign[k] != 0 and (not run or sign[run[-1]] == sign[k]):
+            run.append(k)
+            continue
+        if run:
+            pts = p2[run]
+            length = float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1))) + 1.0 / density
+            if length >= MISFIT_LEN_MM:
+                worst = run[int(np.argmax(np.abs(med[run])))]
+                out.append({"x": round(float(pts[:, 0].mean()), 2), "y": round(float(pts[:, 1].mean()), 2),
+                            "lengte": round(length, 2), "afwijking": round(float(med[worst]), 3),
+                            "fotos": int(np.median(cnt[run]))})
+        run = [k] if k is not None and sign[k] != 0 else []
+    return sorted(out, key=lambda m: -abs(m["afwijking"]) * m["lengte"])
 
 
 def _solve(prob: _Problem, x0: np.ndarray, lb, ub, views=None, max_nfev: int = 60):

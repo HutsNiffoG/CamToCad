@@ -15,11 +15,16 @@ Groeperen gaat iteratief: consensus over de leden, houd de foto's die er het bes
 de foto's die overblijven.
 
 Een klein duwtje (een paar mm bij een onderdeel van 80 mm) valt hier niet op: de liggingen
-overlappen dan grotendeels. Dat zie je later aan matig passende silhouetten.
+overlappen dan grotendeels. Daarvoor is er `find_nudge` (V27, v0.12), na de randfit: per foto de
+starre verschuiving van het model die het best bij die foto past (edgefit.view_offsets). Ligt het
+onderdeel stil, dan is die overal bijna nul. Is het aangestoten, dan springt hij in de volgorde van
+de foto's: de foto's erna zien het onderdeel ergens anders liggen dan de foto's ervoor. Dat is te
+corrigeren: de poses van de foto's erna verschuiven met het onderdeel mee (`apply_nudge`).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import cv2
@@ -238,3 +243,119 @@ def moved_message(res: Placements, order: list[str]) -> str:
             f"({_names(res.groups[0], order)}). Waarschijnlijk is het onderdeel tussendoor verplaatst; het kan ook "
             "aan de objectmaskers liggen (harde schaduwen, glans, een onderdeel dat nauwelijks afsteekt tegen de "
             "mat: kijk in debug/masker_*.jpg). " + advice)
+
+
+# V27 (v0.12): een duwtje telt vanaf zoveel mm (de grootste verplaatsing van een punt op de rand) en zo ver boven de
+# spreiding van de verschuivingen per foto (toetsgrootheid: de sprong gedeeld door zijn standaardfout); aan elke kant
+# minstens zoveel foto's
+NUDGE_MM, NUDGE_T, NUDGE_MIN_VIEWS = 0.08, 12.0, 4
+
+
+@dataclass
+class Nudge:
+    """Het onderdeel is tussen twee foto's verschoven (V27): `moved` zijn de foto's erna (in de volgorde van de serie
+    tot het eind), `motion` de beweging van het onderdeel (dx, dy mm, dθ rad om `center`)."""
+
+    before: str  # de laatste foto ervoor
+    moved: list[str]
+    motion: np.ndarray
+    center: np.ndarray
+    size_mm: float  # de grootste verplaatsing van een punt op de rand
+    t: float  # toetsgrootheid
+
+    def to_dict(self) -> dict:
+        return {"na_foto": self.before, "fotos_erna": len(self.moved), "dx_mm": round(float(self.motion[0]), 3),
+                "dy_mm": round(float(self.motion[1]), 3), "draaiing_graden": round(math.degrees(self.motion[2]), 3),
+                "grootte_mm": round(self.size_mm, 3), "toets": round(self.t, 1)}
+
+
+def _compose(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """De beweging 'eerst b, dan a' (beide: dx, dy, dθ om c), als (dx, dy, dθ) om c."""
+    ca, sa = math.cos(a[2]), math.sin(a[2])
+    Ra = np.array([[ca, -sa], [sa, ca]])
+    # x -> Ra (x_b - c) + c + a_t, met x_b = Rb (x - c) + c + b_t
+    t = Ra @ b[:2] + a[:2]
+    return np.array([t[0], t[1], a[2] + b[2]])
+
+
+def _inverse(a: np.ndarray) -> np.ndarray:
+    ca, sa = math.cos(-a[2]), math.sin(-a[2])
+    t = -np.array([[ca, -sa], [sa, ca]]) @ a[:2]
+    return np.array([t[0], t[1], -a[2]])
+
+
+def nudge_statistic(D: np.ndarray, min_views: int = NUDGE_MIN_VIEWS) -> tuple[float, int, np.ndarray] | None:
+    """De beste sprong in de reeks verschuivingen `D` (n x 3, mm; de draaiing al als verplaatsing aan de rand): de
+    mediaan erna min de mediaan ervoor, gedeeld door zijn standaardfout. De spreiding per component is de grootste
+    van de twee groepen, rond hun mediaan: bij een duwtje liggen de foto's ervoor onderling op één lijn, en die erna
+    ook. Een reeks foto's die om een andere reden afwijkt (een vorm die het model nog mist, zichtbaar uit één
+    richting), maakt haar groep rommelig en telt zo niet als duwtje, ook als ze een derde van die groep is. Geeft (toetsgrootheid, eerste index erna,
+    sprong) of None bij te weinig foto's."""
+    n = len(D)
+    best = None
+    for k in range(min_views, n - min_views + 1):
+        a, b = np.median(D[:k], axis=0), np.median(D[k:], axis=0)
+        # het 75e percentiel van de afwijkingen (σ = q75 / 1,15): minstens driekwart van elke groep moet kloppen
+        spread = np.maximum(np.percentile(np.abs(D[:k] - a), 75, axis=0), np.percentile(np.abs(D[k:] - b), 75, axis=0))
+        s = np.maximum(spread / 1.15, 0.005)  # mm; ondergrens: poses en maskers
+        t = float(np.linalg.norm((b - a) / s) / math.sqrt(1.0 / k + 1.0 / (n - k)))
+        if best is None or t > best[0]:
+            best = (t, k, b - a)
+    return best
+
+
+def _sharpen_split(D: np.ndarray, k: int, min_views: int = NUDGE_MIN_VIEWS) -> int:
+    """De grens van een sprong precies leggen: een foto vlak voor of na de grens hoort bij de groep waarvan hij het
+    dichtst bij de mediaan ligt (de toets kiest bij twee bijna even goede grenzen soms de verkeerde)."""
+    for _ in range(len(D)):
+        a, b = np.median(D[:k], axis=0), np.median(D[k:], axis=0)
+        if k < len(D) - min_views and np.linalg.norm(D[k] - a) < np.linalg.norm(D[k] - b):
+            k += 1  # de eerste foto erna hoort nog bij de groep ervoor
+        elif k > min_views and np.linalg.norm(D[k - 1] - b) < np.linalg.norm(D[k - 1] - a):
+            k -= 1  # de laatste foto ervoor hoort al bij de groep erna
+        else:
+            break
+    return k
+
+
+def find_nudge(offsets: np.ndarray, names: list[str], order: list[str], center: np.ndarray, radius: float,
+               info: dict | None = None) -> Nudge | None:
+    """Is het onderdeel tussendoor even aangestoten? `offsets` (n x 3): per foto `names[i]` de verschuiving van het
+    model die het best bij die foto past (dx, dy mm, dθ rad om `center`; edgefit.view_offsets), `order`: alle
+    fotonamen in de volgorde van de serie, `radius`: de grootste afstand van de rand tot `center`. Eén duwtje: de
+    foto's erna verschuiven samen ten opzichte van die ervoor. `info` krijgt de toets, ook zonder duwtje."""
+    idx = [k for k in sorted(range(len(names)), key=lambda k: order.index(names[k]))
+           if np.all(np.isfinite(offsets[k]))]
+    if len(idx) < 2 * NUDGE_MIN_VIEWS:
+        return None
+    D = offsets[idx] * [1.0, 1.0, radius]
+    best = nudge_statistic(D)
+    if best is None:
+        return None
+    t, k, jump = best
+    k = _sharpen_split(D, k)
+    size = float(np.hypot(jump[0], jump[1]) + abs(jump[2]))
+    if info is not None:
+        info.update({"toets": round(t, 1), "sprong_mm": np.round(jump, 3).tolist(), "na_foto": names[idx[k - 1]],
+                     "grootte_mm": round(size, 3),
+                     "per_foto": {names[i]: np.round(offsets[i] * [1, 1, radius], 3).tolist() for i in idx}})
+    if t < NUDGE_T or size < NUDGE_MM:
+        return None
+    a = np.median(offsets[idx[:k]], axis=0)
+    b = np.median(offsets[idx[k:]], axis=0)
+    motion = _compose(b, _inverse(a), center)  # van de ligging ervoor naar die erna
+    moved = order[order.index(names[idx[k]]):]  # ook foto's zonder oordeel: ze liggen na het duwtje
+    return Nudge(names[idx[k - 1]], moved, motion, np.asarray(center, float), size, t)
+
+
+def apply_nudge(views: Views, nudge: Nudge) -> Views:
+    """De poses van de foto's na het duwtje zo aangepast dat het onderdeel daarin ligt waar het ervoor lag: een punt X
+    van het onderdeel ligt erna op M(X) = Rm X + tm, dus de foto ziet X zoals de camera R Rm, R tm + t."""
+    dx, dy, da = nudge.motion
+    ca, sa = math.cos(da), math.sin(da)
+    Rm = np.array([[ca, -sa, 0.0], [sa, ca, 0.0], [0.0, 0.0, 1.0]])
+    c = np.array([nudge.center[0], nudge.center[1], 0.0])
+    tm = c - Rm @ c + np.array([dx, dy, 0.0])
+    moved = set(nudge.moved)
+    return [(Pose(p.name, p.R @ Rm, p.R @ tm + p.t, p.rms_px, p.n_corners) if p.name in moved else p, m)
+            for p, m in views]

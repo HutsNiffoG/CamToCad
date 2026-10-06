@@ -106,6 +106,12 @@ def cbore_bracket():
             .faces(">Z").workplane().pushPoints([(-30, 0), (30, 0)]).cboreHole(6.6, 11.0, 6.4))
 
 
+def notched_bracket():
+    """Beugel met twee gaten Ø6,6 en een inham van 3 x 2 mm midden in een lange zijde (V14, v0.12)."""
+    import cadquery as cq
+    return demo_part().cut(cq.Workplane("XY").box(3, 2, 12, centered=(True, False, False)).translate((0, 18, 0)))
+
+
 # De waarheid in het assenstelsel van het onderdeel (zoals in het rapport). Een lijst: elk van die waarden kan het
 # zijn (de beugel kan in het rapport ook gespiegeld liggen, en dan zit het gat op 10 in plaats van 70)
 BRACKET = {"h": 12.0, "x": [80.0], "y": [40.0], "R": 3.0, "d": 6.6, "hx": [10.0, 70.0], "hy": [20.0]}
@@ -126,6 +132,8 @@ OBJECTS = {
                                      "hx": [], "hy": []}),
     "tredeblok": (step_block, dict(BRACKET, **{"trede 1 positie": 60.0, "trede 1 hoogte": 6.0})),
     "sleufbeugel": (slot_bracket, SLOTTED),
+    # de inham: wanden op x = 38,5 en 41,5, bodem op y = 38 (of 2, als het rapport de beugel gespiegeld neerlegt)
+    "inhambeugel": (notched_bracket, dict(BRACKET, x=[80.0, 41.5, 38.5], y=[40.0, 38.0, 2.0])),
     "plate": (small_plate, PLATE),
     "washer": (washer, WASHER),
 }
@@ -200,6 +208,11 @@ SCENARIOS = {
     # een blind gat (v0.11): in geen silhouet te zien, alleen in de grijswaarden
     "blind": dict(BASE, object="blindbeugel"),
     "blind_donker": dict(BASE, object="blindbeugel", albedo=0.08),
+    # het onderdeel tussendoor even aangestoten (V27, v0.12): (dx, dy mm, draaiing °, vanaf foto)
+    "duwtje": dict(BASE, nudge=(0.5, -0.3, 0.3, 20)),
+    "duw_groot": dict(BASE, nudge=(2.0, 1.5, 1.0, 30)),
+    # een kleine inham in de buitenrand (V14, v0.12): in het model, of gemeld
+    "inham": dict(BASE, object="inhambeugel"),
 }
 # kleurscenario's die ook als grijsbeelden draaien (controle: wat geeft kleur extra, V8)
 GRAY_CONTROLS = ("blauw", "grijs_kleur")
@@ -316,8 +329,12 @@ def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
     spec = get_spec(mat)
     rng = np.random.default_rng(seed)
     make, truth = OBJECTS[cfg.get("object", "bracket")]
-    shape = place(make(), spec, angle_deg=cfg.get("angle", 17.0), offset=cfg.get("offset", (5, -8)))
+    angle, offset = cfg.get("angle", 17.0), cfg.get("offset", (5, -8))
+    shape = place(make(), spec, angle_deg=angle, offset=offset)
     mesh = tessellate(shape)
+    nudge = cfg.get("nudge")  # vanaf foto nudge[3] ligt het onderdeel iets anders (V27)
+    moved = None if not nudge else tessellate(place(make(), spec, angle_deg=angle + nudge[2],
+                                                    offset=(offset[0] + nudge[0], offset[1] + nudge[1])))
     raster = rasterize_board(spec, 10.0, 3.0)
     light = cfg.get("light", (0.35, -0.45, 0.82))
     if cfg.get("shadow"):
@@ -328,12 +345,13 @@ def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
     images = []
     color = cfg.get("color")  # albedo per kanaal (R, G, B): een gekleurd onderdeel (V8)
     tint = np.asarray(cfg.get("tint", (1.0, 1.0, 1.0)), np.float32)  # kleur van het licht (R, G, B), na witbalans
-    for name, R, t in poses(target, cfg, rng):
+    for k, (name, R, t) in enumerate(poses(target, cfg, rng)):
+        m = moved if nudge and k >= nudge[3] else mesh
         if color is None:
-            img, _ = render_view(raster, cam, R, t, mesh, albedo=cfg.get("albedo", 0.55), light=light,
+            img, _ = render_view(raster, cam, R, t, m, albedo=cfg.get("albedo", 0.55), light=light,
                                  noise=0.0, gradient=cfg.get("gradient", 0.08), rng=rng)
         else:  # per kanaal renderen (lineair in de albedo), dan het licht erover; BGR zoals OpenCV
-            chans = [render_view(raster, cam, R, t, mesh, albedo=a, light=light, noise=0.0,
+            chans = [render_view(raster, cam, R, t, m, albedo=a, light=light, noise=0.0,
                                  gradient=cfg.get("gradient", 0.08), rng=rng)[0].astype(np.float32) * k
                      for a, k in zip(color, tint)]
             img = np.clip(np.dstack(chans[::-1]), 0, 255).astype(np.uint8)

@@ -306,6 +306,106 @@ def test_pipeline_adds_a_missed_hole_only_when_the_model_fits_better(plate_scan)
     assert len(same.holes) == 1 and e_same == silhouette.energy(plate(), K, plate_scan)
 
 
+def test_a_nudge_between_photos_is_measured_found_and_undone():
+    """Na de zevende foto is de plaat 0,4 mm opzij geschoven en 0,3° gedraaid (V27, v0.12). Per foto de verschuiving
+    van het model: ~0 ervoor, de beweging erna; de sprong is een duwtje, en met de gecorrigeerde poses past het model
+    weer in elke foto."""
+    from camtocad import placement
+
+    truth = plate()
+    vd = scan(truth, n_ring=10, n_top=4)
+    oc = truth.outer.outline()
+    c = (oc.min(axis=0) + oc.max(axis=0)) / 2
+    d = np.array([0.4, -0.25, math.radians(0.3)])
+    nudged = edgefit.moved(truth, c, d)
+    for v in vd[7:]:
+        v.fg = exact_mask(nudged, v)
+        v.bg = ~v.fg
+    D, c2 = edgefit.view_offsets(truth, K, vd)
+    radius = float(np.max(np.linalg.norm(oc - c, axis=1)))
+    rim = [1.0, 1.0, radius]  # de draaiing als verplaatsing aan de rand (mm)
+    assert np.allclose(c2, c)
+    assert np.all(np.abs(D[:7] * rim) < 0.05)  # pixelmaskers: 0,15-0,25 mm per pixel
+    assert np.all(np.abs((D[7:] - d) * rim) < 0.05)
+    names = [v.pose.name for v in vd]
+    info = {}
+    nd = placement.find_nudge(D, names, names, c, radius, info)
+    assert nd is not None and nd.before == "v6" and nd.moved == names[7:], info
+    assert np.allclose(nd.motion, d, atol=0.03) and 0.45 < nd.size_mm < 0.75
+    for v, (p, _) in zip(vd, placement.apply_nudge([(v.pose, None) for v in vd], nd)):
+        v.pose = p
+    D2, _ = edgefit.view_offsets(truth, K, vd)
+    assert np.all(np.abs(D2 * rim) < 0.07)  # ruis, plus de fout in de geschatte beweging
+    assert placement.find_nudge(D2, names, names, c, radius) is None
+    # zonder duwtje: geen melding (de toets op de verschuivingen van een stilliggend onderdeel)
+    assert placement.find_nudge(D[:7], names[:7], names, c, radius) is None
+    # een flinke duw (2,5 mm en 1°, in beeld meer dan 15 px): de verschuiving per foto volgt die ook, al is er zoals
+    # in echte maskers alleen zekere mat vlak langs het silhouet (egale mat telt niet)
+    big = np.array([2.0, 1.5, math.radians(1.0)])
+    for v in vd[7:]:
+        v.fg = exact_mask(edgefit.moved(truth, c, big), v)
+        v.bg = ~v.fg & (cv2.dilate(v.fg.astype(np.uint8), np.ones((13, 13), np.uint8)) > 0)
+    D3, _ = edgefit.view_offsets(truth, K, vd)
+    assert np.all(np.abs((D3[7:] - big) * rim) < 0.05)
+
+
+def test_a_round_part_has_no_measurable_rotation():
+    """Een ring met het gat in het midden (V27): een draaiing verandert in geen foto iets, dus per foto alleen een
+    verschuiving; die volgt een duw zoals bij elk ander onderdeel."""
+    ring = Part2p5D(8.0, Profile("circle", np.array([120.0, 80.0]), radius=12.5), [Hole(120.0, 80.0, 8.0)])
+    vd = scan(ring)
+    for v in vd[5:]:
+        v.fg = exact_mask(edgefit.moved(ring, np.array([120.0, 80.0]), [0.3, -0.2, 0.0]), v)
+        v.bg = ~v.fg
+    D, _ = edgefit.view_offsets(ring, K, vd)
+    assert np.all(D[:, 2] == 0.0)
+    assert np.all(np.abs(D[:5, :2]) < 0.05) and np.all(np.abs(D[5:, :2] - [0.3, -0.2]) < 0.05)
+
+
+def test_a_missed_notch_and_tab_are_residual_clusters(plate_scan):
+    """De foto's van boven zien een inham van 3 x 2,5 mm in de bovenrand en een lipje van 3 x 2,5 mm aan de
+    onderrand, die het model mist (V14, v0.12): twee restclusters op de goede plek. Zonder die afwijkingen geen."""
+    part = plate()
+    assert holes.residual_clusters(part, K, plate_scan) == []
+    vd = scan(part, n_top=4)
+
+    def box(x0, x1, y0, y1):
+        return np.array([[x, y, z] for x in (x0, x1) for y in (y0, y1) for z in (0.0, part.height)])
+
+    notch, tab = box(118.0, 121.0, 92.5, 95.0), box(128.0, 131.0, 62.5, 65.0)
+    for v in vd[8:]:  # de bovenaanzichten
+        def poly(P):
+            uv, _ = project(P, v.pose, K)
+            return cv2.convexHull(np.round(uv - [v.x0, v.y0]).astype(np.int32))
+        top, bottom = np.zeros(v.fg.shape, np.uint8), np.zeros(v.fg.shape, np.uint8)
+        cv2.fillConvexPoly(top, poly(notch[notch[:, 2] > 0]), 1)
+        cv2.fillConvexPoly(bottom, poly(notch[notch[:, 2] == 0]), 1)
+        through = (top & bottom) > 0  # door de inham heen: binnen de projectie van boven- en onderkant
+        lip = np.zeros_like(top)
+        cv2.fillConvexPoly(lip, poly(tab), 1)
+        v.fg = (v.fg & ~through) | (lip > 0)
+        v.bg = ~v.fg
+    found = holes.residual_clusters(part, K, vd)
+    assert sorted(c["soort"] for c in found) == ["inham", "uitstulping"], found
+    by = {c["soort"]: c for c in found}
+    assert abs(by["inham"]["x"] - 119.5) < 0.5 and 92.5 < by["inham"]["y"] < 94.5
+    assert abs(by["uitstulping"]["x"] - 129.5) < 0.5 and 62.5 < by["uitstulping"]["y"] < 64.5
+    assert all(c["fotos"] >= 3 for c in found)
+
+
+def test_an_edge_the_model_does_not_follow_is_a_misfit(plate_scan):
+    """De rechterrand ligt in de foto's 0,6 mm verder naar buiten dan in het model (V14, v0.12): één stuk rand dat
+    het model niet volgt, langs die hele rand. Met het goede model niets."""
+    assert edgefit.contour_misfit(plate(), K, plate_scan, 0.2) == []
+    wrong = plate()
+    wrong.outer.offsets = wrong.outer.offsets - np.array([0.0, 0.6, 0.0, 0.0])
+    found = edgefit.contour_misfit(wrong, K, plate_scan, 0.2)
+    assert len(found) == 1, found
+    m = found[0]
+    assert m["afwijking"] == pytest.approx(0.6, abs=0.1) and m["lengte"] > 20 and m["fotos"] >= 4
+    assert m["x"] == pytest.approx(144.4, abs=0.5) and m["y"] == pytest.approx(80.0, abs=2.0)
+
+
 def test_edge_fit_recovers_a_slot():
     """Een sleuf (V15) in de plaat: middelpunt, breedte en lengte uit de randen van de doorkijk."""
     from camtocad.profile import Slot

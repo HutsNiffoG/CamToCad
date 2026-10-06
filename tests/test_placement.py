@@ -80,3 +80,17 @@ def test_the_message_names_the_groups_in_photo_order():
     text = placement.moved_message(res, order)
     assert "2 groepen" in text and "IMG_000.jpg t/m IMG_014.jpg" in text and "IMG_015.jpg t/m IMG_026.jpg" in text
     assert "1 foto past nergens bij" in text and "aparte scan" in text
+
+
+def test_the_split_of_a_nudge_lies_between_the_right_photos():
+    """V27: van twee bijna even goede grenzen gaat de foto vlak bij de sprong naar de groep waar hij bij hoort."""
+    rng = np.random.default_rng(1)
+    D = rng.normal(0, 0.02, (24, 3))
+    D[10:] += [0.5, -0.3, 0.2]
+    assert placement._sharpen_split(D, 9) == 10 and placement._sharpen_split(D, 11) == 10
+    t, k, jump = placement.nudge_statistic(D)
+    assert t > 50 and placement._sharpen_split(D, k) == 10 and np.allclose(jump, [0.5, -0.3, 0.2], atol=0.05)
+    # zonder sprong maar met een reeks afwijkende foto's in het midden (een vorm die het model mist): geen duwtje
+    E = rng.normal(0, 0.02, (24, 3))
+    E[3:9] += [0.4, 0.1, 0.0]
+    assert placement.nudge_statistic(E)[0] < placement.NUDGE_T

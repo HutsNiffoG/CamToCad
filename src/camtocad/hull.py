@@ -9,7 +9,7 @@ gaten, kamers) kan een visual hull niet zien; daarvoor is MVS nodig.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import ndimage
@@ -19,10 +19,23 @@ from .masks import ViewMasks
 
 
 @dataclass
+class Blob:
+    """Een voorwerp op de mat in de grove visual hull (V12, v0.12)."""
+
+    center: np.ndarray  # (x, y) mm
+    size: np.ndarray  # (x, y) mm, omhullende rechthoek
+    area: float  # mm², bovenaanzicht
+    height: float  # mm
+    at_edge: bool  # raakt de rand van de mat
+
+
+@dataclass
 class VoxelGrid:
     origin: np.ndarray  # middelpunt van voxel (0, 0, 0), mm
     voxel: float
     occ: np.ndarray  # bool (nx, ny, nz)
+    chosen: Blob | None = None  # het gekozen voorwerp (grove hull)
+    others: list = field(default_factory=list)  # andere voorwerpen van betekenis (Blob)
 
     def centers(self) -> np.ndarray:
         idx = np.indices(self.occ.shape).reshape(3, -1).T
@@ -57,12 +70,50 @@ def carve(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, origin: np.ndarray
     return count_bg.reshape(shape), count_fg.reshape(shape)
 
 
-def _largest_component(occ: np.ndarray) -> np.ndarray:
+# V12 (v0.12): een ander voorwerp telt mee vanaf zoveel mm² in bovenaanzicht en zoveel van het gekozen voorwerp
+OTHER_MIN_MM2, OTHER_MIN_FRAC = 60.0, 0.1
+
+
+def _blob(mask3: np.ndarray, origin: np.ndarray, voxel: float) -> Blob:
+    col = mask3.any(axis=2)
+    ij = np.argwhere(col)
+    lo, hi = ij.min(axis=0), ij.max(axis=0)
+    k = np.argwhere(mask3)[:, 2].max()
+    at_edge = bool(lo.min() == 0 or hi[0] == col.shape[0] - 1 or hi[1] == col.shape[1] - 1)
+    return Blob(origin[:2] + (lo + hi) / 2 * voxel, (hi - lo + 1) * voxel, float(col.sum()) * voxel ** 2,
+                float((k + 1) * voxel), at_edge)
+
+
+def choose_object(occ: np.ndarray, origin: np.ndarray, voxel: float, aim: np.ndarray | None = None) \
+        -> tuple[np.ndarray, Blob, list[Blob]]:
+    """Welk voorwerp is het onderdeel (V12, v0.12)? Zonder meer het grootste. Liggen er meer voorwerpen van betekenis
+    op de mat (een liniaal, een munt, een pen), dan het voorwerp waar de foto's recht van boven op gericht zijn (`aim`,
+    (x, y) mm): een liniaal kan groter zijn dan het onderdeel. Geeft (masker, gekozen, de andere)."""
     labels, n = ndimage.label(occ, structure=np.ones((3, 3, 3)))
-    if n <= 1:
-        return occ
-    sizes = ndimage.sum(occ, labels, index=np.arange(1, n + 1))
-    return labels == (1 + int(np.argmax(sizes)))
+    if n == 0:
+        raise ValueError("Geen object gevonden: controleer of het object op de mat staat en in beeld is")
+    blobs = [_blob(labels == k, origin, voxel) for k in range(1, n + 1)]
+    big = max(b.area for b in blobs)
+    keep = [k for k, b in enumerate(blobs) if b.area >= max(OTHER_MIN_MM2, OTHER_MIN_FRAC * big)]
+    pick = max(keep, key=lambda k: blobs[k].area)
+    if aim is not None and len(keep) > 1:
+        def dist(b: Blob) -> float:  # afstand van het richtpunt tot de omhullende rechthoek
+            return float(np.linalg.norm(np.maximum(np.abs(aim - b.center) - b.size / 2, 0.0)))
+        pick = min(keep, key=lambda k: (dist(blobs[k]), -blobs[k].area))
+    others = [blobs[k] for k in keep if k != pick]
+    return labels == pick + 1, blobs[pick], others
+
+
+def top_aim(poses, max_tilt_deg: float = 25.0) -> np.ndarray | None:
+    """Waar de foto's recht van boven op gericht zijn: de mediaan van de punten waar hun optische as de mat raakt."""
+    pts = []
+    for pose in poses:
+        axis = pose.R.T @ np.array([0.0, 0.0, 1.0])
+        if axis[2] >= 0 or np.degrees(np.arccos(min(1.0, -axis[2]))) > max_tilt_deg:
+            continue
+        c = pose.center
+        pts.append(c[:2] + (-c[2] / axis[2]) * axis[:2])
+    return np.median(np.array(pts), axis=0) if len(pts) >= 2 else None
 
 
 def _kept(cbg: np.ndarray, cfg: np.ndarray, min_bg: int, ratio: float) -> np.ndarray:
@@ -83,9 +134,9 @@ def reconstruct(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, bounds_xy: t
     occ = _kept(cbg, cfg, min_bg, ratio) & (cfg >= 2)
     if not occ.any():
         raise ValueError("Geen object gevonden: controleer of het object op de mat staat en in beeld is")
-    occ = _largest_component(occ)
+    occ, chosen, others = choose_object(occ, origin, coarse, top_aim([p for p, _ in views]))
     if not fine:
-        return VoxelGrid(origin, coarse, occ)
+        return VoxelGrid(origin, coarse, occ, chosen, others)
     ijk = np.argwhere(occ)
     flo = origin + ijk.min(axis=0) * coarse - 2.5 * coarse
     fhi = origin + ijk.max(axis=0) * coarse + 2.5 * coarse
@@ -97,8 +148,8 @@ def reconstruct(views: list[tuple[Pose, ViewMasks]], K: np.ndarray, bounds_xy: t
     z = origin[2] + voxel * np.arange(shape[2])
     near_floor = (z < 1.5)[None, None, :]
     occ = _kept(cbg, cfg, min_bg, ratio) & ((cfg >= 1) | ~near_floor)
-    occ = ndimage.binary_fill_holes(_largest_component(occ))
-    return VoxelGrid(origin, voxel, occ)
+    occ = ndimage.binary_fill_holes(choose_object(occ, origin, voxel, chosen.center)[0])
+    return VoxelGrid(origin, voxel, occ, chosen, others)
 
 
 def surface_points(grid: VoxelGrid, sigma_vox: float = 1.0, z_min: float = 0.6,

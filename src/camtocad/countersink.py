@@ -13,7 +13,9 @@ zoals de randfit dat doet, en kijken waar hij werkelijk ligt. Bij een faas ligt 
 plek, een halve millimeter buiten het gat; bij een gewoon gat vindt de meting alleen de uitloper van de gatrand zelf,
 een pixel of wat buiten het gat. Die uitloper reikt bij een donker onderdeel tot een halve millimeter, net zo ver als
 een faas: daarom moeten ook de silhouetten de faas steunen (in de schuine foto's kijk je langs een faas verder door
-het gat; een gewoon gat past met een faas 14-16% slechter, een gat met een faas 0-4% beter).
+het gat). In de stresstests van v0.12 past een gewoon gat met een faas 7-25% slechter, en een gat met een faas tot 5%
+beter of 0,4% slechter: met een faas mag het silhouet hooguit NARROW_SIL_TOL slechter passen. Tot v0.12 moest het
+strikt beter, en dan besliste bij een zwart onderdeel één eenheid energie (229 tegen 230).
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ PEAK_TOL_MM = 0.3
 NARROW_W = tuple(np.round(np.arange(0.45, 1.31, 0.05), 2))
 NARROW_MIN_MM, NARROW_MIN_PX, NARROW_MIN_MEAS = 0.3, 1.5, 50
 NARROW_TOP_DEG = 78.0  # het gat 'van boven' en de pixelmaat: alleen de echte bovenaanzichten
+NARROW_SIL_TOL = 0.03  # met een faas mag de silhouetenergie rond het gat zoveel hoger zijn (zie de moduletekst)
 
 
 def _room(part: Part2p5D, i: int) -> float:
@@ -164,7 +167,7 @@ def narrow(part: Part2p5D, K: np.ndarray, vd: list, i: int) -> tuple[float | Non
         return None, note
     e_plain, e_csk = _silhouette_support(part, K, vd, i, 2 * rim)
     note += f"; silhouetten {e_plain:.0f} als gewoon gat, {e_csk:.0f} met faas"
-    if not e_csk < e_plain:
+    if not e_csk < (1.0 + NARROW_SIL_TOL) * e_plain:
         return None, note
     return 2 * rim, note
 
