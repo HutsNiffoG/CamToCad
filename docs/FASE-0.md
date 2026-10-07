@@ -26,7 +26,7 @@ Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server`):
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
   - Een referentie die iedereen heeft: een **bankpas** (ISO/IEC 7810 ID-1: 85,60 × 53,98 mm, hoeken R3,18, 0,76 mm dik). Op de telefoonpagina vult de knop "Bankpas als referentie" die normmaten in.
   - Neem een pas zonder reliëf, liefst gekleurd of donker (meer contrast met het witte papier van de mat), en meet de dikte zelf na (reliëf maakt hem dikker).
-  - In de stresstest (v0.14) komen een grijze en een witte pas in lengte en breedte binnen 0,01 mm uit, en in dikte binnen 0,02 mm. In v0.13 kwam een witte pas 0,06–0,08 mm te kort uit: de rand meet het grijs van het object vlak binnen de rand, en bij een pas is dat het bovenvlak, niet de dunne zijkant. Die randpunten tellen sinds v0.14 niet meer mee.
+  - In de stresstest (v0.14) komen een grijze en een witte pas in lengte en breedte binnen 0,015 mm uit, en in dikte binnen 0,01 mm. In v0.13 kwam een witte pas 0,06–0,08 mm te kort uit: de rand meet het grijs van het object vlak binnen de rand, en bij een pas is dat het bovenvlak, niet de dunne zijkant. Die randpunten tellen sinds v0.14 nog maar voor een klein deel mee.
 
 ## 2. Meten met de schuifmaat
 
