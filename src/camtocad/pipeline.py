@@ -437,17 +437,46 @@ def _find_nudge(part, K: np.ndarray, vd: list, ef, order: list[str], info: dict)
 HOLE_PARAMS = ("hx", "hy", "hd", "hk", "hc", "hz", "hp")  # maat, plaats, verzinking, kamer en diepte van een gat
 
 
-def _edge_fit(part, K: np.ndarray, vd: list, mm_per_px: float, log=None, retries: int = 2):
+# de bodemhoeken van een aangenomen inham: een hoekpunt van de buitencontour hoort erbij als het minder dan zoveel
+# (mm) van zo'n hoek ligt
+NOTCH_MATCH_MM = 0.5
+
+
+def _notch_floor_corners(part, notches: list | None) -> list[int]:
+    """De hoekpunten van de buitencontour die een bodemhoek zijn van een inham die als rechthoek is aangenomen
+    (_notch_alternatives; de tweede en derde van haar vier hoekpunten)."""
+    if not notches or part.outer.kind != "polygon":
+        return []
+    V = part.outer.vertices()
+    out = set()
+    for nt in notches:
+        for corner in np.asarray(nt)[1:3]:
+            d = np.linalg.norm(V - corner, axis=1)
+            if d.min() < NOTCH_MATCH_MM:
+                out.add(int(np.argmin(d)))
+    return sorted(out)
+
+
+def _edge_fit(part, K: np.ndarray, vd: list, mm_per_px: float, log=None, retries: int = 2, notches=None):
     """edgefit.fit. Stuit alleen een gat op de grens van het vertrouwensgebied (zijn maat, plaats, verzinking, kamer of
     diepte), dan zoekt de randfit vanaf die grens verder, hooguit `retries` keer: de pixelfit zette dat gat te ver
     weg, en anders bleef voor het hele onderdeel de pixelfit staan (v0.11; in v0.10 alleen voor een kamer). Een gat
-    zonder bewijs rondom staat in de randfit vast en kan dus niet zo weglopen."""
-    ef = edgefit.fit(part, K, vd, log=log, mm_per_px=mm_per_px)
+    zonder bewijs rondom staat in de randfit vast en kan dus niet zo weglopen.
+
+    De bodemhoeken van een inham die als rechthoek is aangenomen (`notches`, _notch_alternatives) blijven scherp
+    (v0.14): zo'n inham is een paar pixels groot, en de randfit maakte van een scherpe bodemhoek soms een afronding
+    (R1,6 in een inham van 3 x 2 mm, stresstest 'inham')."""
+    sharp = _notch_floor_corners(part, notches)
+    if sharp:
+        part = part.copy()
+        part.outer.fillets[sharp] = 0.0
+    freeze = [f"fil{k}" for k in sharp]
+    ef = edgefit.fit(part, K, vd, log=log, mm_per_px=mm_per_px, freeze=freeze)
     for _ in range(retries):
         edge = ef.extra.get("at_edge", [])
         if ef.accepted or not edge or not all(n[:2] in HOLE_PARAMS for n in edge):
             break
-        ef = edgefit.fit(ef.extra["moved"], K, vd, log=log, mm_per_px=mm_per_px)
+        ef = edgefit.fit(ef.extra["moved"], K, vd, log=log, mm_per_px=mm_per_px, freeze=freeze)
     return ef
 
 
@@ -1028,7 +1057,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     def fit_log(m):
         log(f"{m} ({time.time() - t_fit:.0f} s)")
 
-    ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
+    ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
     # V27 (v0.12): het onderdeel tussendoor even aangestoten? Dan liggen de foto's erna net iets anders dan die ervoor.
     # De poses van de foto's erna verschuiven dan met het onderdeel mee. Een nieuw duwtje: de hele fit opnieuw (de
     # eerste fit was een compromis, met bijvoorbeeld een spookgat waar de ene groep foto's mat zag). Daarna wordt
@@ -1061,7 +1090,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         else:
             vd, part, energy, evals, notches = fit_shape(views)
         t_fit = time.time()
-        ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
+        ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
         # alleen als de fit er duidelijk beter door past (een verfijning: niet slechter): een sprong in de
         # verschuivingen die van iets anders komt (een maskerfout in een reeks foto's) maakt de fit niet beter
         c0, c1 = _fit_cost(before[-1]), _fit_cost(ef)
@@ -1091,7 +1120,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if alt is not None:
             part, energy = alt
             t_fit = time.time()
-            ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log)
+            ef = _edge_fit(part, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
             shape = _prism_check(ef, part) if ef.extra.get("problem") is not None else None
     # V16: een verzinking is een ring rond een gat in de foto's van boven; dan als model, en de randfit opnieuw. Ook
     # als de randfit niet gebruikt is: een verzonken gat laat in schuine foto's meer doorkijken dan een gewoon gat,
@@ -1108,7 +1137,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             trial.holes[i] = replace(trial.holes[i], csk=dk)
         if sunk and trial.is_valid():
             t_fit = time.time()
-            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
+            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
             if ef_csk.accepted:
                 ef, part = ef_csk, trial
                 log("verzinking herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].csk:.2f} x "
@@ -1132,7 +1161,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             t_fit = time.time()
             # de diepte uit het silhouet staat soms meer dan het vertrouwensgebied verkeerd (een gat met weinig
             # bewijs): dan vanaf die grens verder (_edge_fit)
-            ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
+            ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
             # een kamer die in de randfit (bijna) verdwijnt, was er geen
             min_depth = max(counterbore.CB_MIN_DEPTH, counterbore.CB_MIN_FRAC * trial.height)
             shallow = [i for i in bored if ef_cb.accepted and ef_cb.part.holes[i].cb_depth < min_depth]
@@ -1144,7 +1173,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                 trial = found_on.copy()
                 for i, (dk, t, d) in bored.items():
                     trial.holes[i] = replace(trial.holes[i], d=d, csk=0.0, cb=dk, cb_depth=t)
-                ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log) if bored else ef_cb
+                ef_cb = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log, notches=notches) if bored else ef_cb
             if bored and ef_cb.accepted:
                 ef, part = ef_cb, ef_cb.part
                 log("kamerboring herkend: " + ", ".join(f"gat {i + 1} Ø {ef.part.holes[i].cb:.2f} x "
@@ -1160,7 +1189,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                 trial.holes[i] = replace(trial.holes[i], d=d, csk=dk)
         if sunk2 and trial.is_valid():
             t_fit = time.time()
-            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
+            ef_csk = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
             if ef_csk.accepted:
                 ef, part = ef_csk, trial
                 log("verzinking herkend aan de doorkijk: " + ", ".join(
@@ -1181,7 +1210,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     trial.holes += blind
     if blind and trial.is_valid():
         t_fit = time.time()
-        ef_b = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log)
+        ef_b = _edge_fit(trial, cam.K, vd, mm_per_px, log=fit_log, notches=notches)
         n0 = len(found_on.holes)
         if ef_b.accepted:
             ef, part = ef_b, ef_b.part
@@ -1271,7 +1300,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if C is not None:
             prob = ef.extra["problem"]
             budget = uncertainty.Budget(uncertainty.Sensitivity(prob.build, ef.x, C, angle, shift), mm_per_px,
-                                        unc.scale_rel)
+                                        unc.scale_rel, fillet_min_mm=r_min)
             unc_method = "per maat: jackknife over groepen foto's (randfit), systematiek, " + scale_note
             if cast_shadow:
                 budget.extra_px.update(uncertainty.SHADOW_PX)

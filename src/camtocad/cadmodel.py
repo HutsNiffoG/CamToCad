@@ -21,7 +21,7 @@ from . import __version__, cadhelpers
 from .profile import CSK_ANGLE_DEG, Hole, Part2p5D, Profile, Step, dominant_angle
 from .snapping import (Snap, counterbore_candidates, countersink_candidates, hole_candidates, length_candidates,
                        radius_candidates, snap)
-from .uncertainty import Budget, edge_position
+from .uncertainty import Budget, edge_position, fillet_amp
 
 
 @dataclass
@@ -189,6 +189,7 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
     """
     out = part.copy()
     snaps: list[Snap] = []
+    limit = budget.fillet_min_mm if budget is not None else 0.0  # kleinste herkenbare afronding (V13)
     scale_rel = budget.scale_rel if budget is not None else unc.scale_rel
     evidence = evidence or {}
 
@@ -251,7 +252,8 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             r = float(np.mean([radii[i] for i in members]))
             label = f"{len(members)}x" if len(members) > 1 else f"hoek {members[0] + 1}"  # geen twee dezelfde namen
             s = do_snap(f"afronding R ({label})", r, unc.fillet / math.sqrt(len(members)) + 0.03,
-                        radius_candidates(r), lambda p, m=members: float(np.mean(p.outer.fillets[m])), "afronding")
+                        radius_candidates(r), lambda p, m=members: float(np.mean(p.outer.fillets[m])), "afronding",
+                        fillet_amp(r, limit))
             for i in members:
                 o.fillets[i] = s.value
             snaps.append(s)
@@ -385,7 +387,7 @@ def snap_part(part: Part2p5D, unc: Uncertainty, *, threshold: float = 0.8,
             snaps += [sL, sW]
             if sl.r > 0:
                 sr = do_snap(f"{name} hoekstraal", sl.r, unc.fillet, radius_candidates(sl.r),
-                             lambda p, i=i: p.slots[i].r, "afronding", a_size)
+                             lambda p, i=i: p.slots[i].r, "afronding", a_size * fillet_amp(sl.r, limit))
                 r = min(sr.value, width / 2)
                 snaps.append(sr)
         sx = do_snap(f"{name} x", sl.x, unc.hole_xy, length_candidates(sl.x, imperial),

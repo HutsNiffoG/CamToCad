@@ -44,8 +44,23 @@ SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 # naar buiten (stresstest zwaar_klein: een zwart plaatje van 5 mm met een harde schaduw, 0,19 mm). Extra systematiek
 # (px) voor de buitenmaten. Sinds v0.14 ook voor de hoogte: de onderrand ligt in de schuine foto's dan iets naar buiten
 # (de schaduw is vlak bij het onderdeel het donkerst, en de mat ernaast wordt een paar pixels verder gemeten), en dat
-# drukt de hoogte (stresstest klein_schaduw: 0,04 mm lager dan zonder schaduw, 0,07 mm in totaal)
-SHADOW_PX = {"lengte": 0.6, "lengte bovenrand": 0.6, "hoogte": 0.3, "hoogte bovenrand": 0.3}
+# drukt de hoogte (stresstest klein_schaduw: 0,04 mm lager dan zonder schaduw, 0,07 mm in totaal). En de afrondingen: waar
+# de schaduw langs een rand ophoudt, loopt haar rand schuin over de hoek (klein_schaduw: een hoek R2 als R2,93)
+SHADOW_PX = {"lengte": 0.6, "lengte bovenrand": 0.6, "hoogte": 0.3, "hoogte bovenrand": 0.3, "afronding": 1.0}
+# Een afronding vlak boven de kleinste die van een scherpe hoek te onderscheiden is (pipeline.sharp_corner_limit, V13):
+# daar is ze slecht te onderscheiden van een kleinere, en ze komt eerder te groot uit (stresstest 'hoeken', v0.14: R1
+# als R1,05-1,57 mm bij een grens van 1,14 mm). Extra systematiek (px): zoveel bij de grens, lineair naar 0 bij
+# tweemaal de grens
+NEAR_LIMIT_PX = 1.5
+
+
+def fillet_amp(r_mm: float, limit_mm: float) -> float:
+    """Vergroting van het systematische deel van een afronding met straal `r_mm` vlak boven de grens `limit_mm`
+    (zie NEAR_LIMIT_PX); 1 zonder grens of vanaf tweemaal de grens."""
+    if limit_mm <= 0 or r_mm >= 2 * limit_mm:
+        return 1.0
+    extra = NEAR_LIMIT_PX * min(1.0, (2 * limit_mm - r_mm) / limit_mm)
+    return math.hypot(1.0, extra / SYS_PX["afronding"])
 
 
 @dataclass
@@ -96,6 +111,7 @@ class Budget:
     scale_rel: float
     datum: dict = field(default_factory=dict)  # as -> index van de datumrand
     extra_px: dict = field(default_factory=dict)  # soort -> extra systematiek (px) voor deze scan, bijv. SHADOW_PX
+    fillet_min_mm: float = 0.0  # de kleinste afronding die van een scherpe hoek te onderscheiden is (zie fillet_amp)
 
     def sys(self, kind: str) -> float:
         return math.hypot(SYS_PX[kind], self.extra_px.get(kind, 0.0)) * self.mm_per_px

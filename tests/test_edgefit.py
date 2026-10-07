@@ -716,10 +716,10 @@ def test_the_floor_edge_of_a_counterbore_sets_its_depth():
     assert h.cb_depth == pytest.approx(3.0, abs=0.05) and h.cb == pytest.approx(10.0, abs=0.05)
 
 
-def test_points_next_to_a_narrow_wall_do_not_count():
+def test_points_next_to_a_narrow_wall_count_less():
     """V7 (v0.14): waar de wand in beeld smal is (een dunne pas in een schuine foto), meet de zachte rand het grijs van
-    het bovenvlak in plaats van dat van de wand, en ligt de rand verkeerd. Zulke punten tellen niet mee; bij een hoge
-    wand, of zonder zachte rand (alleen een masker), wel."""
+    het bovenvlak in plaats van dat van de wand, en ligt de rand verkeerd. Zulke punten tellen minder mee; bij een
+    hoge wand, of zonder zachte rand (alleen een masker), gewoon."""
     def views_for(part):
         poses = [look_at([120 + 230 * np.cos(a), 80 + 230 * np.sin(a), 230.0], [120.0, 80.0, 0.0]) for a in (0.4, 2.5)]
         empty = np.zeros((H, W), bool)
@@ -744,4 +744,6 @@ def test_points_next_to_a_narrow_wall_do_not_count():
             bottom = rim.level[on] == 0
             assert bottom.any() and np.all(w[~bottom] == 1.0)  # de verre kant (bovenrand) telt altijd
             # een hoge wand: alleen waar hij bijna langs de kijkrichting loopt (aan de uiteinden van het silhouet) smal
-            assert (np.mean(w[bottom] == 0) > 0.9) if narrow else (np.mean(w[bottom] == 1) > 0.75)
+            low = w[bottom] == edgefit.WALL_WEIGHT
+            assert (np.mean(low) > 0.9) if narrow else (np.mean(~low) > 0.75)
+            assert np.all((w == 1.0) | (w == edgefit.WALL_WEIGHT)) and 0 < edgefit.WALL_WEIGHT < 0.5

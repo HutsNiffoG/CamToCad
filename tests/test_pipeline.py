@@ -212,6 +212,11 @@ def test_a_small_v_shaped_notch_becomes_rectangular_when_that_fits_better():
     for corner in [(122, 100), (122, 97), (118, 97), (118, 100)]:
         assert np.min(np.linalg.norm(V - corner, axis=1)) < 0.3, (corner, V)
         assert np.min(np.linalg.norm(notches[0] - corner, axis=1)) < 0.3
+    # de bodemhoeken blijven in de randfit scherp (v0.14): in een inham van een paar pixels is hun afronding niet
+    # te meten
+    floor = pipeline._notch_floor_corners(part, notches)
+    assert sorted(tuple(np.round(V[k])) for k in floor) == [(118.0, 97.0), (122.0, 97.0)]
+    assert pipeline._notch_floor_corners(part, []) == [] and pipeline._notch_floor_corners(vee, notches) == []
     # de korte wanden van zo'n inham zijn geen teken van een schaduw (kwaliteitspoort; bij 0,35 mm/px telt een rand
     # tot 3,5 mm als kort)
     stats = {"iou_median": 0.999, "iou_min": 0.99}
@@ -247,6 +252,20 @@ def test_the_smallest_fillet_grows_with_the_blur():
     assert pipeline.sharp_corner_limit(0.25, 0.6) == pytest.approx(1.125)
     assert pipeline.sharp_corner_limit(0.25, 1.9) == pytest.approx((4.5 + 3.0 * 0.7) * 0.25)
     assert pipeline.sharp_corner_limit(0.1, 0.6) == 0.8  # nooit kleiner dan 0,8 mm
+
+
+def test_a_fillet_just_above_the_limit_gets_a_wider_u95():
+    """V13 (v0.14): vlak boven de kleinste herkenbare afronding is een afronding slecht te onderscheiden van een
+    kleinere (stresstest 'hoeken': R1 als R1,05-1,57 bij een grens van 1,14 mm). Tot tweemaal de grens krijgt ze extra
+    systematiek, bij de grens het meest."""
+    from camtocad import uncertainty
+
+    lim = 1.14
+    at = uncertainty.fillet_amp(lim, lim)
+    assert at == pytest.approx(np.hypot(1.0, uncertainty.NEAR_LIMIT_PX / uncertainty.SYS_PX["afronding"]))
+    assert 1.0 < uncertainty.fillet_amp(1.6, lim) < at
+    assert uncertainty.fillet_amp(2 * lim, lim) == 1.0 and uncertainty.fillet_amp(3.0, lim) == 1.0
+    assert uncertainty.fillet_amp(1.2, 0.0) == 1.0  # zonder grens
 
 
 def test_a_slanted_quadrilateral_start_is_also_tried_as_a_rectangle():

@@ -89,9 +89,11 @@ STEP_END_MM = 1.5  # de randen van een trede: zo ver van de contour blijven (daa
 # bovenrand. De zachte rand (masks._soft_alpha) neemt het grijs van het object 3,5-7,5 px binnen de maskerrand. Is de
 # wand in beeld smaller (een dunne pas, of een bovenaanzicht), dan is dat het grijs van het bovenvlak, niet van de wand
 # op de rand, en ligt de rand verkeerd: een wand is meestal donkerder dan het bovenvlak, en dan komt de rand naar
-# binnen (een witte pas van 0,76 mm: 0,4 px). Zulke punten tellen niet mee; smaller dan WALL_SLIVER_PX verandert de
-# wand de rand nauwelijks.
-WALL_LEVEL_PX, WALL_SLIVER_PX = 8.0, 0.25
+# binnen (een witte pas van 0,76 mm: 0,4 px). Zulke punten tellen voor WALL_WEIGHT mee (in de kleinste kwadraten
+# 4%): waar ander bewijs is, trekken ze de rand nauwelijks mee, en waar ze het enige bewijs zijn (een gat van een
+# zwart onderdeel, aan één kant), houden ze het model op zijn plek. Smaller dan WALL_SLIVER_PX verandert de wand de
+# rand nauwelijks.
+WALL_LEVEL_PX, WALL_SLIVER_PX, WALL_WEIGHT = 8.0, 0.25, 0.2
 
 
 def signed_dist(mask: np.ndarray) -> np.ndarray:
@@ -617,11 +619,11 @@ def boundary_status(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, tol: flo
 
 
 def wall_weights(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, status: list[np.ndarray]) -> list[np.ndarray]:
-    """Per foto, voor de punten op de silhouetrand (`status`): 0 waar de onderrand de rand vormt en de wand erboven in
-    beeld tussen WALL_SLIVER_PX en WALL_LEVEL_PX breed is (zie daar), anders 1. De breedte is die loodrecht op de rand
-    in beeld, tot het eerstvolgende niveau boven de onderrand (de bovenrand, of de schouder van een afschuining). Alleen
-    in foto's met een zachte rand uit de grijswaarden: de rand van het masker zelf gaat niet uit van het grijs van het
-    object vlak binnen de rand."""
+    """Per foto, voor de punten op de silhouetrand (`status`): WALL_WEIGHT waar de onderrand de rand vormt en de wand
+    erboven in beeld tussen WALL_SLIVER_PX en WALL_LEVEL_PX breed is (zie daar), anders 1. De breedte is die
+    loodrecht op de rand in beeld, tot het eerstvolgende niveau boven de onderrand (de bovenrand, of de schouder van
+    een afschuining). Alleen in foto's met een zachte rand uit de grijswaarden: de rand van het masker zelf gaat niet
+    uit van het grijs van het object vlak binnen de rand."""
     p2, nrm, _ = points2d(part, lay)
     rim = rims(part, lay)
     n = len(p2)
@@ -646,7 +648,7 @@ def wall_weights(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, status: lis
             nimg /= np.linalg.norm(nimg, axis=1, keepdims=True) + 1e-12
             width = np.abs(np.sum((uvt - uvb) * nimg, axis=1))
             narrow = (up >= 0) & (width >= WALL_SLIVER_PX) & (width < WALL_LEVEL_PX)
-            wt[bottom[narrow]] = 0.0
+            wt[bottom[narrow]] = WALL_WEIGHT
         out.append(wt)
     return out
 
@@ -723,12 +725,6 @@ def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]
         h, w = v.fg.shape
         uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
         wgt = _clip_free(v, uv, np.clip((4.0 - _bilinear(prob.fields[i][1], uv)) / 2.0, 0.0, 1.0))
-        if prob.wall:  # een punt naast een smalle wand in beeld telt niet mee (V7), ook niet als vergelijking
-            wall = np.ones(len(rim.P))
-            wall[prob.status[i]] = prob.wall[i]
-            keep = wall[on] > 0
-            on[on] = keep
-            uv, wgt = uv[keep], wgt[keep]
         pt = rim.point[on]
         np.add.at(W, pt, wgt ** 2)
         np.add.at(N, pt, 1.0)
@@ -891,7 +887,7 @@ class _Problem:
             self.fields.append((edge_distance(sf, band, getattr(v, "alpha", None), getattr(v, "alpha_w", None)),
                                 band))
         self.status: list[np.ndarray] = []
-        self.wall: list[np.ndarray] = []  # per foto en punt op de silhouetrand: 0 bij een smalle wand in beeld (V7)
+        self.wall: list[np.ndarray] = []  # per foto en punt op de silhouetrand: het gewicht bij een smalle wand (V7)
         self.inner: list[tuple] = []  # randen binnen het object (V16), per foto; zie measure_inner
 
     def freeze(self, names: list[str]) -> None:
@@ -1058,10 +1054,7 @@ def contour_misfit(part: Part2p5D, K: np.ndarray, vd: list, mm_per_px: float, pr
         h, w = v.fg.shape
         ok = (uv[:, 0] >= 0) & (uv[:, 0] <= w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h - 1)
         r = _bilinear(sf, uv[ok])
-        wall = np.ones(len(rim.P))
-        wall[q.status[i]] = q.wall[i]
-        # zekere mat binnen ~1 px: bewijs (gewicht 1 in de randfit); niet naast een smalle wand in beeld (V7)
-        ok_ev = (_bilinear(band, uv[ok]) <= 2.0) & (wall[sel][ok] > 0)
+        ok_ev = _bilinear(band, uv[ok]) <= 2.0  # zekere mat binnen ~1 px: bewijs (gewicht 1 in de randfit)
         scale = float(np.linalg.norm(v.pose.center - center)) / K[0, 0]  # mm per px op het onderdeel
         for j, rr in zip(rim.point[sel][ok][ok_ev], r[ok_ev]):
             per_pt[j].append(-rr * scale)  # + = de rand ligt in de foto verder naar buiten dan het model
@@ -1101,9 +1094,11 @@ def _solve(prob: _Problem, x0: np.ndarray, lb, ub, views=None, max_nfev: int = 6
                          f_scale=F_SCALE, diff_step=2e-4, x_scale="jac", max_nfev=max_nfev)
 
 
-def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_per_px: float | None = None) -> EdgeFit:
+def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_per_px: float | None = None,
+        freeze: list[str] | None = None) -> EdgeFit:
     """Verfijnt de pixelfit `part` op de randafstanden (zie de moduletekst). `mm_per_px`: resolutie op het
-    object, voor het vertrouwensgebied van de afrondingen (TRUST_FILLET_PX)."""
+    object, voor het vertrouwensgebied van de afrondingen (TRUST_FILLET_PX). `freeze`: parameters die de waarde
+    van `part` houden."""
     prob = _Problem(part, K, vd, mm_per_px=mm_per_px)
     # een gat of sleuf zonder bewijs rondom blijft staan: zijn parameters zouden anders wegdrijven tot de rand
     # van het vertrouwensgebied, en dan bleef voor het hele onderdeel de pixelfit staan
@@ -1116,7 +1111,7 @@ def fit(part: Part2p5D, K: np.ndarray, vd: list, rounds: int = 3, log=None, mm_p
     prob.freeze([nm for kind, i, names in weak for nm in names
                  + ([f"hk{i}"] if kind == "gat" and part.holes[i].csk > 0 else [])
                  + ([f"hc{i}", f"hz{i}"] if kind == "gat" and part.holes[i].cb > 0 else [])
-                 + ([f"hp{i}"] if kind == "gat" and part.holes[i].blind else [])])
+                 + ([f"hp{i}"] if kind == "gat" and part.holes[i].blind else [])] + list(freeze or []))
     x_pix = prob.x_of(part)
     lb, ub = prob.bounds(x_pix)
     cur, res = part, None
