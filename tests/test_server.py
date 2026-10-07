@@ -246,3 +246,59 @@ def test_live_frames_are_judged_against_the_photos_so_far(tmp_path, mat_photos, 
     bad = [("beeld", ("x.jpg", b"geen beeld", "image/jpeg"))]
     assert c.post(f"/api/scans/{job}/live", files=bad).status_code == 400
     assert c.post("/api/scans/000000000000/live", files=frame).status_code == 404
+
+
+def test_measurements_are_compared_and_shared_without_photos(tmp_path):
+    """Fase 0 in de webpagina (v0.13): schuifmaatmetingen per scan (maten.json, zoals bij camtocad valideer), de
+    vergelijking zodra de scan verwerkt is (zonder opnieuw te verwerken), de meetset over alle scans en een zip om
+    te delen, zonder foto's."""
+    import io
+    import json
+    import zipfile
+
+    from test_validate import UNC, bracket
+
+    def runner(photos, out, opts, log, scan_name=""):
+        (out / "debug").mkdir(parents=True, exist_ok=True)
+        report = {"summary": {"betrouwbaarheid": "normaal"}, "uncertainty_model": UNC,
+                  "geometry": {"gefit": bracket().to_dict(), "gesnapt": bracket().to_dict()}}
+        (out / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        (out / "debug" / "diagnose.json").write_text("{}", encoding="utf-8")
+        return {"summary": {}, "warnings": []}
+
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=runner))
+    c.get("/?token=geheim")
+    files = [("fotos", (f"IMG_{i}.jpg", jpg(), "image/jpeg")) for i in range(6)]
+    job = c.post("/api/scans", files=files, data={"mat": "A4", "meetlijn": "100.1"}).json()["id"]
+    assert c.get(f"/api/scans/{job}/maten").json() == {"referentie": None, "validatie": None}
+    assert c.get("/api/meetset").json()["scans"] == []
+
+    bad = c.put(f"/api/scans/{job}/maten", json={"maten": {"dikte": 3}})
+    assert bad.status_code == 400 and "dikte" in bad.json()["detail"] and str(tmp_path) not in bad.json()["detail"]
+    assert c.put(f"/api/scans/{job}/maten", json={"maten": {"lengte": -1}}).status_code == 400
+    assert not (tmp_path / job / "maten.json").exists()
+    r = c.put(f"/api/scans/{job}/maten", json={"naam": "beugel", "maten": {"lengte": 80.1, "breedte": 40.0,
+                                                                          "gaten": [6.6, 6.62]}}).json()
+    assert r["referentie"]["meetlijn"] == [100.1, 100.1] and r["referentie"]["mat"] == "A4"
+    v = r["validatie"]
+    assert v["status"] == "ok" and v["id"] == job and "map" not in v and len(v["vergelijkingen"]) == 4
+    assert all(row["binnen_u95"] for row in v["vergelijkingen"])
+    assert next(s for s in c.get("/api/scans").json() if s["id"] == job)["maten"] is True
+    meetset = c.get("/api/meetset").json()
+    assert len(meetset["scans"]) == 1 and meetset["samenvatting"]["maten"] == 4
+    assert meetset["samenvatting"]["per_soort"]["gat"]["u95_extra"] == 0.0  # de U95 klopt
+
+    z = zipfile.ZipFile(io.BytesIO(c.get("/api/meetset.zip").content))
+    names = set(z.namelist())
+    assert {"validatie.json", "validatie.html", "LEESMIJ.txt", f"{job}/maten.json", f"{job}/status.json",
+            f"{job}/resultaat/report.json", f"{job}/resultaat/debug/diagnose.json"} <= names
+    assert not [n for n in names if n.endswith((".jpg", ".png", ".heic"))]  # geen foto's
+    assert str(tmp_path) not in z.read("validatie.json").decode()  # geen paden van deze pc
+
+    c.post(f"/api/scans/{job}/start", data={"meetlijn": "99.9"})  # andere meetlijn: maten.json gaat mee
+    assert c.get(f"/api/scans/{job}/maten").json()["referentie"]["meetlijn"] == [99.9, 99.9]
+    c.post(f"/api/scans/{job}/fotos", files=[("fotos", ("IMG_9.jpg", jpg(), "image/jpeg"))])
+    assert c.get(f"/api/scans/{job}/maten").json()["validatie"]["status"] == "verouderd"  # niet opnieuw verwerkt
+    assert c.get("/api/meetset").json()["samenvatting"]["maten"] == 0
+    c.delete(f"/api/scans/{job}/maten")
+    assert c.get(f"/api/scans/{job}/maten").json()["referentie"] is None

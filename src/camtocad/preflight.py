@@ -567,6 +567,7 @@ LIVE_TOP, LIVE_PER_CELL = 5, 2  # doel: zoveel foto's recht van boven, en per ho
 LIVE_SEP_DEG, LIVE_SEP_TOP_DEG = 5.0, 2.0  # een nieuwe foto minstens zo ver (gezien vanaf het onderdeel) van de vorige
 FAR_MM = 600.0  # verder weg: het onderdeel wordt klein in beeld
 LIVE_F_REL = 0.8  # brandpuntsafstand / lange zijde als de homografie hem niet geeft (zoals _focal_and_tilt)
+LIVE_HIGH_DEG = 75.0  # hoger dan dit zegt de azimut weinig: de weg wijzen met de kanten van de mat
 
 
 def _angle(az1: float, el1: float, az2: float, el2: float) -> float:
@@ -616,6 +617,9 @@ def _next_cell(az: float, el: float, need: dict[str, int]) -> str | None:
     if "boven" in open_cells:
         return "boven"
 
+    if el >= LIVE_HIGH_DEG:  # (bijna) recht van boven is elke kant even ver: begin aan de onderkant van de mat
+        az, el = 270.0, 60.0
+
     def cost(cell: str) -> float:
         caz, cel = _cell_center(cell)
         right = (caz - az) % 360.0 < 180.0
@@ -635,7 +639,10 @@ def _direction(az: float, el: float, cell: str) -> str:
         return ("Volgende foto's: recht boven het onderdeel. Houd de telefoon evenwijdig aan de mat, met het "
                 "onderdeel midden in beeld en de hele mat zichtbaar.")
     caz, cel = _cell_center(cell)
-    band = cell.split("-")[0]
+    band, k = cell.split("-")
+    if el >= LIVE_HIGH_DEG:  # van bovenaf: de kant van de mat noemen, want de azimut zegt hier weinig
+        return (f"Volgende foto: houd de telefoon lager, ~{cel:.0f}° boven de mat, aan de kant {SECTORS[int(k)]} van "
+                "de mat (boven = kant met de titel).")
     moves = []
     daz = (caz - az + 180.0) % 360.0 - 180.0
     if abs(daz) >= 10.0:
@@ -726,6 +733,7 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
         out["aanwijzing"] = "Te ver weg: kom dichterbij, tot 25-35 cm van het onderdeel."
         return out
     if cell is not None and need.get(cell, 0) > 0 and (cell == "boven" or need["boven"] == 0):
+        out["doelvak"] = cell
         margin = 0.3 if cell == "boven" else 0.2  # het midden van het onderdeel niet aan de rand van het beeld
         u, v = (out["doel"] or (-1.0, -1.0))
         sep = LIVE_SEP_TOP_DEG if cell == "boven" else LIVE_SEP_DEG

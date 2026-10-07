@@ -111,3 +111,11 @@ def test_blind_hole_depths_are_compared(tmp_path):
     p = tmp_path / "maten.json"
     p.write_text(json.dumps({"maten": {"gatdieptes": [6.0]}}), encoding="utf-8")
     assert validate.read_reference(p)["maten"] == {"gatdiepte": [6.0]}
+
+
+def test_u95_advice_says_how_much_uncertainty_is_missing():
+    """v0.13: per soort hoeveel er (kwadratisch) bij de U95 moet zodat 95% van de fouten erbinnen valt."""
+    rows = [validate.Comparison("gat", 6.6, 6.6 + e, None, 0.1) for e in (0.05, -0.08, 0.12, 0.3, 0.0)]
+    assert validate.u95_extra(rows) == pytest.approx(np.sqrt(0.3 ** 2 - 0.1 ** 2))  # 95% van 5: allemaal
+    assert validate.u95_extra(rows[:3] + rows[4:]) == pytest.approx(np.sqrt(0.12 ** 2 - 0.1 ** 2))
+    assert validate.u95_extra(rows[:2]) == 0.0 and validate.u95_extra([]) is None

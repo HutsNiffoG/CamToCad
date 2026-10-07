@@ -10,6 +10,7 @@ op het lokale netwerk luistert.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import queue
 import re
@@ -17,19 +18,21 @@ import secrets
 import shutil
 import socket
 import sys
+import tempfile
 import threading
 import time
 import traceback
 import uuid
+import zipfile
 from collections import Counter
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from .. import __version__, preflight
+from .. import __version__, preflight, validate
 from . import qr
 from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
@@ -127,7 +130,55 @@ class JobStore:
         data = {k: v for k, v in (data or self.read(job_id)).items() if k != "trace"}
         dbg = self.root / job_id / "resultaat" / "debug"
         data["debug"] = sorted(p.name for p in dbg.iterdir() if DEBUG_FILE.match(p.name)) if dbg.is_dir() else []
+        data["maten"] = (self.root / job_id / validate.REFERENCE).exists()
         return data
+
+    # --- Fase 0: schuifmaatmetingen per scan (maten.json, zoals bij camtocad valideer) ----------------------
+
+    def reference(self, job_id: str) -> dict | None:
+        f = self.path(job_id) / validate.REFERENCE
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+    def set_reference(self, job_id: str, naam: str, maten: dict) -> None:
+        """Schrijft maten.json met de meetlijnen en de mat van de scan; een fout in de maten geeft een 400."""
+        status = self.read(job_id)
+        data = {"naam": (str(naam).strip() or job_id)[:100], "maten": maten}
+        if status.get("meetlijn"):
+            data["meetlijn"] = status["meetlijn"]
+        if status.get("mat", "auto") != "auto":
+            data["mat"] = status["mat"]
+        with self.lock(job_id):
+            self.write(job_id, data, validate.REFERENCE + ".nieuw")
+            new = self.path(job_id) / (validate.REFERENCE + ".nieuw")
+            try:
+                validate.read_reference(new)
+            except (ValueError, TypeError) as e:
+                new.unlink(missing_ok=True)
+                raise HTTPException(400, str(e).replace(str(new) + ": ", "")) from None
+            new.replace(self.path(job_id) / validate.REFERENCE)
+
+    def sync_reference(self, job_id: str) -> None:
+        """De meetlijnen en de mat in maten.json gelijk houden met die van de scan (ze zijn bij /start te wijzigen)."""
+        ref = self.reference(job_id)
+        if ref is not None:
+            self.set_reference(job_id, ref.get("naam", ""), ref.get("maten", {}))
+
+    def validation(self, job_id: str) -> validate.ScanValidation | None:
+        """De vergelijking van het model met maten.json, als er een actueel resultaat is; er wordt niets verwerkt."""
+        if self.reference(job_id) is None:
+            return None
+        res = validate.compare_existing(self.path(job_id))
+        status = self.read(job_id)
+        if status.get("state") in BUSY:
+            res.status, res.fout, res.vergelijkingen = "bezig", "", []
+        elif status.get("state") == "fout" and res.status == "niet verwerkt":
+            res.status, res.fout = "fout", status.get("error") or "verwerking mislukt"
+        return res
+
+    def measured(self) -> list[tuple[str, validate.ScanValidation]]:
+        """Alle scans met schuifmaatmetingen, met hun vergelijking."""
+        return [(s["id"], self.validation(s["id"])) for s in self.list()
+                if (self.root / s["id"] / validate.REFERENCE).exists()]
 
     # --- foto's en controle ---------------------------------------------------------------
 
@@ -423,8 +474,80 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
             if store.read(job_id)["state"] in BUSY:
                 raise HTTPException(409, "Deze scan wordt al verwerkt")
             store.update(job_id, **changes)
+            store.sync_reference(job_id)
         store.start(job_id, run_inline)
         return store.public(job_id)
+
+    # --- Fase 0 (v0.13): schuifmaatmetingen invoeren, vergelijken en delen ------------------------------------
+
+    def public_validation(job_id: str, res: validate.ScanValidation | None) -> dict | None:
+        return None if res is None else {**{k: v for k, v in res.to_dict().items() if k != "map"}, "id": job_id}
+
+    @app.get("/api/scans/{job_id}/maten")
+    def get_reference(job_id: str, request: Request):
+        """maten.json van de scan en, als hij verwerkt is, de vergelijking met het model."""
+        check(request)
+        return {"referentie": store.reference(job_id),
+                "validatie": public_validation(job_id, store.validation(job_id))}
+
+    @app.put("/api/scans/{job_id}/maten")
+    def put_reference(job_id: str, request: Request, body: dict = Body(...)):
+        """Schuifmaatmetingen opslaan: {"naam": ..., "maten": {"lengte": 80.02, "gaten": [6.62, 6.6], ...}}."""
+        check(request)
+        if not isinstance(body.get("maten"), dict):
+            raise HTTPException(400, "'maten' ontbreekt")
+        store.set_reference(job_id, str(body.get("naam") or ""), body["maten"])
+        return {"referentie": store.reference(job_id),
+                "validatie": public_validation(job_id, store.validation(job_id))}
+
+    @app.delete("/api/scans/{job_id}/maten")
+    def delete_reference(job_id: str, request: Request):
+        check(request)
+        (store.path(job_id) / validate.REFERENCE).unlink(missing_ok=True)
+        return {"referentie": None, "validatie": None}
+
+    def meetset() -> tuple[list[validate.ScanValidation], list[dict], dict]:
+        """De scans met metingen: hun vergelijking, die voor de pagina, en de samenvatting van de verwerkte."""
+        measured = store.measured()
+        return ([r for _, r in measured], [public_validation(i, r) for i, r in measured],
+                validate.summarize([r for _, r in measured if r.status == "ok"]))
+
+    @app.get("/api/meetset")
+    def get_meetset(request: Request):
+        """Fase 0 over alle scans met schuifmaatmetingen: per soort maat bias, spreiding, aandeel binnen U95 en
+        hoeveel U95 tekortkomt."""
+        check(request)
+        _, rows, summary = meetset()
+        return {"scans": rows, "samenvatting": summary}
+
+    @app.get("/api/meetset.zip")
+    def meetset_zip(request: Request):
+        """Alles om te delen, zonder foto's: per scan maten.json, report.json, diagnose.json en de status, plus
+        validatie.json en validatie.html van de hele set (FASE-0.md, 'Resultaten delen')."""
+        check(request)
+        results, rows, summary = meetset()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("validatie.json", json.dumps({"versie": __version__, "samenvatting": summary, "scans": rows},
+                                                    indent=2, ensure_ascii=False))
+            with tempfile.TemporaryDirectory() as tmp:  # dezelfde pagina als camtocad valideer
+                z.write(validate.write_report(results, summary, tmp)["html"], "validatie.html")
+            for r in rows:
+                base = store.path(r["id"])
+                status = {k: v for k, v in store.read(r["id"]).items()
+                          if k in ("id", "state", "mat", "meetlijn", "photos", "created", "finished", "summary",
+                                   "warnings", "error")}
+                z.writestr(f"{r['id']}/status.json", json.dumps(status, indent=2, ensure_ascii=False))
+                for rel in (validate.REFERENCE, "resultaat/report.json", "resultaat/debug/diagnose.json"):
+                    if (base / rel).exists():
+                        z.write(base / rel, f"{r['id']}/{rel}")
+            z.writestr("LEESMIJ.txt", "Cam-to-CAD Fase 0: schuifmaatmetingen en scanresultaten, zonder foto's.\n"
+                                      "validatie.json: de vergelijking per maat en de samenvatting per soort.\n"
+                                      "Per scan: maten.json (de metingen), resultaat/report.json (het model en de "
+                                      "onzekerheid) en resultaat/debug/diagnose.json.\n")
+        stamp = time.strftime("%Y%m%d")
+        return Response(buf.getvalue(), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="camtocad_meetset_{stamp}.zip"'})
 
     @app.delete("/api/scans/{job_id}")
     def delete_scan(job_id: str, request: Request):

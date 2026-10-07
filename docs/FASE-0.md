@@ -4,6 +4,12 @@ Alle drempels en de opgegeven onzekerheid (U95) van route A zijn tot nu toe afge
 
 Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmetingen, dan `camtocad valideer <map>`.
 
+Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server`):
+
+1. fotograferen met de **livecamera**, die de weg wijst en zelf de foto's maakt (§3);
+2. per scan de **schuifmaatmetingen invullen** (knop "maten"); de vergelijking met de scan verschijnt zodra die verwerkt is (§4, §5);
+3. de **meetset** onderaan de pagina telt alle scans met metingen op (§6), en "Downloaden om te delen" geeft een zip zonder foto's (§7).
+
 ## 1. Wat je nodig hebt
 
 - **De mat v2.** Maak hem met `camtocad mat --formaat A4` (of `A3`, `Letter`).
@@ -18,6 +24,9 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - dikte 3–20 mm, met doorgaande gaten van verschillende diameters.
   Alleen 2,5D-onderdelen: plat, met doorgaande gaten. Sinds v0.7 mag de bovenrand rondom afgeschuind of afgerond zijn, of mag er één rechte trede in zitten; neem er een paar van mee. Sinds v0.8 telt kleur mee: neem ook een gekleurd onderdeel dat even donker is als de zwarte vakken (donkerblauw geanodiseerd, donkergroen of donkerrood kunststof), en een zwart onderdeel met een gat boven een zwart vak. Sinds v0.9 worden verzonken gaten (90°, voor verzonken schroeven) herkend: neem een onderdeel met een paar verzinkingen mee, en meet de diameter van de verzinking aan het bovenvlak (in `maten.json` als `verzinkingen`). Sinds v0.10 ook kamerboringen (een cilindrische kamer voor een cilinderkopschroef): neem een onderdeel met een paar kamerboringen mee, en meet de diameter en de diepte van de kamer (`kamerboringen` en `kamerdieptes`). Sinds v0.10 schat de scan ook de toonkromme van de camera uit de mat zelf, sinds v0.11 ook de verscherping van de telefoon en een kromme die per stuk beeld verschilt (lokale toonbewerking, HDR); daarvoor hoef je niets te doen, maar gebruik geen filters of effecten. Sinds v0.11 ook blinde gaten (niet door het onderdeel heen): neem een onderdeel met een paar blinde gaten mee en meet hun diepte (`gatdieptes`; de diameter hoort bij `gaten`), en een gat met een kleine faas (0,5 mm) aan de bovenkant: die wordt een smalle verzinking (meet haar diameter aan het bovenvlak, als `verzinkingen`).
 - **Een referentie met bekende maten**, bijvoorbeeld een eindmaat of een nauwkeurig gefreesd blokje, en een ring of ringkaliber. Daarmee zie je het verschil tussen een meetfout van de scan en een meetfout van de schuifmaat.
+  - Een referentie die iedereen heeft: een **bankpas** (ISO/IEC 7810 ID-1: 85,60 × 53,98 mm, hoeken R3,18, 0,76 mm dik). Op de telefoonpagina vult de knop "Bankpas als referentie" die normmaten in.
+  - Neem een gekleurde of donkere pas zonder reliëf, en meet de dikte zelf na (reliëf maakt hem dikker).
+  - In de stresstest (v0.13) komt een grijze pas binnen 0,04 mm uit. Een witte pas komt er 0,06–0,08 mm te kort uit: wit op het witte papier van de mat geeft weinig rand, en de pas is te dun voor een zichtbare zijkant.
 
 ## 2. Meten met de schuifmaat
 
@@ -46,6 +55,12 @@ Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmeti
   - rondom op ongeveer 35° en 60° boven de mat, om de ~45°;
   - in kleur, zonder filter: kleur is bewijs voor het object (v0.8). JPG en HEIC (iPhone) werken allebei; voor HEIC is de extra `heic` nodig (`pip install -e ".[server]"` heeft hem al);
   - met één lens: een iPhone schakelt dichtbij vanzelf naar de macrolens (ultragroothoek). Blijf op 25–35 cm, of zet Macrobesturing aan en de macrostand uit. Foto's van een andere lens of met digitale zoom worden aan de EXIF-gegevens herkend en niet gebruikt; de fotocontrole meldt het.
+- **Of gebruik de livecamera** (v0.13), dan hoef je de richtingen niet te onthouden:
+  - Open op de telefoon de https-link uit de terminal (of scan de QR-code). De camera werkt in de browser alleen via https; de eerste keer waarschuwt de telefoon voor het certificaat van je pc: kies "doorgaan".
+  - Tik op **Live camera**. Je ziet de omtrek van de mat over het beeld, een kruisje op het onderdeel en één aanwijzing, zoals "Volgende foto: loop ~45° naar rechts om het onderdeel" of "houd de telefoon lager, ~35° boven de mat".
+  - De volgorde: eerst 5 foto's recht van boven, daarna rondom op ~60° en ~35°, 2 foto's per richting (8 richtingen).
+  - Staat de telefoon goed en stil, dan maakt de pagina zelf de foto (vinkje "automatisch"; de rode knop kan altijd). De minikaart onderaan is gedraaid zodat jij onderaan staat: groen is genoeg, rood ontbreekt, wit omrand is de volgende.
+  - Gebruik binnen één scan óf de livecamera óf de camera-app, niet allebei: hun foto's hebben een ander formaat en een andere beeldhoek. Op een iPhone zijn de foto's van de livecamera beelden uit de video (Safari kent geen ImageCapture), dus wat kleiner dan een gewone foto.
 - **Controleer de set direct**, vóór je het onderdeel weghaalt:
   - Via de telefoonpagina (`camtocad server`) gebeurt dat vanzelf. Elke foto krijgt een oordeel (goed, matig of onbruikbaar), en een dekkingskaart toont in het rood welke richtingen nog ontbreken.
   - Via de opdrachtregel draai je `camtocad controleer <map-met-fotos>`. Dat kost ongeveer 0,1 s per foto.
@@ -88,6 +103,8 @@ Een `maten.json`:
 | `afschuining` | Eén waarde: het been van een afschuining, of de straal van een afronding, van de bovenrand rondom |
 | `gaten`, `hartafstanden`, `afrondingen`, `treden`, `verzinkingen`, `kamerboringen`, `kamerdieptes`, `gatdieptes` | Een lijst. Elke waarde wordt gekoppeld aan de dichtstbijzijnde maat van het model; `treden` zijn de hoogtes van de lage delen, `verzinkingen` de diameters van verzinkingen aan het bovenvlak (v0.9; ook een kleine faas aan een gat, v0.11), `kamerboringen` en `kamerdieptes` de diameter en de diepte van de kamer van een kamerboring (v0.10), `gatdieptes` de diepte van blinde gaten (v0.11; hun diameter staat bij `gaten`) |
 
+**In de browser** (v0.13): kies bij een scan **maten** en vul de metingen in, in mm. Meerdere waarden scheid je met een spatie of puntkomma (`6,62 6,60`); lege velden tellen niet mee. Dat schrijft dezelfde `maten.json` in de map van de scan, met de meetlijnen en de mat van de scan erin. De datamap van de server is daarmee ook een validatiemap: `camtocad valideer ~/camtocad-data` werkt er direct op.
+
 ## 5. Draaien
 
 ```bash
@@ -105,6 +122,8 @@ De samenvatting staat in de terminal en in `validatie/validatie.html` en `valida
 
 Voor een regressietest na een wijziging: `camtocad valideer validatie/ --opnieuw --eis-dekking 0.9` geeft een foutcode als minder dan 90% van de fouten binnen U95 valt.
 
+**In de browser** (v0.13) staat de vergelijking onder de metingen van een scan, zodra die verwerkt is. Er wordt daarvoor niets opnieuw verwerkt: zijn er na de verwerking foto's bijgekomen, dan staat er "verouderd" tot je opnieuw verwerkt. De **meetset** onderaan de pagina telt alle verwerkte scans met metingen op, zoals `validatie.html`.
+
 Ook de demo levert zo'n map op: `camtocad demo --uit demo` en daarna `camtocad valideer demo`.
 
 ## 6. Lezen
@@ -115,6 +134,7 @@ Ook de demo levert zo'n map op: `camtocad demo --uit demo` en daarna `camtocad v
 | Duidelijk minder dan 90% | U95 is te optimistisch; de fouten zijn groter dan de scan beweert |
 | Alles ruim binnen U95 | U95 is te ruim; de scan is beter dan hij zegt |
 | Bias per soort, bijvoorbeeld "gat: systematisch −0,06 mm" | Een systematische fout, te corrigeren in een volgende versie |
+| "U95 extra" per soort, bijvoorbeeld 0,04 mm bij gaten (v0.13) | Zoveel onzekerheid ontbreekt (kwadratisch bij de U95 opgeteld) om 95% van de fouten binnen U95 te krijgen; 0 betekent dat de U95 klopt. De basis om de systematiek in U95 bij te stellen |
 | "Lengtes wijken gemiddeld +0,3% af" | Vrijwel altijd de printschaal: meet de meetlijnen na en zet ze in `maten.json` |
 | "gat ontbreekt in het model" of extra gaten | Een topologiefout. Kijk in `resultaat/debug/` (maskers, bovenaanzicht) |
 | Scan met `fout` | De foutmelding staat erbij; zie [ROUTE-A.md — Als het niet lukt](ROUTE-A.md#als-het-niet-lukt) |
@@ -127,3 +147,5 @@ Wil je helpen de drempels en U95 af te stellen, deel dan:
 - per onderdeel `resultaat/report.json` en `resultaat/debug/diagnose.json`.
 
 Die bevatten geen foto's. De foto's zelf zijn alleen nodig als een scan mislukt en de debugbeelden niet genoeg zeggen.
+
+Op de telefoonpagina (v0.13) geeft **Downloaden om te delen** precies dat als zip: `validatie.json` en `validatie.html` van de hele set, en per scan `maten.json`, `resultaat/report.json`, `resultaat/debug/diagnose.json` en de status (mat, meetlijnen, aantal foto's, meldingen). Geen foto's, en geen paden van je pc.

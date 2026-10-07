@@ -207,3 +207,15 @@ def test_live_guidance_checks_the_frame_before_a_photo(live_frames):
     assert not r["opnemen"] and "donker" in r["aanwijzing"]
     r = preflight.live_check(np.full((540, 960), 120, np.uint8), spec, ov)
     assert r["status"] == "zoek" and r["mat"] is None and "kalibratiemat" in r["aanwijzing"]
+
+
+def test_live_guidance_from_above_names_the_side_of_the_mat(live_frames):
+    """Recht van boven zegt de azimut weinig: de volgende richting heet naar de kant van de mat, te beginnen onder
+    (de kant van meetlijn X)."""
+    spec, frame = live_frames
+    r = preflight.live_check(frame(30, 88), spec, {"recht_van_boven": 5}, LIVE_F / 960)
+    assert r["vak"] == "boven" and r["doelvak"] == "hoog-6" and not r["opnemen"]
+    assert "aan de kant onder van de mat" in r["aanwijzing"] and "loop" not in r["aanwijzing"]
+    full = {"recht_van_boven": 5, "dekking": {"hoog": [0] * 6 + [2, 0], "laag": [0] * 8}}
+    r = preflight.live_check(frame(30, 88), spec, full, LIVE_F / 960)
+    assert r["doelvak"] == "hoog-7" and "rechtsonder" in r["aanwijzing"]  # rechtsom verder

@@ -72,6 +72,13 @@
   .live .flash.on { opacity:.7; transition:none; }
   .live .side { display:flex; flex-direction:column; gap:6px; align-items:flex-start; font-size:.85rem; }
   .live label { display:flex; gap:6px; align-items:center; }
+  /* Fase 0: schuifmaatmetingen per scan en de meetset */
+  .maten input[type=text] { min-height:40px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg);
+    font:inherit; padding:0 8px; width:100%; max-width:22em; }
+  table.cmp { border-collapse:collapse; width:100%; font-size:.92rem; font-variant-numeric:tabular-nums; }
+  table.cmp th, table.cmp td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); }
+  .tablewrap { overflow-x:auto; }
+  .ok-txt { color:var(--ok); } .bad-txt { color:var(--err); }
 </style>
 </head>
 <body>
@@ -128,6 +135,31 @@
   <section class="card">
     <h2>Scans</h2>
     <div id="scans" class="muted">Laden…</div>
+  </section>
+
+  <section class="card" id="maten-kaart" hidden>
+    <h2>Schuifmaatmetingen <span class="muted" id="maten-scan"></span></h2>
+    <p class="muted">Fase 0: vul in wat je met de schuifmaat hebt gemeten (in mm). Bij meerdere waarden: scheiden met
+      een spatie of puntkomma, bijv. <code>6,62 6,60</code>. Lege velden tellen niet mee. Zie
+      <a href="https://github.com/HutsNiffoG/CamToCad/blob/HEAD/docs/FASE-0.md">FASE-0.md</a> voor hoe je meet.</p>
+    <div class="row"><button id="maten-bankpas" class="small" type="button">Bankpas als referentie (ID-1)</button></div>
+    <div class="settings maten" id="maten-velden"></div>
+    <div class="row">
+      <button id="maten-opslaan" class="primary" type="button">Opslaan</button>
+      <button id="maten-wis" type="button">Metingen wissen</button>
+      <button id="maten-sluit" type="button">Sluiten</button>
+    </div>
+    <p id="maten-melding" class="muted"></p>
+    <div id="maten-vergelijking"></div>
+  </section>
+
+  <section class="card" id="meetset">
+    <h2>Meetset (Fase 0)</h2>
+    <div id="meetset-inhoud" class="muted">Nog geen scans met schuifmaatmetingen: kies bij een scan 'maten'.</div>
+    <div class="row" style="margin-top:8px">
+      <button id="meetset-ververs" class="small" type="button">Vernieuwen</button>
+      <a href="api/meetset.zip">Downloaden om te delen (zip, zonder foto's)</a>
+    </div>
   </section>
 </main>
 <div id="live" class="live" hidden>
@@ -373,6 +405,7 @@ async function load() {
       const actions = [];
       if (!["wachtrij", "bezig"].includes(s.state) && s.id !== current)
         actions.push(`<button class="small" data-resume="${s.id}">${s.state === "upload" ? "verder vullen" : "foto's toevoegen"}</button>`);
+      actions.push(`<button class="small" data-maten="${s.id}">${s.maten ? "maten ✓" : "maten"}</button>`);
       if (!["wachtrij", "bezig"].includes(s.state)) actions.push(`<button class="small" data-remove="${s.id}">verwijderen</button>`);
       return `<div class="scan"><div><span class="state ${s.state}">${label[s.state] || s.state}</span> · ${esc(when)} · ` +
         `${s.photos || 0} foto's · mat ${s.mat === "auto" ? "automatisch" : esc(s.mat)}</div><div>${body}</div><div class="row" style="margin-top:4px">${actions.join("")}</div></div>`;
@@ -382,6 +415,7 @@ async function load() {
 $("scans").addEventListener("click", async (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.resume) resume(t.dataset.resume);
+  if (t.dataset && t.dataset.maten) openMaten(t.dataset.maten);
   if (t.dataset && t.dataset.remove && confirm("Deze scan en de foto's verwijderen?")) {
     try { await api("DELETE", `api/scans/${t.dataset.remove}`); if (t.dataset.remove === current) reset(); load(); }
     catch (err) { $("melding").textContent = err.message; }
@@ -565,6 +599,116 @@ async function liveCapture() {
     $("live-tip").className = "tip zoek"; $("live-tip").textContent = "Foto mislukt: " + e.message;
   } finally { live.capturing = false; live.last = performance.now(); }
 }
+
+// ---------------------------------------------------------------- Fase 0: schuifmaatmetingen (v0.13)
+// [veld in maten.json, label, 1 = één waarde of n = een lijst]
+const MATEN = [["lengte", "Lengte", 1], ["breedte", "Breedte", 1], ["hoogte", "Hoogte (dikte)", 1],
+  ["diameter", "Diameter (rond onderdeel)", 1], ["gaten", "Gaten (Ø)", "n"], ["hartafstanden", "Hartafstanden", "n"],
+  ["afrondingen", "Afrondingen (R)", "n"], ["afschuining", "Afschuining bovenrand", 1], ["treden", "Treden (hoogte)", "n"],
+  ["verzinkingen", "Verzinkingen (Ø boven)", "n"], ["kamerboringen", "Kamerboringen (Ø)", "n"],
+  ["kamerdieptes", "Kamerdieptes", "n"], ["gatdieptes", "Diepte blinde gaten", "n"]];
+let matenScan = null;
+const nl = (v, nd = 3) => v == null ? "-" : Number(v).toFixed(nd).replace(".", ",");
+const nlSigned = (v, nd = 3) => { if (v == null) return "-"; const r = Number(v.toFixed(nd)) || 0; return (r > 0 ? "+" : "") + nl(r, nd); };
+
+$("maten-velden").innerHTML = `<label for="maten-naam">Naam</label><input id="maten-naam" type="text" maxlength="100" placeholder="bijv. beugel aluminium">` +
+  MATEN.map(([k, label]) => `<label for="maat-${k}">${label}</label><input id="maat-${k}" type="text" inputmode="decimal" autocomplete="off">`).join("");
+
+function parseNumbers(text) {
+  const parts = text.trim() ? text.trim().split(/[\s;]+/) : [];
+  return parts.map((t) => Number(t.replace(",", ".")));
+}
+
+function showComparison(v) {
+  const box = $("maten-vergelijking");
+  if (!v) { box.innerHTML = ""; return; }
+  const status = { "niet verwerkt": "Nog niet verwerkt: start de verwerking, dan verschijnt hier de vergelijking.",
+                   bezig: "De scan wordt verwerkt…" };
+  if (v.status !== "ok") { box.innerHTML = `<p class="muted">${esc(status[v.status] || (v.status + ": " + (v.fout || "")))}</p>`; return; }
+  const rows = v.vergelijkingen.map((c) => `<tr><td>${esc(c.soort)}</td><td>${nl(c.referentie)}</td><td>${nl(c.gefit)}</td>` +
+    `<td>${nlSigned(c.fout)}</td><td>${nl(c.u95)}</td><td class="${c.binnen_u95 == null ? "" : c.binnen_u95 ? "ok-txt" : "bad-txt"}">` +
+    `${c.binnen_u95 == null ? "-" : c.binnen_u95 ? "ja" : "nee"}</td><td>${esc(c.opmerking || "")}</td></tr>`).join("");
+  const inside = v.vergelijkingen.filter((c) => c.binnen_u95 != null);
+  const n = inside.filter((c) => c.binnen_u95).length;
+  box.innerHTML = `<h3>Scan tegen schuifmaat</h3><p>${n} van ${inside.length} maten binnen de U95 van de scan` +
+    (v.extra_gaten ? ` · ${v.extra_gaten} extra gat(en) in het model` : "") +
+    (v.betrouwbaarheid && v.betrouwbaarheid !== "normaal" ? ` · betrouwbaarheid ${esc(v.betrouwbaarheid)}` : "") + `</p>` +
+    `<div class="tablewrap"><table class="cmp"><thead><tr><th>Maat</th><th>Schuifmaat</th><th>Scan</th><th>Fout</th><th>U95</th>` +
+    `<th>Binnen</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` +
+    `<p class="muted">Fout = scan min schuifmaat (mm). Bij een eerlijke U95 valt ~95% van de fouten erbinnen.</p>`;
+}
+
+function fillMaten(ref) {
+  $("maten-naam").value = ref ? ref.naam || "" : "";
+  for (const [k] of MATEN) {
+    const v = ref && ref.maten ? ref.maten[k] : undefined;
+    $("maat-" + k).value = v == null ? "" : (Array.isArray(v) ? v : [v]).map((x) => String(x).replace(".", ",")).join(" ");
+  }
+}
+
+async function openMaten(id) {
+  matenScan = id;
+  $("maten-kaart").hidden = false; $("maten-melding").textContent = "";
+  $("maten-scan").textContent = `(scan ${id})`;
+  try { const d = await api("GET", `api/scans/${id}/maten`); fillMaten(d.referentie); showComparison(d.validatie); }
+  catch (e) { $("maten-melding").textContent = e.message; }
+  $("maten-kaart").scrollIntoView({ behavior: "smooth" });
+}
+
+$("maten-opslaan").addEventListener("click", async () => {
+  if (!matenScan) return;
+  const maten = {};
+  for (const [k, label, kind] of MATEN) {
+    const vals = parseNumbers($("maat-" + k).value);
+    if (!vals.length) continue;
+    if (vals.some((x) => !Number.isFinite(x) || x <= 0)) { $("maten-melding").textContent = `${label}: geen geldig getal`; return; }
+    if (kind === 1 && vals.length > 1) { $("maten-melding").textContent = `${label}: één waarde`; return; }
+    maten[k] = kind === 1 ? vals[0] : vals;
+  }
+  if (!Object.keys(maten).length) { $("maten-melding").textContent = "Vul minstens één maat in."; return; }
+  try {
+    const r = await fetch(`api/scans/${matenScan}/maten`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ naam: $("maten-naam").value, maten }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ("fout " + r.status));
+    fillMaten(d.referentie); showComparison(d.validatie);
+    $("maten-melding").textContent = "Opgeslagen.";
+    loadMeetset(); load();
+  } catch (e) { $("maten-melding").textContent = "Opslaan mislukt: " + e.message; }
+});
+
+$("maten-wis").addEventListener("click", async () => {
+  if (!matenScan || !confirm("De schuifmaatmetingen van deze scan wissen?")) return;
+  try { await api("DELETE", `api/scans/${matenScan}/maten`); fillMaten(null); showComparison(null); loadMeetset(); load(); }
+  catch (e) { $("maten-melding").textContent = e.message; }
+});
+$("maten-sluit").addEventListener("click", () => { $("maten-kaart").hidden = true; matenScan = null; });
+// een bankpas (ISO/IEC 7810 ID-1) als referentie die iedereen heeft; meet de dikte zelf na
+$("maten-bankpas").addEventListener("click", () => {
+  fillMaten({ naam: "bankpas (ID-1)", maten: { lengte: 85.6, breedte: 53.98, hoogte: 0.76, afrondingen: [3.18, 3.18, 3.18, 3.18] } });
+  $("maten-melding").textContent = "Normmaten van een bankpas ingevuld; meet ze liefst zelf na (een pas met reliëf is dikker).";
+});
+
+async function loadMeetset() {
+  try {
+    const d = await api("GET", "api/meetset"), s = d.samenvatting;
+    $("meetset-inhoud").className = d.scans.length ? "" : "muted";
+    if (!d.scans.length) { $("meetset-inhoud").textContent = "Nog geen scans met schuifmaatmetingen: kies bij een scan 'maten'."; return; }
+    const kinds = Object.entries(s.per_soort || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${nlSigned(v.bias)}</td>` +
+      `<td>${nl(v.rms)}</td><td>${nl(v.max_abs)}</td><td>${Math.round(100 * v.binnen_u95)}%</td><td>${nl(v.u95_extra)}</td></tr>`).join("");
+    const open = d.scans.filter((v) => v.status !== "ok").map((v) => `${esc(v.naam)}: ${esc(v.status)}`);
+    $("meetset-inhoud").innerHTML = `<p>${s.scans_ok} van ${d.scans.length} scans vergeleken · ${s.maten} maten` +
+      (s.binnen_u95 != null ? ` · <b>${Math.round(100 * s.binnen_u95)}% binnen U95</b> (eerlijk: ~95%)` : "") +
+      (s.schaal_bias_pct != null ? ` · lengtes ${nlSigned(s.schaal_bias_pct, 2)}%` : "") + `</p>` +
+      (kinds ? `<div class="tablewrap"><table class="cmp"><thead><tr><th>Maat</th><th>n</th><th>Bias</th><th>RMS</th><th>Max</th>` +
+        `<th>Binnen U95</th><th>U95 extra</th></tr></thead><tbody>${kinds}</tbody></table></div>` : "") +
+      `<ul class="advice">${(s.opmerkingen || []).map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` +
+      (open.length ? `<p class="muted">Nog niet meegeteld: ${open.join("; ")}</p>` : "") +
+      `<p class="muted">U95 extra: wat er (kwadratisch) bij de U95 moet zodat 95% van de fouten erbinnen valt; 0 = de U95 klopt.</p>`;
+  } catch (e) { $("meetset-inhoud").textContent = "Meetset niet beschikbaar: " + e.message; }
+}
+$("meetset-ververs").addEventListener("click", loadMeetset);
+loadMeetset();
 
 $("live-start").addEventListener("click", liveStart);
 $("live-stop").addEventListener("click", liveStop);

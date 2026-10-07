@@ -121,9 +121,12 @@ def read_reference(path: str | Path) -> dict:
             raise ValueError(f"{path}: onbekende maat '{key}' (bekend: {', '.join(sorted(set(ALIASES)))})")
         values = value if isinstance(value, list) else [value]
         try:
-            measures.setdefault(kind, []).extend(float(v) for v in values)
+            values = [float(v) for v in values]
         except (TypeError, ValueError):
             raise ValueError(f"{path}: '{key}' moet een getal of een lijst getallen zijn") from None
+        if not all(0.0 < v < 2000.0 for v in values):
+            raise ValueError(f"{path}: '{key}' moet tussen 0 en 2000 mm liggen")
+        measures.setdefault(kind, []).extend(values)
     rulers = data.get("meetlijn")
     if rulers is not None:
         rulers = [float(r) for r in (rulers if isinstance(rulers, list) else [rulers])]
@@ -243,6 +246,39 @@ def _photo_dir(part: Path) -> Path:
     return part / "fotos" if (part / "fotos").is_dir() else part
 
 
+def _stale(photos: Path, report_path: Path) -> bool:
+    """Geen resultaat, of foto's die nieuwer zijn dan het resultaat."""
+    from .pipeline import IMAGE_EXT
+
+    return not report_path.exists() or any(
+        p.stat().st_mtime > report_path.stat().st_mtime for p in photos.iterdir() if p.suffix.lower() in IMAGE_EXT)
+
+
+def _compare_report(out: ScanValidation, ref: dict, report_path: Path) -> ScanValidation:
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if "geometry" not in report:
+        out.status, out.fout = "fout", "report.json is van een oudere versie: verwerk opnieuw (--opnieuw)"
+        return out
+    out.betrouwbaarheid = str(report.get("summary", {}).get("betrouwbaarheid", ""))
+    out.vergelijkingen, out.extra_gaten = compare(ref, report)
+    return out
+
+
+def compare_existing(part: Path) -> ScanValidation:
+    """Zoals validate_part, maar zonder te verwerken (voor de webpagina, v0.13): alleen een actueel resultaat wordt
+    vergeleken; anders de status 'niet verwerkt' of 'verouderd'."""
+    ref = read_reference(part / REFERENCE)
+    out = ScanValidation(ref["naam"], str(part), "ok")
+    photos, report_path = _photo_dir(part), part / "resultaat" / "report.json"
+    if not report_path.exists():
+        out.status = "niet verwerkt"
+        return out
+    if _stale(photos, report_path):
+        out.status, out.fout = "verouderd", "er zijn foto's bijgekomen sinds de verwerking: verwerk opnieuw"
+        return out
+    return _compare_report(out, ref, report_path)
+
+
 def validate_part(part: Path, rerun: bool = False, log=print, run=None) -> ScanValidation:
     from .pipeline import IMAGE_EXT, ScanOptions, run_scan
 
@@ -255,9 +291,7 @@ def validate_part(part: Path, rerun: bool = False, log=print, run=None) -> ScanV
         return out
     result_dir = part / "resultaat"
     report_path = result_dir / "report.json"
-    stale = not report_path.exists() or any(
-        p.stat().st_mtime > report_path.stat().st_mtime for p in photos.iterdir() if p.suffix.lower() in IMAGE_EXT)
-    if rerun or stale:
+    if rerun or _stale(photos, report_path):
         rulers = ref["meetlijn"]  # None: niet gemeten
         opts = ScanOptions(mat=ref["mat"], mat_scale=(rulers[0] / 100.0, rulers[1] / 100.0) if rulers else None)
         log(f"== {part.name}: scan verwerken ...")
@@ -269,17 +303,19 @@ def validate_part(part: Path, rerun: bool = False, log=print, run=None) -> ScanV
             return out
     else:
         log(f"== {part.name}: eerder resultaat gebruikt (--opnieuw om opnieuw te verwerken)")
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    if "geometry" not in report:
-        out.status, out.fout = "fout", "report.json is van een oudere versie: verwerk opnieuw (--opnieuw)"
-        return out
-    out.betrouwbaarheid = str(report.get("summary", {}).get("betrouwbaarheid", ""))
-    out.vergelijkingen, out.extra_gaten = compare(ref, report)
-    return out
+    return _compare_report(out, ref, report_path)
+
+
+def u95_extra(rows: list[Comparison], coverage: float = 0.95) -> float | None:
+    """Hoeveel onzekerheid (mm, kwadratisch bij de U95 opgeteld) er bij moet zodat `coverage` van de fouten binnen
+    de U95 valt: 0 als de U95 al klopt. Een advies voor de afstelling (Fase 0, v0.13)."""
+    need = sorted(math.sqrt(max(0.0, c.fout ** 2 - c.u95 ** 2)) for c in rows if c.fout is not None and c.u95)
+    return need[max(0, math.ceil(coverage * len(need)) - 1)] if need else None
 
 
 def summarize(results: list[ScanValidation]) -> dict:
-    """Totalen per soort: bias, spreiding, grootste fout, aandeel binnen U95; plus de schaalcontrole."""
+    """Totalen per soort: bias, spreiding, grootste fout, aandeel binnen U95 en hoeveel U95 tekortkomt; plus de
+    schaalcontrole."""
     rows = [c for r in results for c in r.vergelijkingen if c.fout is not None]
     per_kind = {}
     for kind in KINDS:
@@ -288,7 +324,8 @@ def summarize(results: list[ScanValidation]) -> dict:
             continue
         inside = [c.binnen_u95 for c in rows if c.soort == kind]
         per_kind[kind] = {"n": len(errs), "bias": float(errs.mean()), "rms": float(np.sqrt((errs ** 2).mean())),
-                          "max_abs": float(np.abs(errs).max()), "binnen_u95": float(np.mean(inside))}
+                          "max_abs": float(np.abs(errs).max()), "binnen_u95": float(np.mean(inside)),
+                          "u95_extra": u95_extra([c for c in rows if c.soort == kind])}
     rel = [c.fout / c.referentie for c in rows if KINDS[c.soort][1] and c.referentie > 20.0]
     missing = sum(1 for r in results for c in r.vergelijkingen if c.fout is None)
     out = {"scans": len(results), "scans_ok": sum(r.status == "ok" for r in results), "maten": len(rows),
@@ -308,6 +345,9 @@ def summarize(results: list[ScanValidation]) -> dict:
     for kind, s in per_kind.items():
         if s["n"] >= 3 and abs(s["bias"]) > 2 * s["rms"] / math.sqrt(s["n"]) and abs(s["bias"]) > 0.05:
             notes.append(f"{kind}: systematisch {s['bias']:+.3f} mm (rms {s['rms']:.3f} mm over {s['n']} maten).")
+        if s["n"] >= 5 and s["u95_extra"] and s["u95_extra"] > 0.01:
+            notes.append(f"{kind}: U95 is te krap; met {s['u95_extra']:.3f} mm extra (kwadratisch opgeteld) valt 95% "
+                         "van deze fouten erbinnen.")
     out["opmerkingen"] = notes
     return out
 
@@ -349,7 +389,7 @@ def report_lines(results: list[ScanValidation], summary: dict) -> list[str]:
                   + (f", {s['extra_gaten']} extra gaten" if s["extra_gaten"] else "")]
     for kind, k in s["per_soort"].items():
         lines.append(f"   {kind:12s} n {k['n']:3d}  bias {k['bias']:+.3f}  rms {k['rms']:.3f}  max {k['max_abs']:.3f}"
-                     f"  binnen U95 {100 * k['binnen_u95']:.0f}%")
+                     f"  binnen U95 {100 * k['binnen_u95']:.0f}%  U95 extra {_fmt(k.get('u95_extra'))}")
     if s["schaal_bias_pct"] is not None:
         lines.append(f"   lengtes gemiddeld {s['schaal_bias_pct']:+.3f}% (printschaal)")
     lines += [f"- {n}" for n in s["opmerkingen"]]
@@ -380,8 +420,8 @@ def write_report(results: list[ScanValidation], summary: dict, out_dir: str | Pa
                        f"<th>U95</th><th>Gesnapt</th><th>Binnen U95</th><th></th></tr></thead><tbody>{rows}"
                        "</tbody></table></div>" if rows else ""))
     kinds = "".join(f"<tr><td>{html.escape(k)}</td><td>{v['n']}</td><td>{v['bias']:+.3f}</td><td>{v['rms']:.3f}</td>"
-                    f"<td>{v['max_abs']:.3f}</td><td>{100 * v['binnen_u95']:.0f}%</td></tr>"
-                    for k, v in summary["per_soort"].items())
+                    f"<td>{v['max_abs']:.3f}</td><td>{100 * v['binnen_u95']:.0f}%</td>"
+                    f"<td>{_fmt(v.get('u95_extra'))}</td></tr>" for k, v in summary["per_soort"].items())
     notes = "".join(f"<li>{html.escape(n)}</li>" for n in summary["opmerkingen"]) or "<li>geen</li>"
     cover = "-" if summary["binnen_u95"] is None else f"{100 * summary['binnen_u95']:.0f}%"
     page = f"""<!doctype html>
@@ -404,11 +444,12 @@ th, td {{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--line);
 binnen U95: {cover}</p>
 <h2>Per soort maat</h2>
 <div class="wrap"><table><thead><tr><th>Maat</th><th>n</th><th>Bias (mm)</th><th>RMS (mm)</th><th>Max (mm)</th>
-<th>Binnen U95</th></tr></thead><tbody>{kinds}</tbody></table></div>
+<th>Binnen U95</th><th>U95 extra (mm)</th></tr></thead><tbody>{kinds}</tbody></table></div>
 <h2>Opmerkingen</h2><ul>{notes}</ul>
 {''.join(body)}
 <p class="muted">Fout = model (ongesnapt) min referentie. U95 is de onzekerheid die de scan zelf opgeeft; bij een
-eerlijke onzekerheid valt ongeveer 95% van de fouten daarbinnen.</p>
+eerlijke onzekerheid valt ongeveer 95% van de fouten daarbinnen. U95 extra: wat er kwadratisch bij moet zodat 95% van
+de fouten in deze set binnen U95 valt (0: de U95 klopt).</p>
 </main></body></html>"""
     hpath = out / "validatie.html"
     hpath.write_text(page, encoding="utf-8")
