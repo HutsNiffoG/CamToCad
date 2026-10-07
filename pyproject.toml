@@ -26,12 +26,14 @@ server = [
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
     "segno>=1.5",
+    "cryptography>=42",
 ]
 dev = [
     "pytest>=8",
     "httpx>=0.27",
     "pypdfium2>=4",
     "pi-heif>=1.0",
+    "cryptography>=42",
 ]
 
 [project.scripts]

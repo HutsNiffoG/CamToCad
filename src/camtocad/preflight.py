@@ -34,7 +34,7 @@ from .mat import MatSpec, board_to_mat, get_spec, make_board, rasterize_board
 WORK_SIDE = 2000  # dezelfde werkresolutie als de pipeline
 MIN_CORNERS = 12
 BLUR_WARN, BLUR_BAD = 1.8, 3.0  # onscherpte σ in pixels
-CLOSE_MM = 150.0  # een camera dichter bij de mat (mm boven de mat): weinig scherptediepte, soms de macrolens (V28)
+CLOSE_MM = 150.0  # een camera dichter bij de mat (mm, langs de kijkrichting): weinig scherptediepte, soms de macrolens
 # richting van de camera gezien vanaf het onderdeel; boven = kant met de titel, onder = meetlijn X
 SECTORS = ("rechts", "rechtsboven", "boven", "linksboven", "links", "linksonder", "onder", "rechtsonder")
 BANDS = (("hoog", 50.0, 80.0, 60), ("laag", 20.0, 50.0, 35))  # naam, elevatie van-tot, richtwaarde (graden)
@@ -360,6 +360,14 @@ def _pose(c: PhotoCheck, spec: MatSpec, cam: calib.CameraModel) -> calib.Pose | 
     return None
 
 
+def view_distance(pose: calib.Pose) -> float:
+    """Afstand (mm) van de camera tot de mat langs de optische as: ongeveer de afstand waarop de telefoon scherpstelt
+    (V28: dichterbij dan CLOSE_MM is de scherptediepte klein en schakelt een iPhone naar de macrolens). Niet de hoogte
+    boven de mat: een lage foto op 30 cm afstand hangt maar 15 cm boven de mat (v0.13)."""
+    axis_z = float(pose.R[2, 2])  # z-component (mat) van de kijkrichting
+    return float(pose.center[2]) / -axis_z if axis_z < -0.1 else math.inf
+
+
 def _probes(spec: MatSpec) -> tuple[np.ndarray, int]:
     board = make_board(spec)
     corners = board_to_mat(np.asarray(board.getChessboardCorners(), float), spec)
@@ -498,7 +506,7 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
     if poses and not located:
         advice.append("Het onderdeel is nog niet gevonden op de mat: leg het midden op het geblokte deel en maak "
                       "foto's recht van boven.")
-    close = sum(1 for p in poses.values() if p.center[2] < CLOSE_MM)
+    close = sum(1 for p in poses.values() if view_distance(p) < CLOSE_MM)
     if close:
         verb = "is" if close == 1 else "zijn"
         advice.append(f"{_photos(close)} {verb} van dichterbij dan {CLOSE_MM / 10:.0f} cm gemaakt: houd 25-35 cm aan "
@@ -549,3 +557,200 @@ def report_lines(checks: list[PhotoCheck], summary: dict) -> list[str]:
     lines += [f"- {a}" for a in s["advies"]] or ["- geen aanwijzingen"]
     lines.append("klaar om te verwerken" if s["klaar"] else "nog niet compleet (verwerken kan wel)")
     return lines
+
+
+# ----------------------------------------------------------------------------- live begeleiding (V25, v0.13)
+
+LIVE_SIDE = 960  # beelden van de livecamera: kleiner dan de werkresolutie, ~0,1 s per beeld
+LIVE_BLUR_MAX = 1.5  # σ (px op LIVE_SIDE) waarboven het beeld beweegt (~3 px op de werkresolutie, BLUR_BAD)
+LIVE_TOP, LIVE_PER_CELL = 5, 2  # doel: zoveel foto's recht van boven, en per hoogteband en richting
+LIVE_SEP_DEG, LIVE_SEP_TOP_DEG = 5.0, 2.0  # een nieuwe foto minstens zo ver (gezien vanaf het onderdeel) van de vorige
+FAR_MM = 600.0  # verder weg: het onderdeel wordt klein in beeld
+LIVE_F_REL = 0.8  # brandpuntsafstand / lange zijde als de homografie hem niet geeft (zoals _focal_and_tilt)
+
+
+def _angle(az1: float, el1: float, az2: float, el2: float) -> float:
+    """Hoek (graden) tussen twee kijkrichtingen vanaf het onderdeel."""
+    a1, e1, a2, e2 = map(math.radians, (az1, el1, az2, el2))
+    c = math.sin(e1) * math.sin(e2) + math.cos(e1) * math.cos(e2) * math.cos(a1 - a2)
+    return math.degrees(math.acos(max(-1.0, min(1.0, c))))
+
+
+def _cell(az: float, el: float) -> str | None:
+    """Het vak van een camerapositie: 'boven' (recht van boven), '<band>-<k>' (hoogteband, sector k), of None
+    (tussen de banden, of te laag)."""
+    if el >= 90.0 - STEEP_DEG:
+        return "boven"
+    for band, lo, hi, _ in BANDS:
+        if lo <= el < hi:
+            return f"{band}-{int(((az + 22.5) % 360.0) // 45.0)}"
+    return None
+
+
+def _cell_center(cell: str) -> tuple[float, float]:
+    if cell == "boven":
+        return 0.0, 90.0
+    band, k = cell.split("-")
+    return 45.0 * int(k), float(next(b[3] for b in BANDS if b[0] == band))
+
+
+def missing_views(overview: dict | None) -> dict[str, int]:
+    """Hoeveel foto's de live begeleiding per vak nog vraagt: {'boven': n, 'hoog-0': n, ..., 'laag-7': n}.
+    `overview`: de samenvatting van de foto's tot nu toe (summarize)."""
+    ov = overview or {}
+    need = {"boven": max(0, LIVE_TOP - int(ov.get("recht_van_boven") or 0))}
+    for band, *_ in BANDS:
+        counts = (ov.get("dekking") or {}).get(band) or [0] * 8
+        for k in range(8):
+            need[f"{band}-{k}"] = max(0, LIVE_PER_CELL - int(counts[k]))
+    return need
+
+
+def _next_cell(az: float, el: float, need: dict[str, int]) -> str | None:
+    """Het vak waar de volgende foto heen moet: eerst recht van boven (daarmee vindt de scan het onderdeel), daarna
+    het dichtstbijzijnde vak dat nog foto's mist; bij gelijke afstand rechtsom, zodat de aanwijzing niet heen en
+    weer springt."""
+    open_cells = [c for c, n in need.items() if n > 0]
+    if not open_cells:
+        return None
+    if "boven" in open_cells:
+        return "boven"
+
+    def cost(cell: str) -> float:
+        caz, cel = _cell_center(cell)
+        right = (caz - az) % 360.0 < 180.0
+        return _angle(az, el, caz, cel) - (5.0 if right else 0.0)
+
+    return min(open_cells, key=cost)
+
+
+def _band_of(el: float) -> str | None:
+    return next((b[0] for b in BANDS if b[1] <= el < b[2]), None)
+
+
+def _direction(az: float, el: float, cell: str) -> str:
+    """Eén aanwijzing om van de huidige positie naar `cell` te gaan. Azimut groeit als je rechtsom loopt (gezien
+    vanaf de telefoon: naar rechts)."""
+    if cell == "boven":
+        return ("Volgende foto's: recht boven het onderdeel. Houd de telefoon evenwijdig aan de mat, met het "
+                "onderdeel midden in beeld en de hele mat zichtbaar.")
+    caz, cel = _cell_center(cell)
+    band = cell.split("-")[0]
+    moves = []
+    daz = (caz - az + 180.0) % 360.0 - 180.0
+    if abs(daz) >= 10.0:
+        moves.append(f"loop ~{5 * round(abs(daz) / 5):.0f}° naar {'rechts' if daz > 0 else 'links'} om het onderdeel")
+    if _band_of(el) != band:
+        moves.append(f"houd de telefoon {'hoger' if cel > el else 'lager'}, ~{cel:.0f}° boven de mat")
+    if not moves:
+        moves.append("een klein stukje verder dan de vorige foto")
+    text = " en ".join(moves)
+    return f"Volgende foto: {text[0].lower()}{text[1:]}."
+
+
+def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | None = None,
+               f_rel: float | None = None, hint: MatSpec | None = None) -> dict:
+    """Beoordeelt één beeld van de livecamera (V25): is de mat in beeld, waar staat de camera ten opzichte van het
+    onderdeel, is dat een richting die nog ontbreekt, en is het beeld stil en scherp genoeg? Geeft één aanwijzing en
+    `opnemen` (dit is een goed moment voor een foto).
+
+    `spec`: de mat van de scan (als die bekend is); `overview`: de samenvatting van de foto's tot nu toe (summarize:
+    dekking, recht_van_boven, punten, object_mm); `f_rel`: brandpuntsafstand / lange zijde van eerdere livebeelden
+    (de video heeft een andere beeldhoek dan de foto's); `hint`: de mat van het vorige livebeeld (scheelt het zoeken
+    met alle markers). De positie is grof (een paar graden): genoeg om de weg te wijzen; de foto zelf wordt na het
+    uploaden gewoon gecontroleerd."""
+    gray = to_work(img, LIVE_SIDE)
+    h, w = gray.shape
+    need = missing_views(overview)
+    out = {"breedte": w, "hoogte": h, "mat": None, "hoeken": 0, "mat_fractie": 0.0, "omtrek": None, "doel": None,
+           "scherpte_px": None, "wit": None, "f_rel": None, "positie": None, "vak": None, "doelvak": None,
+           "opnemen": False, "status": "zoek", "aanwijzing": "", "opmerkingen": [], "nodig": need,
+           "gedekt": not any(need.values())}
+    det, found = _detect_any(gray, spec or hint, "live")
+    if det is None:
+        white = float(np.percentile(gray, 95))
+        out["wit"] = round(white, 1)
+        out["aanwijzing"] = ("Te donker: zorg voor meer (diffuus) licht." if white < 60 else
+                             "Richt de camera op de kalibratiemat (grotendeels in beeld) en houd de telefoon stil.")
+        return out
+    board = make_board(found)
+    chess = np.asarray(board.getChessboardCorners(), float)[:, :2]
+    out.update(mat=found.name, hoeken=int(len(det.ids)), mat_fractie=round(len(det.ids) / len(chess), 3))
+    H, _ = cv2.findHomography(chess[det.ids], det.corners)
+    if H is None:
+        out["aanwijzing"] = "Houd de mat in beeld."
+        return out
+    bw, bh = found.board_w_mm, found.board_h_mm
+    outline = cv2.perspectiveTransform(np.array([[0, 0], [bw, 0], [bw, bh], [0, bh]], float).reshape(-1, 1, 2), H)
+    out["omtrek"] = (outline.reshape(-1, 2) / [w, h]).round(4).tolist()
+    white, _, clipped = _photometry(gray, H, det, found)
+    blur = _edge_blur(gray, H, det, found.nominal(), n_patches=16)
+    out.update(wit=round(white, 1), scherpte_px=None if blur is None else round(blur, 2))
+    f, tilt = _focal_and_tilt(H, w, h)
+    if f is not None and tilt >= 20.0:  # alleen bij een schuine blik is f goed te bepalen
+        out["f_rel"] = round(f / max(w, h), 4)
+    fk = (f_rel or LIVE_F_REL) * max(w, h)
+    K = np.array([[fk, 0.0, (w - 1) / 2], [0.0, fk, (h - 1) / 2], [0.0, 0.0, 1.0]])
+    pose = calib.solve_pose(det, found.nominal(), calib.CameraModel(K, np.zeros(5), w, h))
+    if spec is not None and found.name != spec.name:
+        out["aanwijzing"] = f"Dit is mat {found.label}, maar de foto's van deze scan zijn op mat {spec.label} gemaakt."
+        return out
+    if white < 45:
+        out["aanwijzing"] = "Te donker: zorg voor meer (diffuus) licht."
+        return out
+    if pose is None:
+        out["aanwijzing"] = "Houd de mat in beeld."
+        return out
+    ov = overview or {}
+    obj = ov.get("object_mm") or [found.size_mm[0] / 2, found.size_mm[1] / 2]
+    point = np.array([float(obj[0]), float(obj[1]), 0.0])
+    d = point - pose.center
+    dist = float(np.linalg.norm(d))
+    el = 90.0 - math.degrees(math.acos(float(np.clip(-d[2] / (dist + 1e-12), -1, 1))))
+    az = math.degrees(math.atan2(pose.center[1] - point[1], pose.center[0] - point[0])) % 360.0
+    cell = _cell(az, el)
+    out.update(positie={"azimut": round(az, 1), "elevatie": round(el, 1), "afstand_mm": round(dist),
+                        "hoogte_mm": round(float(pose.center[2]))}, vak=cell)
+    uv, z = calib.project(point[None], pose, K)
+    out["doel"] = (uv[0] / [w, h]).round(4).tolist() if z[0] > 0 else None
+    notes = out["opmerkingen"]
+    if white < 70:
+        notes.append("donker: meer (diffuus) licht")
+    if clipped > 0.05:
+        notes.append("glans op de mat: vermijd direct licht")
+    out["status"] = "let_op"
+    if view_distance(pose) < CLOSE_MM:
+        out["aanwijzing"] = "Te dichtbij: houd de telefoon 25-35 cm van het onderdeel."
+        return out
+    if dist > FAR_MM:
+        out["aanwijzing"] = "Te ver weg: kom dichterbij, tot 25-35 cm van het onderdeel."
+        return out
+    if cell is not None and need.get(cell, 0) > 0 and (cell == "boven" or need["boven"] == 0):
+        margin = 0.3 if cell == "boven" else 0.2  # het midden van het onderdeel niet aan de rand van het beeld
+        u, v = (out["doel"] or (-1.0, -1.0))
+        sep = LIVE_SEP_TOP_DEG if cell == "boven" else LIVE_SEP_DEG
+        near = [p for p in ov.get("punten") or [] if p.get("oordeel") != "onbruikbaar"
+                and _angle(az, el, p["azimut"], p["elevatie"]) < sep]
+        if blur is None or blur > LIVE_BLUR_MAX:  # eerst: een bewogen beeld mist ook mathoeken
+            out["aanwijzing"] = "Houd de telefoon stil: het beeld is onscherp."
+        elif not (margin <= u <= 1 - margin and margin <= v <= 1 - margin):
+            out["aanwijzing"] = "Richt de camera op het onderdeel: midden in beeld."
+        elif out["mat_fractie"] < 0.25:
+            out["aanwijzing"] = "Neem meer van de mat mee in beeld."
+        elif near:
+            out["status"] = "verplaats"
+            out["aanwijzing"] = "Hier is al een foto: schuif de telefoon een paar centimeter op."
+        else:
+            out["opnemen"], out["status"] = True, "opnemen"
+            where = "recht van boven" if cell == "boven" else "deze richting ontbreekt nog"
+            out["aanwijzing"] = f"Goed, {where}: houd stil voor de foto."
+        return out
+    target = _next_cell(az, el, need)
+    if target is None:
+        out["status"] = "klaar"
+        out["aanwijzing"] = "Alle richtingen zijn gedekt: je kunt de scan verwerken (meer foto's mag)."
+        return out
+    out["status"] = "verplaats"
+    out["doelvak"] = target
+    out["aanwijzing"] = _direction(az, el, target)
+    return out

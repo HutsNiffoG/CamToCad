@@ -120,3 +120,90 @@ def test_summary_warns_about_photos_taken_too_close(box_scan):
     assert close.mat and close.corners >= 12
     advice = [a for a in preflight.summarize(checks + [close])["advies"] if "dichterbij" in a]
     assert len(advice) == 1 and advice[0].startswith("1 foto is")
+
+
+def test_close_is_measured_along_the_view_not_as_height():
+    """v0.13: 'te dichtbij' is de afstand langs de kijkrichting (waarop de telefoon scherpstelt), niet de hoogte boven
+    de mat: een lage foto op 30 cm hangt maar 13 cm boven de mat."""
+    R, t = render.look_at([0.0, 0.0, 127.0], [272.0, 0.0, 0.0])  # 25° boven de mat, 30 cm van het midden
+    assert preflight.view_distance(Pose("laag", R, t)) == pytest.approx(300.0, abs=1)
+    R, t = render.look_at([110.0, 60.0, 120.0], [110.0, 62.0, 0.0])
+    assert preflight.view_distance(Pose("dichtbij", R, t)) == pytest.approx(120.0, abs=1)
+
+
+# ----------------------------------------------------------------------------- live begeleiding (V25, v0.13)
+
+LIVE_F = 700.0  # brandpuntsafstand (px) van de gerenderde livebeelden: 960 x 540, zoals een verkleind videobeeld
+
+
+@pytest.fixture(scope="module")
+def live_frames():
+    """Livebeelden van een doosje midden op de mat, vanuit een positie (azimut, elevatie) rond het doosje."""
+    import cadquery as cq
+
+    spec = mat.PRESETS["A4"]
+    mesh = render.tessellate(render.place(cq.Workplane("XY").box(50, 30, 10, centered=(True, True, False)), spec))
+    raster = mat.rasterize_board(spec, 4.0, 3.0)
+    cam = render.default_camera(960, 540, LIVE_F, dist=(0, 0, 0, 0, 0))
+    target = np.array([spec.board_w_mm / 2, spec.board_h_mm / 2, 0.0])
+
+    def frame(az, el, d=320.0, blur=0.5, aim=(0.0, 0.0, 0.0)):
+        a, e = np.radians(az), np.radians(el)
+        c = target + d * np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+        R, t = render.look_at(c, target + np.asarray(aim))
+        return render.render_view(raster, cam, R, t, mesh, noise=1.0, blur=blur, rng=np.random.default_rng(0))[0]
+
+    return spec, frame
+
+
+def test_live_guidance_starts_with_the_views_from_straight_above(live_frames):
+    spec, frame = live_frames
+    f_rel = LIVE_F / 960
+    r = preflight.live_check(frame(270, 60), spec, None, f_rel)
+    assert r["mat"] == "A4" and r["status"] == "verplaats" and not r["opnemen"] and r["doelvak"] == "boven"
+    assert "recht boven het onderdeel" in r["aanwijzing"]
+    assert r["positie"]["azimut"] == pytest.approx(270, abs=2) and r["positie"]["elevatie"] == pytest.approx(60, abs=2)
+    assert r["positie"]["afstand_mm"] == pytest.approx(320, rel=0.04)
+    assert r["f_rel"] == pytest.approx(f_rel, rel=0.03)  # uit de homografie, voor de volgende beelden
+    assert np.allclose(r["doel"], [0.5, 0.5], atol=0.02) and len(r["omtrek"]) == 4  # het onderdeel midden in beeld
+    top = preflight.live_check(frame(270, 89), spec, None, f_rel)
+    assert top["vak"] == "boven" and top["opnemen"] and top["status"] == "opnemen"
+    assert top["nodig"]["boven"] == preflight.LIVE_TOP and not top["gedekt"]
+
+
+def test_live_guidance_walks_around_the_part(live_frames):
+    """Na de bovenaanzichten: twee foto's per richting en hoogte, en de weg naar het dichtstbijzijnde vak dat nog
+    foto's mist. Naar rechts lopen (gezien vanaf de telefoon) is rechtsom: de azimut gaat omhoog."""
+    spec, frame = live_frames
+    f_rel = LIVE_F / 960
+    img = frame(0, 60)
+    ov = {"recht_van_boven": 5}
+    r = preflight.live_check(img, spec, ov, f_rel)
+    assert r["vak"] == "hoog-0" and r["opnemen"] and "ontbreekt nog" in r["aanwijzing"]
+    near = {**ov, "punten": [{"naam": "foto_0005.jpg", "azimut": 2.0, "elevatie": 58.0, "oordeel": "goed"}]}
+    r = preflight.live_check(img, spec, near, f_rel)
+    assert not r["opnemen"] and r["status"] == "verplaats" and "al een foto" in r["aanwijzing"]
+    r = preflight.live_check(img, spec, {**ov, "dekking": {"hoog": [2, 0, 0, 0, 0, 0, 0, 0], "laag": [0] * 8}}, f_rel)
+    assert r["doelvak"] == "hoog-1" and "~45° naar rechts" in r["aanwijzing"] and not r["opnemen"]  # gelijk: rechtsom
+    r = preflight.live_check(img, spec, {**ov, "dekking": {"hoog": [2, 2] + [0] * 6, "laag": [2] * 8}}, f_rel)
+    assert r["doelvak"] == "hoog-7" and "~45° naar links" in r["aanwijzing"]
+    r = preflight.live_check(img, spec, {**ov, "dekking": {"hoog": [2] * 8, "laag": [0] * 8}}, f_rel)
+    assert r["doelvak"] == "laag-0" and "lager, ~35°" in r["aanwijzing"] and "loop" not in r["aanwijzing"]
+    r = preflight.live_check(img, spec, {**ov, "dekking": {"hoog": [2] * 8, "laag": [2] * 8}}, f_rel)
+    assert r["status"] == "klaar" and r["gedekt"] and not r["opnemen"]
+
+
+def test_live_guidance_checks_the_frame_before_a_photo(live_frames):
+    spec, frame = live_frames
+    f_rel = LIVE_F / 960
+    ov = {"recht_van_boven": 5}
+    r = preflight.live_check(frame(0, 60, blur=2.2), spec, ov, f_rel)
+    assert r["scherpte_px"] > preflight.LIVE_BLUR_MAX and not r["opnemen"] and "stil" in r["aanwijzing"]
+    r = preflight.live_check(frame(0, 60, d=130), spec, ov, f_rel)
+    assert not r["opnemen"] and r["aanwijzing"].startswith("Te dichtbij")
+    r = preflight.live_check(frame(0, 60, aim=(90.0, 0.0, 0.0)), spec, ov, f_rel)
+    assert not r["opnemen"] and "op het onderdeel" in r["aanwijzing"]
+    r = preflight.live_check(frame(0, 60) // 6, spec, ov, f_rel)
+    assert not r["opnemen"] and "donker" in r["aanwijzing"]
+    r = preflight.live_check(np.full((540, 960), 120, np.uint8), spec, ov)
+    assert r["status"] == "zoek" and r["mat"] is None and "kalibratiemat" in r["aanwijzing"]

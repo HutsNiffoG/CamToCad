@@ -55,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--poort", type=int, default=8000)
     p.add_argument("--data", default=str(Path.home() / "camtocad-data"))
     p.add_argument("--token", default=None, help="toegangscode (standaard: willekeurig gegenereerd)")
+    p.add_argument("--https-poort", type=int, default=8443,
+                   help="poort voor https, nodig voor de camera op de telefoon (live begeleiding); 0: geen https")
 
     p = sub.add_parser("stresstest", help="synthetische stresstests draaien en met de waarheid vergelijken "
                                           "(voor ontwikkelaars, zie docs/STRESSTEST.md)")
@@ -113,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Vergelijken met de werkelijke maten: camtocad valideer {args.uit}")
         elif args.cmd == "server":
             from .server.app import serve
-            serve(args.host, args.poort, Path(args.data), args.token)
+            serve(args.host, args.poort, Path(args.data), args.token, args.https_poort or None)
         elif args.cmd == "stresstest":
             from . import stresstest
             if args.lijst:

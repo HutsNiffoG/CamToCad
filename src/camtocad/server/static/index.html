@@ -50,6 +50,28 @@
   .thumbs { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
   .thumbs img { width:104px; height:78px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
   details summary { cursor:pointer; color:var(--accent); }
+  /* live begeleiding (V25): de camera schermvullend, met de mat als overlay en één aanwijzing */
+  .live { position:fixed; inset:0; z-index:10; background:#000; color:#fff; display:flex; flex-direction:column; }
+  .live[hidden] { display:none; }
+  .live .view { position:relative; flex:1; min-height:0; overflow:hidden; }
+  .live video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  .live svg.overlay { position:absolute; pointer-events:none; }
+  .live .tip { position:absolute; left:8px; right:8px; top:8px; padding:10px 12px; border-radius:10px; font-size:1.05rem;
+    font-weight:600; background:rgba(20,24,30,.78); border-left:6px solid #888; }
+  .live .tip.opnemen { border-color:#3fbf6f; } .live .tip.verplaats { border-color:#5aa0ff; }
+  .live .tip.let_op { border-color:#f0b35a; } .live .tip.zoek { border-color:#f2a39c; } .live .tip.klaar { border-color:#3fbf6f; }
+  .live .tip small { display:block; font-weight:400; opacity:.85; margin-top:2px; }
+  .live .bar { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 10px calc(8px + env(safe-area-inset-bottom));
+    background:#111; }
+  .live .bar button { background:#222; color:#fff; border-color:#444; }
+  .live .bar .shutter { width:68px; height:68px; min-height:68px; border-radius:50%; border:4px solid #fff; background:#e33; padding:0; }
+  .live .dome { width:124px; height:124px; flex:0 0 auto; }
+  .live .dome .cell { fill:#7a2a24; stroke:#111; stroke-width:1; } .live .dome .cell.ok { fill:#2e6b45; }
+  .live .dome .cell.doel { stroke:#fff; stroke-width:2.5; }
+  .live .flash { position:absolute; inset:0; background:#fff; opacity:0; transition:opacity .25s; pointer-events:none; }
+  .live .flash.on { opacity:.7; transition:none; }
+  .live .side { display:flex; flex-direction:column; gap:6px; align-items:flex-start; font-size:.85rem; }
+  .live label { display:flex; gap:6px; align-items:center; }
 </style>
 </head>
 <body>
@@ -63,7 +85,9 @@
       <li>Print de kalibratiemat op 100%: <a href="mat/A4.pdf">A4</a>, <a href="mat/A3.pdf">A3</a> of <a href="mat/Letter.pdf">Letter</a>. Meet beide meetlijnen (X onder, Y links) na met een schuifmaat.</li>
       <li>Leg het onderdeel plat in het midden van de mat, bij diffuus licht (geen felle zon of spot).</li>
       <li>Maak 30–60 foto's: rondom op twee hoogtes, plus <b>4–6 recht van boven</b>. Houd de mat grotendeels in beeld en zoom niet in.</li>
-      <li>Upload de foto's hieronder: elke foto wordt direct gecontroleerd en je ziet welke foto's nog ontbreken.</li>
+      <li>Upload de foto's hieronder: elke foto wordt direct gecontroleerd en je ziet welke foto's nog ontbreken.
+        Of gebruik de <b>livecamera</b>: die wijst de weg ("loop naar rechts", "lager") en maakt de foto's zelf
+        (via de https-link uit de terminal). Gebruik binnen één scan óf de livecamera óf de camera-app.</li>
     </ol>
   </section>
 
@@ -87,8 +111,10 @@
       <input id="kies" type="file" accept="image/*" multiple>
       <label class="btn" for="maak">Foto maken</label>
       <input id="maak" type="file" accept="image/*" capture="environment">
+      <button id="live-start" class="primary" type="button">Live camera (met aanwijzingen)</button>
       <label class="row muted" style="gap:6px"><input id="verklein" type="checkbox" checked> verkleinen voor een snellere upload</label>
     </div>
+    <p id="live-melding" class="muted" hidden></p>
     <progress id="voortgang" value="0" max="1" hidden></progress>
     <p id="melding" class="muted"></p>
     <div id="lijst" class="photos"></div>
@@ -104,12 +130,30 @@
     <div id="scans" class="muted">Laden…</div>
   </section>
 </main>
+<div id="live" class="live" hidden>
+  <div class="view" id="live-view">
+    <video id="live-video" playsinline muted autoplay></video>
+    <svg id="live-overlay" class="overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <div id="live-tip" class="tip zoek" role="status" aria-live="polite">Camera starten…</div>
+    <div id="live-flash" class="flash"></div>
+  </div>
+  <div class="bar">
+    <svg id="live-dome" class="dome" viewBox="0 0 120 120" role="img" aria-label="Welke richtingen nog ontbreken"></svg>
+    <button id="live-shoot" class="shutter" type="button" aria-label="Foto maken"></button>
+    <div class="side">
+      <label><input id="live-auto" type="checkbox" checked> automatisch</label>
+      <span id="live-count">0 foto's</span>
+      <button id="live-stop" type="button" class="small">Klaar</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
                 set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} } };
-let current = store.get("ctc_scan");   // id van de scan die nu gevuld wordt
+// id van de scan die nu gevuld wordt; ?scan=… komt van de link naar de https-pagina (een andere origin, eigen opslag)
+let current = new URLSearchParams(location.search).get("scan") || store.get("ctc_scan");
 let busy = false;
 const queue = [];
 
@@ -343,6 +387,188 @@ $("scans").addEventListener("click", async (e) => {
     catch (err) { $("melding").textContent = err.message; }
   }
 });
+
+// ---------------------------------------------------------------- live begeleiding (V25)
+// De camera draait in de pagina; ~6 beelden per seconde gaan verkleind naar de pc, die per beeld zegt waar de
+// telefoon staat, welke richting nog ontbreekt en of dit een goed moment is voor een foto. Twee keer achter elkaar
+// 'opnemen' maakt (met 'automatisch' aan) de foto: met ImageCapture een echte foto, anders (iPhone) het videobeeld.
+const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null };
+
+async function ensureScan() {
+  if (!current) {
+    const s = await api("POST", "api/scans", settings());
+    current = s.id; store.set("ctc_scan", current);
+  }
+}
+
+async function liveStart() {
+  const msg = $("live-melding");
+  msg.hidden = true;
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    let html = "De camera werkt in de browser alleen op een beveiligde pagina (https).";
+    try {
+      const info = await api("GET", "api/info");
+      if (info.https_poort) {
+        const url = `https://${location.hostname}:${info.https_poort}/?token=${encodeURIComponent(info.token || "")}` +
+          (current ? `&scan=${encodeURIComponent(current)}` : "");  // dezelfde scan verder vullen
+        html += ` <a href="${esc(url)}">Open de https-pagina</a>. De telefoon waarschuwt één keer voor het certificaat ` +
+          "(het is van deze pc zelf): kies 'Geavanceerd' en 'doorgaan', of 'Toon details' en 'bezoek deze website'.";
+      } else html += " Start de server met https (standaard aan, poort 8443).";
+    } catch (e) {}
+    msg.innerHTML = html; msg.hidden = false; return;
+  }
+  try {
+    await ensureScan();
+    live.stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+  } catch (e) {
+    msg.textContent = "Camera niet beschikbaar: " + (e.message || e.name); msg.hidden = false; return;
+  }
+  live.track = live.stream.getVideoTracks()[0];
+  const v = $("live-video");
+  v.srcObject = live.stream;
+  $("live").hidden = false;
+  document.body.style.overflow = "hidden";
+  try { await v.play(); } catch (e) {}
+  try { live.wake = await navigator.wakeLock.request("screen"); } catch (e) {}
+  live.running = true; live.streak = 0;
+  liveLoop();
+}
+
+function liveStop() {
+  live.running = false;
+  if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
+  live.stream = live.track = null;
+  if (live.wake) { live.wake.release().catch(() => {}); live.wake = null; }
+  $("live").hidden = true; document.body.style.overflow = "";
+  if (current) api("GET", `api/scans/${current}/controle`).then(render).catch(() => {});
+}
+
+const grabCanvas = document.createElement("canvas");
+function grab(maxSide, quality, canvas = grabCanvas) {
+  const v = $("live-video"), w = v.videoWidth, h = v.videoHeight;
+  if (!w || !h) return Promise.resolve(null);
+  const k = Math.min(1, maxSide / Math.max(w, h));
+  canvas.width = Math.round(w * k); canvas.height = Math.round(h * k);
+  canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
+  return new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
+}
+
+async function liveLoop() {
+  while (live.running) {
+    const t0 = performance.now();
+    if (!live.capturing && !document.hidden) {
+      try {
+        const blob = await grab(960, 0.75);
+        if (blob && live.running && !live.capturing) {
+          const fd = new FormData();
+          fd.append("beeld", blob, "live.jpg");
+          const r = await fetch(`api/scans/${current}/live`, { method: "POST", body: fd });
+          if (r.ok) { if (live.running && !live.capturing) liveShow(await r.json()); }
+          else if (r.status === 404) { liveStop(); reset(); return; }
+        }
+      } catch (e) { $("live-tip").textContent = "Geen verbinding met de pc…"; }
+    }
+    await new Promise((res) => setTimeout(res, Math.max(0, 150 - (performance.now() - t0))));
+  }
+}
+
+function liveShow(res) {
+  const tip = $("live-tip"), notes = (res.opmerkingen || []).join("; ");
+  tip.className = "tip " + res.status;
+  tip.innerHTML = esc(res.aanwijzing) + (notes ? `<small>${esc(notes)}</small>` : "");
+  drawOverlay(res);
+  drawDome(res);
+  $("live-count").textContent = `${res.fotos} foto's`;
+  live.streak = res.opnemen ? live.streak + 1 : 0;
+  if (live.streak >= 2 && $("live-auto").checked && !live.capturing && performance.now() - live.last > 1500) liveCapture();
+}
+
+// de overlay precies over het zichtbare videobeeld (object-fit: contain), in genormaliseerde coördinaten
+function drawOverlay(res) {
+  const v = $("live-video"), box = $("live-view").getBoundingClientRect(), o = $("live-overlay");
+  const vw = v.videoWidth || res.breedte, vh = v.videoHeight || res.hoogte, k = Math.min(box.width / vw, box.height / vh);
+  Object.assign(o.style, { left: `${(box.width - vw * k) / 2}px`, top: `${(box.height - vh * k) / 2}px`,
+                           width: `${vw * k}px`, height: `${vh * k}px` });
+  let svg = "";
+  if (res.omtrek) {
+    const pts = res.omtrek.map(([x, y]) => `${x},${y}`).join(" ");
+    svg += `<polygon points="${pts}" fill="rgba(90,160,255,.10)" stroke="${res.opnemen ? "#3fbf6f" : "#5aa0ff"}" ` +
+      `stroke-width="3" vector-effect="non-scaling-stroke"/>`;
+  }
+  if (res.doel) {
+    const [x, y] = res.doel, d = 0.035;
+    for (const [x1, y1, x2, y2] of [[x - d, y, x + d, y], [x, y - d, x, y + d]])
+      svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#fff" stroke-width="3" vector-effect="non-scaling-stroke"/>`;
+  }
+  o.innerHTML = svg;
+}
+
+// Minikaart van boven, gedraaid zodat jij onderaan staat: rechts op de kaart is naar rechts lopen.
+// Groen = genoeg foto's, rood = ontbreekt nog, wit omrand = daar moet de volgende foto heen.
+function drawDome(res) {
+  const c = 60, R = 56, rad = (el) => (90 - el) / 90 * R, need = res.nodig || {};
+  const rot = res.positie ? 270 - res.positie.azimut : 0;
+  const xy = (r, a) => [c + r * Math.cos((a + rot) * Math.PI / 180), c - r * Math.sin((a + rot) * Math.PI / 180)];
+  const p = (r, a) => xy(r, a).map((t) => t.toFixed(1)).join(",");
+  let svg = "", target = "";
+  for (const [band, lo, hi] of [["hoog", 50, 80], ["laag", 20, 50]]) {
+    for (let k = 0; k < 8; k++) {
+      const a0 = k * 45 - 22.5, a1 = k * 45 + 22.5, r0 = rad(hi), r1 = rad(lo), id = `${band}-${k}`;
+      const path = `<path class="cell${need[id] ? "" : " ok"}${res.doelvak === id ? " doel" : ""}" d="M${p(r0, a0)} ` +
+        `L${p(r1, a0)} A${r1},${r1} 0 0 0 ${p(r1, a1)} L${p(r0, a1)} A${r0},${r0} 0 0 1 ${p(r0, a0)} Z"/>`;
+      if (res.doelvak === id) target = path; else svg += path;  // het doelvak bovenop, anders valt de rand weg
+    }
+  }
+  svg += target + `<circle class="cell${need.boven ? "" : " ok"}${res.doelvak === "boven" ? " doel" : ""}" cx="${c}" ` +
+    `cy="${c}" r="${rad(82)}"/>`;
+  if (res.positie) {
+    const [x, y] = xy(rad(Math.max(0, res.positie.elevatie)), res.positie.azimut);
+    svg += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5" fill="#fff" stroke="#000" stroke-width="1.5"/>`;
+  }
+  $("live-dome").innerHTML = svg;
+}
+
+async function takePhoto(track) {
+  const ic = new ImageCapture(track), opts = {};
+  try {
+    const caps = await ic.getPhotoCapabilities();
+    if ((caps.fillLightMode || []).includes("off")) opts.fillLightMode = "off";  // geen flits: die schittert op de mat
+    if (caps.imageWidth && caps.imageWidth.max) opts.imageWidth = caps.imageWidth.max;
+  } catch (e) {}
+  return ic.takePhoto(opts);
+}
+
+async function liveCapture() {
+  if (live.capturing || !current) return;
+  live.capturing = true; live.streak = 0;
+  const flash = $("live-flash");
+  flash.classList.add("on"); setTimeout(() => flash.classList.remove("on"), 80);
+  if (navigator.vibrate) navigator.vibrate(40);
+  $("live-tip").className = "tip opnemen"; $("live-tip").textContent = "Foto…";
+  try {
+    // één bron per scan: foto's van ImageCapture en videobeelden hebben een ander formaat en beeldhoek
+    let blob = null;
+    if (live.mode !== "beeld" && window.ImageCapture && live.track) {
+      try { blob = await takePhoto(live.track); live.mode = "foto"; }
+      catch (e) { if (live.mode === "foto") throw e; live.mode = "beeld"; }
+    }
+    if (!blob) { blob = await grab(4096, 0.92, document.createElement("canvas")); live.mode = "beeld"; }
+    if (!blob) throw new Error("geen beeld");
+    const type = blob.type || "image/jpeg", ext = type === "image/png" ? "png" : "jpg";
+    const data = await upload(await shrink(new File([blob], `live_${Date.now()}.${ext}`, { type })));
+    render(data);
+    const nieuw = (data.nieuw || [])[0];
+    if (nieuw && nieuw.verdict === "onbruikbaar")
+      $("live-tip").textContent = "Foto onbruikbaar: " + (nieuw.notes || []).join("; ");
+  } catch (e) {
+    $("live-tip").className = "tip zoek"; $("live-tip").textContent = "Foto mislukt: " + e.message;
+  } finally { live.capturing = false; live.last = performance.now(); }
+}
+
+$("live-start").addEventListener("click", liveStart);
+$("live-stop").addEventListener("click", liveStop);
+$("live-shoot").addEventListener("click", liveCapture);
 
 if (current) resume(current);
 load(); setInterval(load, 3000);

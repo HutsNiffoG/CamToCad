@@ -178,3 +178,71 @@ def test_debug_images_are_served_but_nothing_else(tmp_path):
     assert c.get(f"/scans/{job}/debug/..%2Fstatus.json").status_code == 404
     assert c.delete(f"/api/scans/{job}").status_code == 200
     assert c.get("/api/scans").json() == []
+
+
+def test_https_certificate_covers_the_lan_addresses_and_is_reused(tmp_path):
+    """V24 (v0.13): een eigen certificaat voor de adressen van de pc; hergebruikt zolang het geldig is en alle
+    adressen dekt, anders een nieuw."""
+    import datetime as dt
+    import os
+
+    from cryptography import x509
+
+    from camtocad.server import tls
+
+    hosts = ["192.168.1.20", "127.0.0.1", "localhost", "werkbank.local"]
+    cert, key = tls.ensure_certificate(tmp_path / "_tls", hosts)
+    c = x509.load_pem_x509_certificate(cert.read_bytes())
+    san = c.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert {str(v) for v in san.get_values_for_type(x509.IPAddress)} == {"192.168.1.20", "127.0.0.1"}
+    assert set(san.get_values_for_type(x509.DNSName)) == {"localhost", "werkbank.local"}
+    assert (c.not_valid_after_utc - c.not_valid_before_utc).days <= 398
+    if os.name == "posix":
+        assert key.stat().st_mode & 0o077 == 0  # de sleutel is alleen voor de eigenaar leesbaar
+    first = tls.fingerprint(cert)
+    assert tls.ensure_certificate(tmp_path / "_tls", hosts[:2]) == (cert, key) and tls.fingerprint(cert) == first
+    tls.ensure_certificate(tmp_path / "_tls", hosts + ["10.0.0.5"])  # een nieuw adres: een nieuw certificaat
+    second = tls.fingerprint(cert)
+    assert second != first
+    soon = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=380)  # bijna verlopen: vernieuwen
+    tls.ensure_certificate(tmp_path / "_tls", hosts, now=soon)
+    assert tls.fingerprint(cert) != second
+
+
+def test_live_frames_are_judged_against_the_photos_so_far(tmp_path, mat_photos, monkeypatch):
+    """V25 (v0.13): een beeld van de livecamera krijgt een oordeel en één aanwijzing, en wordt niet bewaard. Het
+    overzicht van de foto's wordt hergebruikt zolang er niets verandert: summarize kalibreert, te traag per beeld."""
+    from camtocad import mat, preflight, render
+
+    calls = []
+    summarize = preflight.summarize
+    monkeypatch.setattr(preflight, "summarize", lambda *a, **k: calls.append(1) or summarize(*a, **k))
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    assert c.get("/api/info").status_code == 401
+    c.get("/?token=geheim")
+    info = c.get("/api/info").json()
+    assert info["https_poort"] is None and info["versie"] and info["token"] == "geheim"
+    job = c.post("/api/scans", data={"mat": "auto"}).json()["id"]
+    cam = render.default_camera(960, 540, 700.0, dist=(0, 0, 0, 0, 0))
+    R, t = render.look_at([150.0, 80.0, 330.0], [150.0, 80.0, 0.0])
+    img, _ = render.render_view(mat.rasterize_board(mat.PRESETS["A4"], 4.0, 3.0), cam, R, t,
+                                rng=np.random.default_rng(1))
+    frame = [("beeld", ("live.jpg", cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes(),
+                        "image/jpeg"))]
+    res = c.post(f"/api/scans/{job}/live", files=frame).json()
+    assert res["mat"] == "A4" and res["vak"] == "boven" and res["opnemen"] and res["nodig"]["boven"] == 5
+    assert res["fotos"] == 0 and len(res["omtrek"]) == 4 and res["ms"] < 5000
+    assert not list((tmp_path / job / "fotos").iterdir())  # een livebeeld wordt niet bewaard
+    for i, data in enumerate(mat_photos):
+        c.post(f"/api/scans/{job}/fotos", files=[("fotos", (f"IMG_{i}.jpg", data, "image/jpeg"))])
+    n = len(calls)
+    for _ in range(3):
+        res = c.post(f"/api/scans/{job}/live", files=frame).json()
+    overview = c.get(f"/api/scans/{job}/controle").json()["overzicht"]
+    assert len(calls) == n  # hergebruikt
+    assert res["fotos"] == len(mat_photos) and res["nodig"]["boven"] == 5 - overview["recht_van_boven"]
+    c.delete(f"/api/scans/{job}/fotos/foto_0000.jpg")
+    assert len(calls) == n + 1  # een foto weg: opnieuw
+    bad = [("beeld", ("x.jpg", b"geen beeld", "image/jpeg"))]
+    assert c.post(f"/api/scans/{job}/live", files=bad).status_code == 400
+    assert c.post("/api/scans/000000000000/live", files=frame).status_code == 404

@@ -9,6 +9,7 @@ op het lokale netwerk luistert.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import re
@@ -23,10 +24,12 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from .. import preflight
+from .. import __version__, preflight
 from . import qr
 from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
@@ -38,6 +41,7 @@ PHOTO_FILE = re.compile(r"^foto_\d{4}\.[a-z]{3,4}$")
 MAX_FILES = 300
 MAX_BYTES = 40 * 1024 * 1024
 MAX_REQUEST = 2 * 1024 ** 3  # hele upload; losse bestanden blijven onder MAX_BYTES
+MAX_LIVE_BYTES = 4 * 1024 * 1024  # één beeld van de livecamera (de pagina stuurt ~960 px, ~100 kB)
 JOB_ID = re.compile(r"^[0-9a-f]{12}$")
 BUSY = ("wachtrij", "bezig")
 
@@ -72,6 +76,10 @@ class JobStore:
         self.runner = runner
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        # overzicht per scan, met de inhoud van controle.json en de matkeuze als sleutel: summarize kalibreert een
+        # snelle camera (tot ~1 s), en de live begeleiding vraagt het overzicht bij elk beeld (V25)
+        self._overviews: dict[str, tuple] = {}
+        self._live: dict[str, dict] = {}  # per scan: brandpuntsafstand en mat van de vorige livebeelden
 
     def lock(self, job_id: str) -> threading.Lock:
         with self._guard:
@@ -185,11 +193,43 @@ class JobStore:
         self.update(job_id, photos=n)
 
     def overview(self, job_id: str) -> dict:
+        return self._overview(job_id)[0]
+
+    def _overview(self, job_id: str) -> tuple[dict, object]:
+        """(overzicht, mat van de scan); hergebruikt zolang controle.json en de matkeuze niet veranderen."""
+        base = self.path(job_id)
+        f = base / "controle.json"
+        raw = f.read_bytes() if f.exists() else b""
+        key = (hashlib.sha1(raw).hexdigest(), self.read(job_id).get("mat"))
+        with self._guard:
+            hit = self._overviews.get(job_id)
+        if hit is not None and hit[0] == key:
+            return hit[1], hit[2]
         checks = self.checks(job_id)
-        folder = self.path(job_id) / "fotos"
-        present = [c for n, c in sorted(checks.items()) if (folder / n).exists()]
-        return {"fotos": [c.public() for c in present],
-                "overzicht": preflight.summarize(present, self._scan_spec(job_id, checks))}
+        present = [c for n, c in sorted(checks.items()) if (base / "fotos" / n).exists()]
+        spec = self._scan_spec(job_id, checks)
+        ov = {"fotos": [c.public() for c in present], "overzicht": preflight.summarize(present, spec)}
+        with self._guard:
+            self._overviews[job_id] = (key, ov, spec)
+        return ov, spec
+
+    def live(self, job_id: str, img: np.ndarray) -> dict:
+        """Beoordeelt één beeld van de livecamera tegen de foto's van de scan tot nu toe (V25)."""
+        ov, spec = self._overview(job_id)
+        with self._guard:
+            state = self._live.setdefault(job_id, {"f": [], "mat": None})
+            f_rel = float(np.median(state["f"])) if state["f"] else None
+            hint = state["mat"]
+        t0 = time.perf_counter()
+        res = preflight.live_check(img, spec, ov["overzicht"], f_rel, hint)
+        res["ms"] = round(1000 * (time.perf_counter() - t0))
+        with self._guard:
+            if res["mat"]:
+                state["mat"] = get_spec(res["mat"])
+            if res["f_rel"]:
+                state["f"] = (state["f"] + [res["f_rel"]])[-25:]
+        res["fotos"] = len(ov["fotos"])
+        return res
 
     # --- verwerken ------------------------------------------------------------------------
 
@@ -232,6 +272,8 @@ class JobStore:
         shutil.rmtree(self.root / job_id, ignore_errors=True)
         with self._guard:
             self._locks.pop(job_id, None)
+            self._overviews.pop(job_id, None)
+            self._live.pop(job_id, None)
 
     def worker(self) -> None:
         while True:
@@ -244,6 +286,7 @@ class JobStore:
 
 def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runner=run_scan) -> FastAPI:
     app = FastAPI(title="Cam-to-CAD (lokaal)", docs_url=None, redoc_url=None)
+    app.state.https_port = None  # zet serve() als de https-server draait
     store = JobStore(Path(data_dir), runner)
     if not run_inline:
         threading.Thread(target=store.worker, daemon=True).start()
@@ -276,6 +319,13 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         if token is not None:
             resp.set_cookie("ctc_token", token, httponly=True, samesite="strict")
         return resp
+
+    @app.get("/api/info")
+    def info(request: Request):
+        """Versie, en de https-poort: de camera van de telefoon werkt alleen op een beveiligde pagina (V24). De
+        toegangscode staat erbij voor de link naar https (de cookie gaat niet mee van http naar https)."""
+        check(request)
+        return {"versie": __version__, "https_poort": app.state.https_port, "token": token}
 
     @app.get("/api/scans")
     def list_scans(request: Request):
@@ -337,6 +387,19 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
     def get_checks(job_id: str, request: Request):
         check(request)
         return store.overview(job_id)
+
+    @app.post("/api/scans/{job_id}/live")
+    def live_frame(job_id: str, request: Request, beeld: UploadFile = File(...)):
+        """Eén beeld van de livecamera (V25): waar staat de camera ten opzichte van het onderdeel, welke richting
+        ontbreekt nog, en is dit een goed moment voor een foto? Het beeld wordt niet bewaard."""
+        check(request)
+        data = beeld.file.read(MAX_LIVE_BYTES + 1)
+        if len(data) > MAX_LIVE_BYTES:
+            raise HTTPException(413, "Livebeeld te groot")
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE) if data else None
+        if img is None:
+            raise HTTPException(400, "Geen leesbaar beeld")
+        return store.live(job_id, img)
 
     @app.delete("/api/scans/{job_id}/fotos/{name}")
     def delete_photo(job_id: str, name: str, request: Request):
@@ -420,19 +483,58 @@ def lan_addresses() -> list[str]:
     return ([primary] if primary and not primary.startswith("127.") else []) + rest
 
 
-def serve(host: str, port: int, data_dir: Path, token: str | None) -> None:
+def cert_hosts(ips: list[str]) -> list[str]:
+    """Adressen en namen waarvoor het https-certificaat geldt: de LAN-adressen, localhost en de naam van de pc."""
+    name = socket.gethostname()
+    return [*ips, "127.0.0.1", "localhost"] + ([name, f"{name}.local"] if name and "." not in name else
+                                              [name] if name else [])
+
+
+def serve(host: str, port: int, data_dir: Path, token: str | None, https_port: int | None = 8443) -> None:
+    """http op `port` en (V24, v0.13) https op `https_port` met een eigen certificaat: de camera op de telefoon (live
+    begeleiding) werkt alleen via https. `https_port` None: alleen http."""
     import uvicorn
 
     token = token or secrets.token_urlsafe(6)
     app = create_app(data_dir, token)
+    local = host in ("127.0.0.1", "localhost")
+    ips = lan_addresses() if not local else []
+    cert = None
+    if https_port:
+        try:
+            from . import tls
+            cert, key = tls.ensure_certificate(Path(data_dir) / "_tls", cert_hosts(ips))
+        except ImportError:
+            print("  (https niet beschikbaar: pip install cryptography, of installeer camtocad met de extra 'server')")
+    if cert is not None:
+        secure = uvicorn.Server(uvicorn.Config(app, host=host, port=https_port, ssl_certfile=str(cert),
+                                               ssl_keyfile=str(key), log_level="warning"))
+        thread = threading.Thread(target=secure.run, daemon=True)
+        thread.start()
+        deadline = time.time() + 10.0
+        while not secure.started and thread.is_alive() and time.time() < deadline:
+            time.sleep(0.05)
+        if secure.started:
+            app.state.https_port = https_port
+        else:  # poort bezet of certificaat onleesbaar: uvicorn heeft de fout al gemeld
+            print(f"  (https op poort {https_port} start niet: kies een andere poort met --https-poort)")
+            cert = None
     print("Cam-to-CAD lokale server")
     print(f"  datamap: {data_dir}")
-    ips = lan_addresses() if host not in ("127.0.0.1", "localhost") else []
-    for ip in ips or (["<ip-adres-van-deze-pc>"] if host not in ("127.0.0.1", "localhost") else []):
-        print(f"  open op je telefoon (zelfde wifi): http://{ip}:{port}/?token={token}")
+    shown = ips or (["<ip-adres-van-deze-pc>"] if not local else [])
+    for ip in shown:
+        if cert is not None:
+            print(f"  open op je telefoon (zelfde wifi): https://{ip}:{https_port}/?token={token}")
+        print(f"  {'zonder camera en zonder certificaatmelding' if cert else 'open op je telefoon (zelfde wifi)'}: "
+              f"http://{ip}:{port}/?token={token}")
     print(f"  op deze pc: http://127.0.0.1:{port}/?token={token}")
+    if cert is not None:
+        print("  De eerste keer waarschuwt de telefoon voor het certificaat (het is van deze pc zelf): kies "
+              "'Geavanceerd' en 'doorgaan' (Chrome) of 'Toon details' en 'bezoek deze website' (Safari).")
+        print(f"  Vingerafdruk van het certificaat (SHA-256): {tls.fingerprint(cert)}")
     if ips:
-        if qr.print_qr(f"http://{ips[0]}:{port}/?token={token}"):
+        url = f"https://{ips[0]}:{https_port}/?token={token}" if cert else f"http://{ips[0]}:{port}/?token={token}"
+        if qr.print_qr(url):
             print(f"  scan de QR-code met de camera van je telefoon (zelfde wifi): {ips[0]}")
         elif not qr.available():
             print("  (met pip install segno staat hier een QR-code om te scannen met je telefoon)")

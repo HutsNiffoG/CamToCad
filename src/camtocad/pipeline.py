@@ -667,7 +667,8 @@ def _quality_issues(part, stats: dict, evals: int, max_evals: int, mm_per_px: fl
 # zo groot is
 SHADOW_WARN = 0.10
 # V28: foto's met een onscherpte boven CALIB_BLUR_MAX (px, gemeten aan de mat) niet in de kalibratie, als er
-# minstens CALIB_MIN_SHARP scherpe overblijven; een camera dichter dan CLOSE_MM boven de mat geeft een waarschuwing
+# minstens CALIB_MIN_SHARP scherpe overblijven; een camera dichter dan CLOSE_MM bij de mat (langs de kijkrichting) geeft
+# een waarschuwing
 CALIB_BLUR_MAX, CALIB_MIN_SHARP, CLOSE_MM = preflight.BLUR_BAD, 8, preflight.CLOSE_MM
 
 
@@ -782,9 +783,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append(f"{name}: niet gebruikt ({reason})")
     log(f"camera gekalibreerd: f = {cam.K[0, 0]:.1f} px, reprojectiefout {cam.rms_px:.3f} px, "
         f"{len(cal.poses)} poses")
-    close = sorted(n for n, pose in cal.poses.items() if pose.center[2] < CLOSE_MM)
+    close = sorted(n for n, pose in cal.poses.items() if preflight.view_distance(pose) < CLOSE_MM)
     if close:  # V28
-        warnings.append(f"{len(close)} foto('s) van dichterbij dan {CLOSE_MM / 10:.0f} cm boven de mat ("
+        warnings.append(f"{len(close)} foto('s) van dichterbij dan {CLOSE_MM / 10:.0f} cm ("
                         + ", ".join(close[:6]) + (" ..." if len(close) > 6 else "") + "): de scherptediepte is "
                         "dan klein en een telefoon schakelt soms naar de macrolens. Houd 25-35 cm aan")
     if cam.f_std_rel > F_STD_WARN:  # V10: de brandpuntsafstand is slecht bepaald (weinig verschillende hoeken)
