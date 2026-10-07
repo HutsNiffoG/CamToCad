@@ -13,8 +13,9 @@ fout moet een melding worden. Twee toetsen op de afstanden tussen modelrand en m
 * **Kijkhoek:** per foto de mediaan over de bovenrand. Bij een prisma hangt die niet af van hoe schuin
   de foto is; bij een afschuining of afronding rondom zien de lage foto's (< 45°) de bovenrand boven het
   model uitsteken, de hoge niet. Op gerenderde prisma's is dat verschil 0,00 tot +0,04 mm (de lage
-  foto's net iets ruimer), bij de afschuining −0,06 mm en bij een liggende cilinder +0,40 mm. Een
-  afschuining van ~1 mm valt hierbinnen en wordt niet herkend. Zonder foto's onder 45° geen toets.
+  foto's net iets ruimer; een zwart onderdeel met een telefoonkromme tot +0,11 mm), bij de afschuining
+  −0,06 mm en bij een liggende cilinder +0,40 mm. Een afschuining van ~1 mm valt hierbinnen en wordt niet
+  herkend. Zonder foto's onder 45° geen toets.
 
 Een punt telt mee waar er bewijs is: zekere mat vlakbij, of het punt ligt voorbij de strook zonder
 bewijs al in zekere mat (dan steekt het model zeker uit). Twee stukken van dezelfde soort met minder dan
@@ -41,7 +42,9 @@ from .calib import project
 LOCAL_MM = 0.3  # plaatselijke afwijking van de bovenrand
 MIN_RUN_MM = 8.0  # over minstens zoveel contour
 MERGE_GAP_MM = 10.0  # twee stukken met een kleiner gat ertussen (vaak een hoek zonder bewijs) zijn één stuk
-TREND_LOW_MM, TREND_HIGH_MM = -0.04, 0.10  # verschil tussen lage en hoge foto's (prisma's: 0,00 tot +0,04)
+# verschil tussen lage en hoge foto's: prisma's 0,00 tot +0,04, een zwart onderdeel met een telefoonkromme tot +0,11
+# (stresstest srgb_donker, v0.14); een liggende cilinder +0,40
+TREND_LOW_MM, TREND_HIGH_MM = -0.04, 0.15
 LOW_DEG, HIGH_DEG = 45.0, 60.0
 MIN_VIEWS = 3
 

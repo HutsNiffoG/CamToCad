@@ -331,6 +331,17 @@ def _simplify_outline(part, K: np.ndarray, vd: list, energy: float, max_turn_deg
 
 COARSE_EPS = 0.01  # V30: tolerantie van de grovere startcontour, als deel van de omtrek
 COARSE_RECT = 0.85  # een rechthoek als start als de contour minstens dit deel van zijn kleinste rechthoek vult
+OFF_GRID_DEG = 0.5  # een rand die meer dan dit van de hoofdrichting (modulo 90°) afwijkt, is een eigen richting
+
+
+def _off_grid(o: profile.Profile) -> int:
+    """Hoeveel randen niet evenwijdig of haaks op de hoofdrichting staan: elk een eigen richting, dus een vrijheidsgraad
+    meer dan een rand in een rechthoek (v0.14)."""
+    if o.kind != "polygon" or o.n == 0:
+        return 0
+    quarter = math.pi / 2
+    dev = np.abs((o.angles - profile.dominant_angle(o) + quarter / 2) % quarter - quarter / 2)
+    return int(np.sum(dev > math.radians(OFF_GRID_DEG)))
 
 
 def _coarse_starts(part) -> list[tuple[str, profile.Profile]]:
@@ -353,7 +364,11 @@ def _coarse_starts(part) -> list[tuple[str, profile.Profile]]:
     if coarse.is_valid() and coarse.n <= o.n - 2:
         out.append(("grovere contour", coarse))
     (cx, cy), (w, h), a = cv2.minAreaRect(P.astype(np.float32))
-    if w * h > 0 and o.area() / (w * h) >= COARSE_RECT and not (out and out[0][1].n == 4):
+    # de rechthoek ook naast een grovere contour van vier randen die geen rechthoek is: waar het bewijs zwak is (een
+    # donker onderdeel naast zijn slagschaduw, V8) kan een rand een paar graden scheef liggen, en de fit draait geen
+    # losse randen (v0.14)
+    square4 = out and out[0][1].n == 4 and _off_grid(out[0][1]) == 0
+    if w * h > 0 and o.area() / (w * h) >= COARSE_RECT and not square4:
         t = math.radians(a)
         r = float(np.median(o.fillets[o.fillets > 0])) if np.any(o.fillets > 0) else 0.0
         rect = profile.Profile("polygon", np.array([cx, cy]), t + np.arange(4) * math.pi / 2,
@@ -382,7 +397,8 @@ def _refine_start(part, K: np.ndarray, vd: list, max_evals: int, log=print):
         return best, e_best, evals
 
     def corners(p) -> int:
-        return p.outer.n if p.outer.kind == "polygon" else 1
+        """Hoekpunten, plus de randen die een eigen richting hebben (niet evenwijdig of haaks op de rest, v0.14)."""
+        return p.outer.n + _off_grid(p.outer) if p.outer.kind == "polygon" else 1
 
     for what, outer in alts:
         cand = part.copy()
@@ -670,6 +686,29 @@ SHADOW_WARN = 0.10
 # minstens CALIB_MIN_SHARP scherpe overblijven; een camera dichter dan CLOSE_MM bij de mat (langs de kijkrichting) geeft
 # een waarschuwing
 CALIB_BLUR_MAX, CALIB_MIN_SHARP, CLOSE_MM = preflight.BLUR_BAD, 8, preflight.CLOSE_MM
+# V28 (v0.14): de hoeken van de overige foto's tellen in de kalibratie naar hun onscherpte σ (px), met gewicht
+# 1 / (σ² + CALIB_SIGMA0²): een foto met σ 2,5 px telt ~8× minder dan een scherpe (σ 0,6 px)
+CALIB_SIGMA0 = 0.7
+
+
+# Een scherpe hoek komt door onscherpte als een kleine afronding uit de fit (ARCHITECTURE.md §7.3). Gemeten op een blok met
+# twee scherpe hoeken en twee afrondingen R1 (stresstest 'hoeken', v0.14; zes scans, vier onscherptes): bij een
+# onscherpte σ tot ~1,2 px (gemeten aan de mat) als een afronding van hooguit ~4 px, bij σ 1,4 px tot 4,2 px, bij σ 1,9 px
+# tot 6,1 px. Kleinere afrondingen zijn niet van scherp te onderscheiden: de grens is SHARP_CORNER_PX, plus
+# SHARP_BLUR_SLOPE px per pixel onscherpte boven SHARP_BLUR_FROM (V13).
+SHARP_CORNER_PX, SHARP_BLUR_FROM, SHARP_BLUR_SLOPE = 4.5, 1.2, 3.0
+
+
+def sharp_corner_limit(mm_per_px: float, blur_px: float | None = None) -> float:
+    """De kleinste afronding (mm) die van een scherpe hoek te onderscheiden is, bij deze resolutie op het onderdeel
+    en de onscherpte σ (px, mediaan over de foto's, gemeten aan de mat; zonder meting: weinig onscherpte)."""
+    extra = SHARP_BLUR_SLOPE * max(0.0, (blur_px or 0.0) - SHARP_BLUR_FROM)
+    return max(0.8, (SHARP_CORNER_PX + extra) * mm_per_px)
+
+
+def _median_blur(blur: dict) -> float | None:
+    vals = [b for b in blur.values() if b is not None]
+    return float(np.median(vals)) if vals else None
 
 
 def calibrate_sharp(dets: list, blur: dict, spec, log=print) -> calib.CalibrationResult:
@@ -677,10 +716,18 @@ def calibrate_sharp(dets: list, blur: dict, spec, log=print) -> calib.Calibratio
     scherpgestelde foto's hebben onnauwkeurige mathoeken, en die trokken de camera mee (de eerste echte fotoset had een
     reprojectiefout van 1,6 px, vooral door zulke foto's). Voor de maskers zijn ze vaak nog bruikbaar: die passen zich
     aan de onscherpte aan."""
+    known = [blur[d.name] for d in dets if blur.get(d.name) is not None]
+    fill = float(np.median(known)) if known else 1.0
+    weights = {d.name: 1.0 / ((blur.get(d.name) or fill) ** 2 + CALIB_SIGMA0 ** 2) for d in dets}
     soft = [d for d in dets if blur.get(d.name) is not None and blur[d.name] > CALIB_BLUR_MAX]
-    if not soft or len(dets) - len(soft) < CALIB_MIN_SHARP:
-        return calib.calibrate(dets, spec)
-    cal = calib.calibrate([d for d in dets if d not in soft], spec)
+    used = dets if not soft or len(dets) - len(soft) < CALIB_MIN_SHARP else [d for d in dets if d not in soft]
+    w_used = [weights[d.name] for d in used]
+    if w_used and max(w_used) > calib.WEIGHT_SPREAD * min(w_used):
+        log(f"kalibratie gewogen naar de onscherpte van de foto's (σ {min(blur.get(d.name) or fill for d in used):.1f}"
+            f"-{max(blur.get(d.name) or fill for d in used):.1f} px)")
+    if used is dets:
+        return calib.calibrate(dets, spec, weights=weights)
+    cal = calib.calibrate(used, spec, weights=weights)
     extra = calib.calibrate(soft, spec, camera=cal.camera)
     cal.poses.update(extra.poses)
     cal.rejected.update(extra.rejected)
@@ -1145,10 +1192,9 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if ef.accepted:
         part = ef.part
         energy = silhouette.energy(part, cam.K, vd)
-    # Onscherpte in de foto's en het masker ronden ook scherpe hoeken af (ARCHITECTURE.md §7.3): op
-    # gerenderde scans komt een scherpe hoek uit de randfit als een afronding van 3,5-4 pixels
-    # (ROUTE-A-VERBETERPUNTEN §3e). Afrondingen onder 4,5 pixels zijn dus niet te onderscheiden van scherp.
-    r_min = max(0.8, 4.5 * mm_per_px)
+    # Onscherpte in de foto's en het masker ronden ook scherpe hoeken af (ARCHITECTURE.md §7.3): kleinere afrondingen
+    # zijn niet te onderscheiden van scherp (zie sharp_corner_limit)
+    r_min = sharp_corner_limit(mm_per_px, _median_blur(blur))
     small_slot_r = [i for i, s in enumerate(part.slots) if s.kind == "rechthoek" and 0 < s.r < r_min]
     if (part.outer.kind == "polygon" and np.any((part.outer.fillets > 0) & (part.outer.fillets < r_min))) \
             or small_slot_r:
@@ -1156,8 +1202,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             part.outer.fillets[part.outer.fillets < r_min] = 0.0
         for i in small_slot_r:
             part.slots[i] = replace(part.slots[i], r=0.0)
-        warnings.append(f"afrondingen kleiner dan {r_min:.1f} mm zijn bij deze resolutie niet te "
-                        "onderscheiden van een scherpe hoek en als scherp gemodelleerd")
+        blurry = _median_blur(blur) is not None and _median_blur(blur) > SHARP_BLUR_FROM
+        warnings.append(f"afrondingen kleiner dan {r_min:.1f} mm zijn bij deze resolutie"
+                        + (" en onscherpte" if blurry else "") + " niet te onderscheiden van een scherpe hoek en als "
+                        "scherp gemodelleerd")
     stats_fit = silhouette.view_stats(part, cam.K, vd)
     log(f"model gefit: hoogte {part.height:.3f} mm, {len(part.holes)} gat(en), "
         f"silhouet-IoU mediaan {stats_fit['iou_median']:.4f}")
@@ -1206,8 +1254,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if cast_shadow:
         warnings.append(f"slagschaduw naast het onderdeel (in de meeste foto's {100 * shadow:.0f}% van de mat er vlak "
                         "omheen duidelijk donkerder): de rand aan de schaduwkant kan iets te ver naar buiten liggen, "
-                        "buitenmaten tot ~0,2 mm te groot. De U95 is daarvoor ruimer. Gebruik diffuus licht (geen "
-                        "lamp of zon recht op de mat) voor de beste nauwkeurigheid")
+                        "buitenmaten tot ~0,2 mm te groot en de hoogte iets te laag. De U95 is daarvoor ruimer. "
+                        "Gebruik diffuus licht (geen lamp of zon recht op de mat) voor de beste nauwkeurigheid")
     unc = cadmodel.estimate_uncertainty(mm_per_px, len(vd), n_top)
     # printschaal: zonder gemeten meetlijnen is de schaal van de print niet bekend (printers wijken 0,1-1% af)
     unc.scale_rel = uncertainty.SCALE_REL_MEASURED if opts.scale_measured else uncertainty.SCALE_REL_ASSUMED

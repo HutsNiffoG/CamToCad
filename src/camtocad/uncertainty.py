@@ -42,8 +42,10 @@ SYS_PX = {"lengte": 0.12, "hoogte": 0.10, "gat": 0.30, "positie": 0.15, "afrondi
 SCALE_REL_MEASURED, SCALE_REL_ASSUMED = 5e-4, 3e-3
 # een slagschaduw naast het onderdeel (masks._cast_shadow, v0.12): de rand aan de schaduwkant ligt tot ~0,8 px te ver
 # naar buiten (stresstest zwaar_klein: een zwart plaatje van 5 mm met een harde schaduw, 0,19 mm). Extra systematiek
-# (px) voor de buitenmaten
-SHADOW_PX = {"lengte": 0.6, "lengte bovenrand": 0.6}
+# (px) voor de buitenmaten. Sinds v0.14 ook voor de hoogte: de onderrand ligt in de schuine foto's dan iets naar buiten
+# (de schaduw is vlak bij het onderdeel het donkerst, en de mat ernaast wordt een paar pixels verder gemeten), en dat
+# drukt de hoogte (stresstest klein_schaduw: 0,04 mm lager dan zonder schaduw, 0,07 mm in totaal)
+SHADOW_PX = {"lengte": 0.6, "lengte bovenrand": 0.6, "hoogte": 0.3, "hoogte bovenrand": 0.3}
 
 
 @dataclass

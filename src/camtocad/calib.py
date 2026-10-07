@@ -250,15 +250,74 @@ def single_threaded():
 
 def calibrate(
     detections: list[BoardDetection], spec: MatSpec, *, min_corners: int = 12, fix_k3: bool = True,
-    camera: CameraModel | None = None,
+    camera: CameraModel | None = None, weights: dict[str, float] | None = None,
 ) -> CalibrationResult:
-    """Zelfkalibratie over alle foto's (of alleen poses als `camera` gegeven is); reproduceerbaar (single_threaded)."""
+    """Zelfkalibratie over alle foto's (of alleen poses als `camera` gegeven is); reproduceerbaar (single_threaded).
+    `weights`: per foto hoe zwaar haar hoeken tellen (V28, v0.14; zie _refine_weighted)."""
     with single_threaded():
-        return _calibrate(detections, spec, min_corners=min_corners, fix_k3=fix_k3, camera=camera)
+        return _calibrate(detections, spec, min_corners=min_corners, fix_k3=fix_k3, camera=camera, weights=weights)
+
+
+# V28 (v0.14): verschillen de gewichten van de foto's meer dan deze factor, dan volgt na OpenCV een gewogen verfijning
+WEIGHT_SPREAD = 1.5
+
+
+def _refine_weighted(usable: list, rvecs, tvecs, K: np.ndarray, dist: np.ndarray, weights: np.ndarray):
+    """Gewogen bundelaanpassing van camera en poses (V28, v0.14). OpenCV telt elke hoek even zwaar; de hoeken van een
+    onscherpe foto liggen minder precies (bij een vervaagde X-hoek daalt de helling waarop de detector de hoek legt),
+    en die trokken de camera mee. Vanuit de oplossing van OpenCV, met per foto het gewicht van haar hoeken; k3 blijft
+    vast, zoals in de kalibratie. Geeft (K, dist, rvecs, tvecs, rms, σ(f)/f)."""
+    from scipy.optimize import least_squares
+    from scipy.sparse import lil_matrix
+
+    dist = np.asarray(dist, float).ravel()
+    k3 = float(dist[4]) if dist.size > 4 else 0.0
+    n = len(usable)
+    # in float64: projectPoints rekent in het type van de objectpunten, en in float32 verdwijnen de kleine stapjes van
+    # de numerieke afgeleiden in de afronding
+    pts = [(o.reshape(-1, 3).astype(np.float64), im.reshape(-1, 2).astype(np.float64)) for _, o, im in usable]
+    sizes = [len(o) for o, _ in pts]
+    x0 = np.concatenate([[K[0, 0], K[1, 1], K[0, 2], K[1, 2], *dist[:4]]]
+                        + [np.concatenate([np.ravel(r), np.ravel(t)]) for r, t in zip(rvecs, tvecs)])
+    sw = np.sqrt(np.asarray(weights, float))
+
+    def unpack(x):
+        Km = np.array([[x[0], 0.0, x[2]], [0.0, x[1], x[3]], [0.0, 0.0, 1.0]])
+        return Km, np.array([x[4], x[5], x[6], x[7], k3])
+
+    def fun(x):
+        Km, dm = unpack(x)
+        out = []
+        for i, (obj, img) in enumerate(pts):
+            proj, _ = cv2.projectPoints(obj, x[8 + 6 * i:11 + 6 * i], x[11 + 6 * i:14 + 6 * i], Km, dm)
+            out.append(sw[i] * (proj.reshape(-1, 2) - img).ravel())
+        return np.concatenate(out)
+
+    S = lil_matrix((2 * sum(sizes), 8 + 6 * n), dtype=np.int8)
+    row = 0
+    for i, m in enumerate(sizes):
+        S[row:row + 2 * m, :8] = 1
+        S[row:row + 2 * m, 8 + 6 * i:14 + 6 * i] = 1
+        row += 2 * m
+    res = least_squares(fun, x0, jac_sparsity=S, method="trf", x_scale="jac", diff_step=1e-6, max_nfev=60)
+    Km, dm = unpack(res.x)
+    rv = [res.x[8 + 6 * i:11 + 6 * i].reshape(3, 1) for i in range(n)]
+    tv = [res.x[11 + 6 * i:14 + 6 * i].reshape(3, 1) for i in range(n)]
+    rms = float(np.sqrt(np.mean(np.concatenate([np.sum((cv2.projectPoints(o, r, t, Km, dm)[0].reshape(-1, 2)
+                                                         - im) ** 2, axis=1)
+                                                 for (o, im), r, t in zip(pts, rv, tv)]))))
+    J = res.jac.toarray() if hasattr(res.jac, "toarray") else np.asarray(res.jac)
+    dof = max(len(res.fun) - len(res.x), 1)
+    try:
+        cov = np.linalg.inv(J.T @ J) * float(res.fun @ res.fun) / dof
+        f_std = float(np.sqrt(max(cov[0, 0], 0.0)) / res.x[0])
+    except np.linalg.LinAlgError:
+        f_std = float("nan")
+    return Km, dm, rv, tv, rms, f_std
 
 
 def _calibrate(detections: list[BoardDetection], spec: MatSpec, *, min_corners: int, fix_k3: bool,
-               camera: CameraModel | None) -> CalibrationResult:
+               camera: CameraModel | None, weights: dict[str, float] | None = None) -> CalibrationResult:
     board = make_board(spec)
     rejected: dict[str, str] = {}
     sizes = Counter((d.width, d.height) for d in detections)
@@ -300,7 +359,12 @@ def _calibrate(detections: list[BoardDetection], spec: MatSpec, *, min_corners: 
                 if e > limit:
                     rejected[usable[k][0].name] = f"reprojectiefout {e:.2f} px"
             usable = [usable[k] for k in keep]
-        cam = CameraModel(K, dist.ravel(), w, h, float(rms), float(std_in.ravel()[0] / K[0, 0]))
+        f_std = float(std_in.ravel()[0] / K[0, 0])
+        wts = None if weights is None else np.array([weights.get(u[0].name, 1.0) for u in usable], float)
+        if wts is not None and wts.min() > 0 and wts.max() > WEIGHT_SPREAD * wts.min():
+            K, dist, rvecs, tvecs, rms, f_std = _refine_weighted(usable, rvecs, tvecs, K, dist, wts / wts.mean())
+            errs = [_view_rms(o, i, r, t, K, dist) for (_, o, i), r, t in zip(usable, rvecs, tvecs)]
+        cam = CameraModel(K, dist.ravel(), w, h, float(rms), f_std)
         poses = {
             u[0].name: _to_mat_pose(u[0].name, r, t, spec, e, len(u[0].ids))
             for u, r, t, e in zip(usable, rvecs, tvecs, errs)

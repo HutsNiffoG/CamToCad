@@ -236,3 +236,34 @@ def test_a_part_moved_halfway_through_the_photos_is_reported(tmp_path):
     with pytest.raises(pipeline.ScanError, match="niet in alle foto's op dezelfde plek") as err:
         pipeline.run_scan(images, tmp_path, pipeline.ScanOptions(), log=lambda m: None)
     assert "2 groepen" in str(err.value)
+
+
+def test_the_smallest_fillet_grows_with_the_blur():
+    """V13 (v0.14): een scherpe hoek komt door onscherpte als een kleine afronding uit de fit, bij onscherpe foto's als
+    een grotere. Tot σ 1,2 px is de grens 4,5 px, daarboven 3 px meer per pixel onscherpte."""
+    from camtocad import pipeline
+
+    assert pipeline.sharp_corner_limit(0.25) == pytest.approx(1.125)
+    assert pipeline.sharp_corner_limit(0.25, 0.6) == pytest.approx(1.125)
+    assert pipeline.sharp_corner_limit(0.25, 1.9) == pytest.approx((4.5 + 3.0 * 0.7) * 0.25)
+    assert pipeline.sharp_corner_limit(0.1, 0.6) == 0.8  # nooit kleiner dan 0,8 mm
+
+
+def test_a_slanted_quadrilateral_start_is_also_tried_as_a_rectangle():
+    """V8 (v0.14): bij een donker onderdeel naast zijn slagschaduw kwam een rand van de grovere startcontour 3,7° scheef
+    te liggen, en de fit draait geen losse randen. Dan wordt ook de rechthoek geprobeerd, en een rand met een eigen
+    richting telt in de keuze als een hoekpunt extra."""
+    from camtocad import profile
+
+    # een rommelige contour: een rechthoek van 30 x 20 mm met de rechterrand 3,7° scheef, en rafels van 0,4 mm op de
+    # lange randen (kleiner dan de tolerantie van de grovere contour)
+    pts = np.array([[0, 0], [10, 0], [10, 0.4], [10.6, 0.4], [10.6, 0], [30, 0], [31.3, 20], [15.6, 20], [15.6, 19.6],
+                    [15, 19.6], [15, 20], [0, 20]], float)
+    messy = profile.polygon_from_contour(pts, 0.0, eps_mm=0.01)
+    part = profile.Part2p5D(5.0, messy, [])
+    starts = dict(pipeline._coarse_starts(part))
+    # de grovere contour heeft vier randen, één met een eigen richting; tot v0.13 werd de rechthoek dan niet geprobeerd
+    assert starts["grovere contour"].n == 4 and pipeline._off_grid(starts["grovere contour"]) == 1
+    assert starts["rechthoek"].n == 4 and pipeline._off_grid(starts["rechthoek"]) == 0
+    square = profile.Profile("polygon", np.zeros(2), np.arange(4) * np.pi / 2, np.array([10, 15, 10, 15.0]), np.zeros(4))
+    assert pipeline._off_grid(square) == 0

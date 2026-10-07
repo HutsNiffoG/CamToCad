@@ -714,3 +714,34 @@ def test_the_floor_edge_of_a_counterbore_sets_its_depth():
     assert ef.accepted, ef.note
     h = ef.part.holes[0]
     assert h.cb_depth == pytest.approx(3.0, abs=0.05) and h.cb == pytest.approx(10.0, abs=0.05)
+
+
+def test_points_next_to_a_narrow_wall_do_not_count():
+    """V7 (v0.14): waar de wand in beeld smal is (een dunne pas in een schuine foto), meet de zachte rand het grijs van
+    het bovenvlak in plaats van dat van de wand, en ligt de rand verkeerd. Zulke punten tellen niet mee; bij een hoge
+    wand, of zonder zachte rand (alleen een masker), wel."""
+    def views_for(part):
+        poses = [look_at([120 + 230 * np.cos(a), 80 + 230 * np.sin(a), 230.0], [120.0, 80.0, 0.0]) for a in (0.4, 2.5)]
+        empty = np.zeros((H, W), bool)
+        vd = silhouette.prepare([(Pose(f"v{k}", R, t), ViewMasks(fg=empty, bg=~empty, valid=~empty))
+                                 for k, (R, t) in enumerate(poses)], K, part)
+        for v in vd:
+            v.fg = exact_mask(part, v)
+            v.bg = ~v.fg
+        return vd
+
+    for height, narrow in ((0.8, True), (12.0, False)):
+        part = plate(hole=False)
+        part.height = height
+        vd = views_for(part)
+        lay = edgefit.layout(part)
+        status = edgefit.boundary_status(part, K, vd, lay)
+        rim = edgefit.rims(part, lay)
+        assert all(np.all(w == 1.0) for w in edgefit.wall_weights(part, K, vd, lay, status))  # alleen een masker
+        for v in vd:
+            v.alpha = np.zeros(v.fg.shape, np.float16)
+        for on, w in zip(status, edgefit.wall_weights(part, K, vd, lay, status)):
+            bottom = rim.level[on] == 0
+            assert bottom.any() and np.all(w[~bottom] == 1.0)  # de verre kant (bovenrand) telt altijd
+            # een hoge wand: alleen waar hij bijna langs de kijkrichting loopt (aan de uiteinden van het silhouet) smal
+            assert (np.mean(w[bottom] == 0) > 0.9) if narrow else (np.mean(w[bottom] == 1) > 0.75)

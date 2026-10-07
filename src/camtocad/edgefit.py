@@ -85,6 +85,13 @@ NARROW_CSK_MM, NARROW_CSK_AMP = 1.0, 2.5
 INNER_SEARCH_PX, INNER_MIN_CONTRAST = 5.0, 10.0
 INNER_MIN_REACH_PX = 2.0  # zo ver (px) moet er langs de normaal gezocht kunnen worden (80% van de band in beeld)
 STEP_END_MM = 1.5  # de randen van een trede: zo ver van de contour blijven (daar is het vlak smaller dan de band)
+# Een wand in beeld (V7, v0.14): waar de onderrand de silhouetrand vormt, ligt de wand in beeld tussen onder- en
+# bovenrand. De zachte rand (masks._soft_alpha) neemt het grijs van het object 3,5-7,5 px binnen de maskerrand. Is de
+# wand in beeld smaller (een dunne pas, of een bovenaanzicht), dan is dat het grijs van het bovenvlak, niet van de wand
+# op de rand, en ligt de rand verkeerd: een wand is meestal donkerder dan het bovenvlak, en dan komt de rand naar
+# binnen (een witte pas van 0,76 mm: 0,4 px). Zulke punten tellen niet mee; smaller dan WALL_SLIVER_PX verandert de
+# wand de rand nauwelijks.
+WALL_LEVEL_PX, WALL_SLIVER_PX = 8.0, 0.25
 
 
 def signed_dist(mask: np.ndarray) -> np.ndarray:
@@ -609,6 +616,41 @@ def boundary_status(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, tol: flo
     return out
 
 
+def wall_weights(part: Part2p5D, K: np.ndarray, vd: list, lay: dict, status: list[np.ndarray]) -> list[np.ndarray]:
+    """Per foto, voor de punten op de silhouetrand (`status`): 0 waar de onderrand de rand vormt en de wand erboven in
+    beeld tussen WALL_SLIVER_PX en WALL_LEVEL_PX breed is (zie daar), anders 1. De breedte is die loodrecht op de rand
+    in beeld, tot het eerstvolgende niveau boven de onderrand (de bovenrand, of de schouder van een afschuining). Alleen
+    in foto's met een zachte rand uit de grijswaarden: de rand van het masker zelf gaat niet uit van het grijs van het
+    object vlak binnen de rand."""
+    p2, nrm, _ = points2d(part, lay)
+    rim = rims(part, lay)
+    n = len(p2)
+    contour = rim.point >= 0
+    above = np.full(n, -1)  # per contourpunt het punt op het laagste niveau boven de onderrand
+    for lev in range(int(rim.level.max()), 0, -1):
+        sel = contour & (rim.level == lev)
+        above[rim.point[sel]] = np.flatnonzero(sel)
+    out = []
+    for v, on in zip(vd, status):
+        wt = np.ones(int(on.sum()))
+        idx = np.flatnonzero(on)
+        bottom = np.flatnonzero(contour[idx] & (rim.level[idx] == 0))
+        if len(bottom) and getattr(v, "alpha", None) is not None:
+            j = idx[bottom]
+            c = rim.point[j]
+            up = above[c]
+            uvb, _ = project(rim.P[j], v.pose, K)
+            uvt, _ = project(rim.P[np.maximum(up, 0)], v.pose, K)
+            uvn, _ = project(np.column_stack([p2[c] + 0.1 * nrm[c], np.zeros(len(c))]), v.pose, K)
+            nimg = uvn - uvb
+            nimg /= np.linalg.norm(nimg, axis=1, keepdims=True) + 1e-12
+            width = np.abs(np.sum((uvt - uvb) * nimg, axis=1))
+            narrow = (up >= 0) & (width >= WALL_SLIVER_PX) & (width < WALL_LEVEL_PX)
+            wt[bottom[narrow]] = 0.0
+        out.append(wt)
+    return out
+
+
 @dataclass
 class EdgeFit:
     part: Part2p5D
@@ -681,6 +723,12 @@ def evidence(prob: "_Problem", x: np.ndarray) -> dict[tuple[str, int], Evidence]
         h, w = v.fg.shape
         uv = np.clip(uv - [v.x0, v.y0], 0, [w - 1, h - 1])
         wgt = _clip_free(v, uv, np.clip((4.0 - _bilinear(prob.fields[i][1], uv)) / 2.0, 0.0, 1.0))
+        if prob.wall:  # een punt naast een smalle wand in beeld telt niet mee (V7), ook niet als vergelijking
+            wall = np.ones(len(rim.P))
+            wall[prob.status[i]] = prob.wall[i]
+            keep = wall[on] > 0
+            on[on] = keep
+            uv, wgt = uv[keep], wgt[keep]
         pt = rim.point[on]
         np.add.at(W, pt, wgt ** 2)
         np.add.at(N, pt, 1.0)
@@ -843,6 +891,7 @@ class _Problem:
             self.fields.append((edge_distance(sf, band, getattr(v, "alpha", None), getattr(v, "alpha_w", None)),
                                 band))
         self.status: list[np.ndarray] = []
+        self.wall: list[np.ndarray] = []  # per foto en punt op de silhouetrand: 0 bij een smalle wand in beeld (V7)
         self.inner: list[tuple] = []  # randen binnen het object (V16), per foto; zie measure_inner
 
     def freeze(self, names: list[str]) -> None:
@@ -863,6 +912,7 @@ class _Problem:
         if part.steps:  # welk punt bij welk stuk hoort, ligt per ronde vast (zie rims)
             self.lay["cells"] = cell_of(part, points2d(part, self.lay)[0])
         self.status = boundary_status(part, self.K, self.vd, self.lay)
+        self.wall = wall_weights(part, self.K, self.vd, self.lay, self.status)
         # randen binnen het object: per ronde gemeten waar ze in de foto's liggen, dan als vaste doelen (V16)
         self.inner = measure_inner(part, self.K, self.vd, self.lay) if has_inner_edges(part) else []
 
@@ -898,6 +948,8 @@ class _Problem:
             r = _bilinear(sf, uv)
             g = _bilinear(band, uv)
             wgt = np.clip((4.0 - g) / 2.0, 0.0, 1.0) if evidence else np.ones(len(g))  # geen zekere mat binnen ~3 px
+            if evidence and self.wall:
+                wgt = wgt * self.wall[i]  # een smalle wand in beeld (V7)
             # gaten en sleuven: geen bewijs waar de foto afgekapt is (zie _clip_free); de buitencontour houdt daar de
             # maskerrand (zonder bewijs zou ze kunnen wegdrijven, en er is geen pixelfit om op terug te vallen per rand)
             wgt = np.where(feat[on], _clip_free(v, uv, wgt), wgt)
@@ -1006,7 +1058,10 @@ def contour_misfit(part: Part2p5D, K: np.ndarray, vd: list, mm_per_px: float, pr
         h, w = v.fg.shape
         ok = (uv[:, 0] >= 0) & (uv[:, 0] <= w - 1) & (uv[:, 1] >= 0) & (uv[:, 1] <= h - 1)
         r = _bilinear(sf, uv[ok])
-        ok_ev = _bilinear(band, uv[ok]) <= 2.0  # zekere mat binnen ~1 px: bewijs (gewicht 1 in de randfit)
+        wall = np.ones(len(rim.P))
+        wall[q.status[i]] = q.wall[i]
+        # zekere mat binnen ~1 px: bewijs (gewicht 1 in de randfit); niet naast een smalle wand in beeld (V7)
+        ok_ev = (_bilinear(band, uv[ok]) <= 2.0) & (wall[sel][ok] > 0)
         scale = float(np.linalg.norm(v.pose.center - center)) / K[0, 0]  # mm per px op het onderdeel
         for j, rr in zip(rim.point[sel][ok][ok_ev], r[ok_ev]):
             per_pt[j].append(-rr * scale)  # + = de rand ligt in de foto verder naar buiten dan het model

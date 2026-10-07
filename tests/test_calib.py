@@ -145,4 +145,53 @@ def test_blurry_photos_stay_out_of_the_calibration_but_get_a_pose(mat_scan):
     lines.clear()
     few = [d for d in dets if d.name in found] + [d for d in dets if d.name not in found][:5]
     pipeline.calibrate_sharp(few, blur, spec, log=lines.append)
-    assert not lines  # te weinig scherpe foto's: gewoon allemaal
+    # te weinig scherpe foto's: gewoon allemaal, maar sinds v0.14 gewogen naar hun onscherpte (V28)
+    assert not any("niet in de kalibratie" in line for line in lines) and any("gewogen" in line for line in lines)
+
+
+def _synthetic_detections(spec, cam, noise: dict, seed: int = 0):
+    """Mathoeken zoals de detector ze zou geven: geprojecteerd met lensvervorming, plus ruis per foto (px)."""
+    import cv2
+
+    board = mat.make_board(spec)
+    A, a = mat.board_to_mat_transform(spec)
+    chess = np.asarray(board.getChessboardCorners(), float)
+    rng = np.random.default_rng(seed)
+    target = (spec.board_w_mm / 2, spec.board_h_mm / 2, 0.0)
+    dets = []
+    for name, R, t in render.scan_poses(target, 330.0, ((35.0, 8), (55.0, 8), (72.0, 6)), 4, rng):
+        rv, _ = cv2.Rodrigues(R @ A)
+        uv, _ = cv2.projectPoints(chess, rv, R @ a + t, cam.K, cam.dist)
+        uv = uv.reshape(-1, 2)
+        inside = (uv[:, 0] > 5) & (uv[:, 0] < cam.width - 5) & (uv[:, 1] > 5) & (uv[:, 1] < cam.height - 5)
+        ids = np.flatnonzero(inside).astype(np.int32)
+        corners = uv[ids] + rng.normal(0, noise.get(name, 0.05), (len(ids), 2))
+        dets.append(calib.BoardDetection(name, cam.width, cam.height, corners, ids, 0))
+    return dets
+
+
+def test_corners_are_weighted_by_the_blur_of_their_photo():
+    """V28 (v0.14): de hoeken van een onscherpe foto liggen minder precies. Zonder gewichten trekken ze de camera mee;
+    gewogen naar hun onscherpte (pipeline.calibrate_sharp) blijft de camera bij die van de scherpe foto's."""
+    from camtocad import pipeline
+
+    spec, cam = mat.PRESETS["A4"], render.default_camera()
+    names = [n for n, _, _ in render.scan_poses((0, 0, 0), 330.0, ((35.0, 8), (55.0, 8), (72.0, 6)), 4,
+                                                np.random.default_rng(0))]
+    soft = set(names[1::3])  # een derde van de foto's bewogen: σ 2,5 px (net binnen de grens van de kalibratie)
+    errs = {"gelijk": [], "gewogen": []}
+    for seed in range(3):
+        dets = _synthetic_detections(spec, cam, {n: 1.0 for n in soft}, seed=seed)
+        blur = {d.name: 2.5 if d.name in soft else 0.6 for d in dets}
+        plain = calib.calibrate(dets, spec)
+        lines = []
+        weighted = pipeline.calibrate_sharp(dets, blur, spec, log=lines.append)
+        assert any("gewogen" in line for line in lines) and set(weighted.poses) == set(plain.poses)
+        errs["gelijk"].append(abs(plain.camera.K[0, 0] / cam.K[0, 0] - 1))
+        errs["gewogen"].append(abs(weighted.camera.K[0, 0] / cam.K[0, 0] - 1))
+        assert np.isfinite(weighted.camera.f_std_rel) and weighted.camera.f_std_rel < plain.camera.f_std_rel
+    assert np.mean(errs["gewogen"]) < 0.5 * np.mean(errs["gelijk"]) and max(errs["gewogen"]) < 1.5e-3
+    # zonder verschil in onscherpte: precies de kalibratie van OpenCV
+    dets = _synthetic_detections(spec, cam, {}, seed=5)
+    same = pipeline.calibrate_sharp(dets, {d.name: 0.6 for d in dets}, spec, log=lambda m: None)
+    assert np.array_equal(same.camera.K, calib.calibrate(dets, spec).camera.K)

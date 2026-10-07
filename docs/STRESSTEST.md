@@ -1,6 +1,6 @@
 # Stresstests
 
-De stresstests laten zien waar de verwerking breekt. Elke test is een gerenderde scan van een bekend onderdeel op de mat, met storingen zoals in echte foto's. De maten uit de scan worden vergeleken met de waarheid. Ze zeggen niet hoe nauwkeurig echte foto's zijn: dat moet [Fase 0](FASE-0.md) uitwijzen. Wel laten ze zien of een verandering iets beter of slechter maakt. De uitkomsten per versie staan in [ROUTE-A-VERBETERPUNTEN.md](ROUTE-A-VERBETERPUNTEN.md) (§3e–§3m).
+De stresstests laten zien waar de verwerking breekt. Elke test is een gerenderde scan van een bekend onderdeel op de mat, met storingen zoals in echte foto's. De maten uit de scan worden vergeleken met de waarheid. Ze zeggen niet hoe nauwkeurig echte foto's zijn: dat moet [Fase 0](FASE-0.md) uitwijzen. Wel laten ze zien of een verandering iets beter of slechter maakt. De uitkomsten per versie staan in [ROUTE-A-VERBETERPUNTEN.md](ROUTE-A-VERBETERPUNTEN.md) (§3e–§3n).
 
 ## Draaien
 
@@ -18,10 +18,12 @@ camtocad stresstest --vergelijk run0 run1             # twee runs naast elkaar, 
   - een zwart, wit of gekleurd onderdeel;
   - weinig lage foto's;
   - een onderdeel dat halverwege even is aangestoten (0,6 of 2,5 mm), of een kleine inham in de rand (v0.12);
-  - een bankpas als referentie, 0,76 mm dun, grijs en wit (v0.13).
+  - een bankpas als referentie, 0,76 mm dun, grijs en wit (v0.13);
+  - een klein donker plaatje naast zijn slagschaduw, een blok met twee scherpe hoeken en twee afrondingen R1 (scherp
+    en onscherp), en een scan waarin een derde van de foto's bewogen is (v0.14).
 - `naam:zaad` draait een scenario met een ander zaad: andere ruis en andere poses. De uitvoer heet dan `naam_zaad`.
 - `--cache MAP` bewaart de gerenderde foto's. Een volgende run gebruikt ze opnieuw, en dan vergelijk je twee versies op precies dezelfde foto's. Renderen kost 20–60 s per scenario.
-- Eén scenario kost 1,5–5 minuten op een gewone CPU met 4 kernen, en ~5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB is 2 tegelijk veilig; bij 3 tegelijk schoot de kernel in v0.12 soms een proces af (dan stopt de hele run met `BrokenProcessPool`, en draai je de ontbrekende scenario's opnieuw). Alle 54 scenario's kosten zo ~40–90 minuten, afhankelijk van de machine.
+- Eén scenario kost 1,5–5 minuten op een gewone CPU met 4 kernen, en ~5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB is 2 tegelijk veilig; bij 3 tegelijk schoot de kernel in v0.12 soms een proces af (dan stopt de hele run met `BrokenProcessPool`, en draai je de ontbrekende scenario's opnieuw). Alle 58 scenario's kosten zo ~45–100 minuten, afhankelijk van de machine.
 - De cijfers in ROUTE-A-VERBETERPUNTEN.md zijn gedraaid met `OMP_NUM_THREADS=1`, met de foto's uit de cache. Kalibratie en poses rekenen met één thread, dus een scan geeft bij herhaling dezelfde maten (op een paar duizendsten na).
 
 ## Uitvoer

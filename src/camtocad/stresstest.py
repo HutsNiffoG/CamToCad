@@ -113,6 +113,13 @@ def bank_card():
     return cq.Workplane("XY").box(85.60, 53.98, 0.76, centered=(True, True, False)).edges("|Z").fillet(3.18)
 
 
+def corner_block():
+    """Blok 60 x 35 x 8 mm met twee scherpe hoeken (links) en twee afrondingen R1 (rechts): de kleinste afronding die
+    een scan nog herkent (V13, v0.14)."""
+    import cadquery as cq
+    return cq.Workplane("XY").box(60, 35, 8, centered=(True, True, False)).edges("|Z and >X").fillet(1.0)
+
+
 def notched_bracket():
     """Beugel met twee gaten Ø6,6 en een inham van 3 x 2 mm midden in een lange zijde (V14, v0.12)."""
     import cadquery as cq
@@ -144,6 +151,7 @@ OBJECTS = {
     "plate": (small_plate, PLATE),
     "washer": (washer, WASHER),
     "bankpas": (bank_card, {"h": 0.76, "x": [85.6], "y": [53.98], "R": 3.18, "hx": [], "hy": []}),
+    "hoekblok": (corner_block, {"h": 8.0, "x": [60.0], "y": [35.0], "R": 1.0, "hx": [], "hy": [], "scherp": 2}),
 }
 
 
@@ -224,6 +232,12 @@ SCENARIOS = {
     # een bankpas als referentie (Fase 0, v0.13): 0,76 mm dik, grijs en wit
     "bankpas": dict(BASE, object="bankpas"),
     "bankpas_licht": dict(BASE, object="bankpas", albedo=0.95),
+    # nauwkeurigheid (v0.14): een klein donker plaatje naast zijn slagschaduw (V8); twee scherpe hoeken en twee
+    # afrondingen R1, scherp en onscherp (V13); en een derde van de foto's bewogen (σ 2,5 px), voor de kalibratie (V28)
+    "klein_schaduw": dict(BASE, object="plate", offset=(-30, 20), albedo=0.2, shadow=0.55),  # V8: donker naast schaduw
+    "hoeken": dict(BASE, object="hoekblok"),
+    "hoeken_onscherp": dict(BASE, object="hoekblok", blur=1.5),
+    "bewogen": dict(BASE, blur_some=(0.33, 2.5)),
 }
 # kleurscenario's die ook als grijsbeelden draaien (controle: wat geeft kleur extra, V8)
 GRAY_CONTROLS = ("blauw", "grijs_kleur")
@@ -356,14 +370,19 @@ def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
     images = []
     color = cfg.get("color")  # albedo per kanaal (R, G, B): een gekleurd onderdeel (V8)
     tint = np.asarray(cfg.get("tint", (1.0, 1.0, 1.0)), np.float32)  # kleur van het licht (R, G, B), na witbalans
+    some = cfg.get("blur_some")  # (deel van de foto's, σ px): bewogen foto's (V28); een eigen toevalsreeks, zodat de
+    pick = np.random.default_rng(seed + 1000) if some else None  # andere scenario's dezelfde foto's houden
     for k, (name, R, t) in enumerate(poses(target, cfg, rng)):
         m = moved if nudge and k >= nudge[3] else mesh
+        blur = cfg.get("blur", 0.5)  # onscherpte σ (px) van lens en focus
+        if some and pick.random() < some[0]:
+            blur = some[1]
         if color is None:
             img, _ = render_view(raster, cam, R, t, m, albedo=cfg.get("albedo", 0.55), light=light,
-                                 noise=0.0, gradient=cfg.get("gradient", 0.08), rng=rng)
+                                 noise=0.0, gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng)
         else:  # per kanaal renderen (lineair in de albedo), dan het licht erover; BGR zoals OpenCV
             chans = [render_view(raster, cam, R, t, m, albedo=a, light=light, noise=0.0,
-                                 gradient=cfg.get("gradient", 0.08), rng=rng)[0].astype(np.float32) * k
+                                 gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng)[0].astype(np.float32) * k
                      for a, k in zip(color, tint)]
             img = np.clip(np.dstack(chans[::-1]), 0, 255).astype(np.uint8)
         images.append((name, post(img, name, cfg, rng)))
