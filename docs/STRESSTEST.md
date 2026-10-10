@@ -23,8 +23,8 @@ camtocad stresstest --vergelijk run0 run1             # twee runs naast elkaar, 
     en onscherp), en een scan waarin een derde van de foto's bewogen is (v0.14).
 - `naam:zaad` draait een scenario met een ander zaad: andere ruis en andere poses. De uitvoer heet dan `naam_zaad`.
 - `--cache MAP` bewaart de gerenderde foto's. Een volgende run gebruikt ze opnieuw, en dan vergelijk je twee versies op precies dezelfde foto's. Renderen kost 20–60 s per scenario.
-- Eén scenario kost 1,5–5 minuten op een gewone CPU met 4 kernen, en ~5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB is 2 tegelijk veilig; bij 3 tegelijk schoot de kernel in v0.12 soms een proces af (dan stopt de hele run met `BrokenProcessPool`, en draai je de ontbrekende scenario's opnieuw). Alle 58 scenario's kosten zo ~45–100 minuten, afhankelijk van de machine.
-- De cijfers in ROUTE-A-VERBETERPUNTEN.md zijn gedraaid met `OMP_NUM_THREADS=1`, met de foto's uit de cache. Kalibratie en poses rekenen met één thread, dus een scan geeft bij herhaling dezelfde maten (op een paar duizendsten na).
+- Eén scenario kost 1–4 minuten op een gewone CPU met 4 kernen (v0.15, twee tegelijk), en ~5 GB geheugen. Kies `--parallel` naar het geheugen: met 16 GB is 2 tegelijk veilig; bij 3 tegelijk schoot de kernel in v0.12 soms een proces af (dan stopt de hele run met `BrokenProcessPool`, en draai je de ontbrekende scenario's opnieuw). Alle 58 scenario's kosten zo ~45–75 minuten, afhankelijk van de machine (v0.15; v0.14 ~1,4× zo lang).
+- De cijfers in ROUTE-A-VERBETERPUNTEN.md zijn gedraaid met `OMP_NUM_THREADS=1`, met de foto's uit de cache. Kalibratie en poses rekenen met één thread, dus op dezelfde machine geeft een scan bij herhaling dezelfde maten. Op een andere machine (een andere processor) kan de kalibratie in de laatste cijfers verschillen (~1e-7 px in de brandpuntsafstand), en dat werkt door: meestal 0,001–0,02 mm, bij maten met een ruime U95 tot ~0,1 mm (v0.15, §3o). Vergelijk twee versies daarom op dezelfde machine: draai de oude versie zo nodig opnieuw, bijvoorbeeld vanuit een `git worktree` met `PYTHONPATH=<worktree>/src`.
 
 ## Uitvoer
 

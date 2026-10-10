@@ -570,7 +570,11 @@ De drempels van V19 komen uit gerenderde scans: op elf prisma's bleef de bovenra
 - `cv2.remap` in plaats van `map_coordinates` in de randfit: rekent met 1/32 px, te grof voor subpixelranden;
 - een OCP zonder VTK (V23): CadQuery 2.8 laadt VTK bij het importeren, dus dat kan pas met een andere CadQuery.
 
-<!-- STRESS-V015 -->
+**Stresstests v0.15.** De 58 scenario's van v0.14 (dezelfde scans), met de twee grijscontroles. Ter vergelijking draaide ook de code van v0.14 opnieuw, op dezelfde machine, twee scans tegelijk.
+
+- **Dezelfde maten als v0.14:** op dezelfde machine geven v0.14 en v0.15 in alle 58 scenario's en de twee grijscontroles precies dezelfde maten. 566 maten, alle binnen U95; geen scan als onbetrouwbaar gemarkeerd; |fout| mediaan 0,017 mm; van de 436 gesnapte maten zijn er twee fout, zoals in v0.14 (de breedte van de bankpassen). De grijscontroles: 19 van 19 binnen U95.
+- **Rekentijd:** alle 58 samen 10580 → 7772 s (1,36× sneller), per scan mediaan 179 → 135 s. De scans met gaten, sleuven of uitsparingen het meest: tot 1,8× (de zwarte beugel met sleuf 309 → 171 s, de sleuf met slagschaduw 339 → 191 s), de grijscontroles 1,5×. Kleine onderdelen zonder gaten (het hoekblok, de bankpas) zijn even snel, binnen de ruis van twee scans tegelijk (±10%): daar is de pixelfit maar een klein deel van de tijd. Eén scan alleen: de beugel 167 → 115 s, de beugel met sleuf 213 → 139 s.
+- **Een andere machine geeft iets andere maten.** Tegen de run van v0.14 van drie dagen eerder (dezelfde code en foto's, een andere machine) verschillen de maten in 49 van de 58 scenario's: meestal 0,001–0,02 mm, tot 0,11 mm bij maten met een ruime U95 (de hoekstraal van een uitsparing met aan één kant geen bewijs, een gat van een zwart onderdeel boven een markervlak, een afronding van het kleine plaatje in de zware set); alle binnen U95. Het verschil begint in de kalibratie: de brandpuntsafstand verschilt ~1e-7 px, door andere rekenkernen op een andere processor. Bij de onscherpe hoekscan ("hoeken_onscherp", σ 1,5 px) slaat de schatting van de verscherping daardoor om, van k 0,50 naar 1,12, en komt één van de twee afrondingen R1 als scherp uit en de andere als R1,55 (in de eerdere run beide als R1,32). Die schatting is bij onscherpe foto's dus slecht bepaald (V2, §4). Vergelijk twee versies daarom op dezelfde machine ([STRESSTEST.md](STRESSTEST.md)).
 
 ## 4. Open verbeterpunten, op prioriteit
 
