@@ -87,5 +87,5 @@ class PdfCanvas:
         return bytes(out)
 
     def save(self, path) -> None:
-        with open(path, "wb") as f:
-            f.write(self.to_bytes())
+        from .imgio import write_atomic
+        write_atomic(path, self.to_bytes())

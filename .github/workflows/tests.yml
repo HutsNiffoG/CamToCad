@@ -16,6 +16,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgl1
       - name: Installeren
         run: pip install -e ".[server,dev]"
+      - name: Lockfile actueel (uv.lock bij pyproject.toml)
+        run: pip install "uv==0.8.17" && uv lock --check  # dezelfde uv als de installer-workflow
+      - name: Installatie controleren
+        run: camtocad doctor --data "$RUNNER_TEMP/camtocad-data"
       - name: Tests
         run: pytest -q -m "not stress"
 

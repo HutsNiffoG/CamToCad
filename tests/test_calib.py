@@ -195,3 +195,17 @@ def test_corners_are_weighted_by_the_blur_of_their_photo():
     dets = _synthetic_detections(spec, cam, {}, seed=5)
     same = pipeline.calibrate_sharp(dets, {d.name: 0.6 for d in dets}, spec, log=lambda m: None)
     assert np.array_equal(same.camera.K, calib.calibrate(dets, spec).camera.K)
+
+
+def test_the_cached_undistortion_gives_the_same_image():
+    """V21 (v0.15): de correctiekaarten één keer per scan geven hetzelfde beeld als cv2.undistort, ook voor kleur."""
+    rng = np.random.default_rng(3)
+    K = np.array([[700.0, 0, 322.5], [0, 702.0, 236.0], [0, 0, 1]])
+    cam = calib.CameraModel(K, np.array([-0.21, 0.12, 4e-4, -3e-4, -0.05]), 640, 480)
+    und = calib.undistorter(cam)
+    for img in (rng.integers(0, 256, (480, 640), dtype=np.uint8), rng.normal(size=(480, 640, 2)).astype(np.float32),
+                rng.integers(0, 256, (240, 320), dtype=np.uint8)):  # een andere maat krijgt eigen kaarten
+        assert np.array_equal(und(img), calib.undistort(img, cam))
+    flat = calib.CameraModel(K, np.zeros(5), 640, 480)
+    img = rng.integers(0, 256, (480, 640), dtype=np.uint8)
+    assert calib.undistorter(flat)(img) is img

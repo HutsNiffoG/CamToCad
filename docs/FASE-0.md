@@ -4,7 +4,7 @@ Alle drempels en de opgegeven onzekerheid (U95) van route A zijn tot nu toe afge
 
 Kort: per onderdeel een map met foto's en een `maten.json` met je schuifmaatmetingen, dan `camtocad valideer <map>`.
 
-Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server`):
+Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server --lan`, of dubbelklik op het programmabestand van de installer):
 
 1. fotograferen met de **livecamera**, die de weg wijst en zelf de foto's maakt (§3);
 2. per scan de **schuifmaatmetingen invullen** (knop "maten"); de vergelijking met de scan verschijnt zodra die verwerkt is (§4, §5);
@@ -53,7 +53,7 @@ Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server`):
 - Maak 30–60 foto's met dezelfde telefoon, zonder zoom:
   - 4–6 recht van boven, met de hele mat in beeld;
   - rondom op ongeveer 35° en 60° boven de mat, om de ~45°;
-  - in kleur, zonder filter: kleur is bewijs voor het object (v0.8). JPG en HEIC (iPhone) werken allebei; voor HEIC is de extra `heic` nodig (`pip install -e ".[server]"` heeft hem al);
+  - in kleur, zonder filter: kleur is bewijs voor het object (v0.8). JPG en HEIC (iPhone) werken allebei; voor HEIC is de extra `heic` nodig (de installer en `pip install -e ".[server]"` hebben hem al);
   - met één lens: een iPhone schakelt dichtbij vanzelf naar de macrolens (ultragroothoek). Blijf op 25–35 cm, of zet Macrobesturing aan en de macrostand uit. Foto's van een andere lens of met digitale zoom worden aan de EXIF-gegevens herkend en niet gebruikt; de fotocontrole meldt het.
 - **Of gebruik de livecamera** (v0.13), dan hoef je de richtingen niet te onthouden:
   - Open op de telefoon de https-link uit de terminal (of scan de QR-code). De camera werkt in de browser alleen via https; de eerste keer waarschuwt de telefoon voor het certificaat van je pc: kies "doorgaan".
@@ -62,7 +62,7 @@ Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server`):
   - Staat de telefoon goed en stil, dan maakt de pagina zelf de foto (vinkje "automatisch"; de rode knop kan altijd). De minikaart onderaan is gedraaid zodat jij onderaan staat: groen is genoeg, rood ontbreekt, wit omrand is de volgende.
   - Gebruik binnen één scan óf de livecamera óf de camera-app, niet allebei: hun foto's hebben een ander formaat en een andere beeldhoek. Op een iPhone zijn de foto's van de livecamera beelden uit de video (Safari kent geen ImageCapture), dus wat kleiner dan een gewone foto.
 - **Controleer de set direct**, vóór je het onderdeel weghaalt:
-  - Via de telefoonpagina (`camtocad server`) gebeurt dat vanzelf. Elke foto krijgt een oordeel (goed, matig of onbruikbaar), en een dekkingskaart toont in het rood welke richtingen nog ontbreken.
+  - Via de telefoonpagina (`camtocad server --lan`) gebeurt dat vanzelf. Elke foto krijgt een oordeel (goed, matig of onbruikbaar), en een dekkingskaart toont in het rood welke richtingen nog ontbreken.
   - Via de opdrachtregel draai je `camtocad controleer <map-met-fotos>`. Dat kost ongeveer 0,1 s per foto.
   - Maak de foto's bij die de controle vraagt, bijvoorbeeld "nog 2 foto's recht boven het onderdeel".
 

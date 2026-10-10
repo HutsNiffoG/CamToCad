@@ -8,6 +8,7 @@ uit de mat: er is geen VIO (ARCore) en geen schaaldrift nodig.
 
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -414,3 +415,24 @@ def undistort(image: np.ndarray, cam: CameraModel) -> np.ndarray:
     if not np.any(np.abs(cam.dist) > 0):
         return image
     return cv2.undistort(image, cam.K, cam.dist)
+
+
+def undistorter(cam: CameraModel):
+    """Als `undistort`, maar met de correctiekaarten één keer per beeldmaat (V21, v0.15).
+
+    cv2.undistort rekent die kaarten bij elke aanroep opnieuw uit, een kwart van de tijd. Dezelfde kaarten
+    (initUndistortRectifyMap, 1/32 px) met dezelfde interpolatie geven hetzelfde beeld, bit voor bit. Veilig
+    vanuit meer threads tegelijk."""
+    if not np.any(np.abs(cam.dist) > 0):
+        return lambda image: image
+    maps: dict = {}
+    lock = threading.Lock()
+
+    def apply(image: np.ndarray) -> np.ndarray:
+        size = (image.shape[1], image.shape[0])
+        with lock:
+            if size not in maps:
+                maps[size] = cv2.initUndistortRectifyMap(cam.K, cam.dist, None, cam.K, size, cv2.CV_16SC2)
+        return cv2.remap(image, *maps[size], cv2.INTER_LINEAR)
+
+    return apply

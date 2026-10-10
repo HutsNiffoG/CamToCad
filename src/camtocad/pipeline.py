@@ -880,14 +880,16 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     sharp = tone.camera_sharpening([(lookup[d.name], cal.poses[d.name], d.ids) for d in dets if d.name in cal.poses],
                                    cam, spec)
 
+    undistort = calib.undistorter(cam)  # de correctiekaarten één keer per scan (V21)
+
     def view_masks(pose):
-        img = calib.undistort(lookup[pose.name], cam)
+        img = undistort(lookup[pose.name])
         pred, valid = masks.predict_background(raster, cam.K, pose, (cam.width, cam.height))
         depth = float((pose.R @ np.array([spec.size_mm[0] / 2, spec.size_mm[1] / 2, 0.0]) + pose.t)[2])
         ch = chroma.get(pose.name)
         if ch is not None:  # kleur (V8): terug naar volle resolutie en dezelfde ontvervorming als het grijsbeeld
-            ch = calib.undistort(cv2.resize(ch.astype(np.float32), (img.shape[1], img.shape[0]),
-                                            interpolation=cv2.INTER_LINEAR), cam)
+            ch = undistort(cv2.resize(ch.astype(np.float32), (img.shape[1], img.shape[0]),
+                                      interpolation=cv2.INTER_LINEAR))
         tn = tone.estimate(lookup[pose.name], pred, valid, cam, sharp)
         return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0),
                                     blur_px=blur.get(pose.name), chroma=ch, tone_params=tn)
@@ -925,7 +927,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         others = [v for v in views if all(v[0] is not t[0] for t in top_views)]
         for pose, m in top_views[:6] + others[:: max(1, len(others) // 4)][:4]:
             imwrite(dbg / f"masker_{Path(pose.name).stem}.jpg",
-                        debug.mask_overlay(calib.undistort(lookup[pose.name], cam), m))
+                        debug.mask_overlay(undistort(lookup[pose.name]), m))
 
     # 3b. ligt het onderdeel in alle foto's op dezelfde plek? (placement.py)
     board_bounds = (0.0, spec.size_mm[0], 0.0, spec.size_mm[1])

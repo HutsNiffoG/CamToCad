@@ -1,0 +1,116 @@
+name: installer
+
+# Eén programmabestand per besturingssysteem (V23, v0.15), gebouwd met PyApp. Python zit in het bestand; de
+# pakketten installeert het bij de eerste start van PyPI, op de versies uit uv.lock (installer/pin_dependencies.py).
+# Draait als de installer, de lockfile of pyproject.toml verandert, en met de hand (Actions > installer > Run
+# workflow); bij een versietag (v*) komen de bestanden bij de release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths:  # geldt niet voor tags
+      - "installer/**"
+      - ".github/workflows/installer.yml"
+      - "uv.lock"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.8.17"
+  PYAPP_VERSION: "0.29.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04  # glibc 2.35: draait ook op wat oudere Linux-versies
+            name: linux-x86_64
+            cpu: v1  # Python zonder AVX2-eis
+          - os: windows-latest
+            name: windows-x86_64
+            cpu: ""
+          - os: macos-latest
+            name: macos-arm64
+            cpu: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: uv
+        run: pip install "uv==$UV_VERSION"
+      - name: Wheel met de versies uit uv.lock
+        run: |
+          uv lock --check
+          uv export --frozen --no-hashes --no-emit-project --extra server -o "$RUNNER_TEMP/vast.txt"
+          python installer/pin_dependencies.py "$RUNNER_TEMP/vast.txt" pyproject.toml
+          uv build --wheel --out-dir dist
+      - name: Programmabestand bouwen (PyApp)
+        env:
+          PYAPP_EXEC_SPEC: camtocad.cli:app_main
+          PYAPP_PYTHON_VERSION: "3.11"
+          PYAPP_DISTRIBUTION_EMBED: "true"
+          PYAPP_DISTRIBUTION_VARIANT_CPU: ${{ matrix.cpu }}
+          PYAPP_UV_ENABLED: "true"
+          # geen beheeropdrachten ("self update" zou camtocad van PyPI halen, waar het niet staat)
+          PYAPP_SELF_COMMAND: none
+        run: |
+          export PYAPP_PROJECT_PATH="$(python -c 'import glob, os; print(os.path.abspath(glob.glob("dist/*.whl")[0]))')"
+          export PYAPP_UV_VERSION="$UV_VERSION"
+          cargo install pyapp --version "$PYAPP_VERSION" --locked --root "$RUNNER_TEMP/pyapp"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
+          mkdir -p out
+          mv "$RUNNER_TEMP/pyapp/bin/pyapp$exe" "out/camtocad-$version-${{ matrix.name }}$exe"
+          echo "BIN=out/camtocad-$version-${{ matrix.name }}$exe" >> "$GITHUB_ENV"
+          ls -l out
+      - name: Proefstart (de eerste start installeert de pakketten)
+        run: |
+          "$BIN" --version
+          "$BIN" doctor --data "$RUNNER_TEMP/data"
+      - name: Webserver start en antwoordt
+        run: |
+          "$BIN" server --poort 8765 --https-poort 0 --data "$RUNNER_TEMP/data" --token proef > "$RUNNER_TEMP/server.log" 2>&1 &
+          pid=$!
+          ok=""
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8765/api/info?token=proef"; then ok=1; break; fi
+            sleep 2
+          done
+          kill "$pid" || true
+          cat "$RUNNER_TEMP/server.log"
+          [ -n "$ok" ]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: camtocad-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    # alleen bij een versietag: de drie bestanden bij de GitHub-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Bij de release zetten
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Cam-to-CAD $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --clobber

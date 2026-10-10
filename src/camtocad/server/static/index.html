@@ -124,6 +124,7 @@
     <p id="live-melding" class="muted" hidden></p>
     <progress id="voortgang" value="0" max="1" hidden></progress>
     <p id="melding" class="muted"></p>
+    <button id="hervat" type="button" hidden>Opnieuw proberen</button>
     <div id="lijst" class="photos"></div>
     <div id="overzicht"></div>
     <div class="row" style="margin-top:12px">
@@ -135,6 +136,7 @@
   <section class="card">
     <h2>Scans</h2>
     <div id="scans" class="muted">Laden…</div>
+    <p id="opslag" class="muted"></p>
   </section>
 
   <section class="card" id="maten-kaart" hidden>
@@ -253,26 +255,56 @@ async function shrink(file) {
   } catch (e) { return file; }
 }
 
-function upload(file) {
+// V24 (v0.15): elke foto krijgt een eigen id. Na een netwerkfout gaat dezelfde foto met hetzelfde id opnieuw, en de
+// server bewaart hem dan niet nog eens. Een fout in de foto zelf (geen foto, te groot) stopt de rest niet.
+const RETRY_S = [2, 4, 8, 15, 30];
+
+function newUid() {
+  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);  // http: geen randomUUID
+}
+
+function upload(file, uid) {
   return new Promise((resolve, reject) => {
     const fd = new FormData();
     fd.append("fotos", file, file.name);
+    if (uid) fd.append("uid", uid);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `api/scans/${current}/fotos`);
+    xhr.timeout = 180000;
     xhr.upload.onprogress = (e) => { if (e.lengthComputable) { $("voortgang").max = e.total; $("voortgang").value = e.loaded; } };
     xhr.onload = () => {
       let data = {}; try { data = JSON.parse(xhr.responseText || "{}"); } catch (e) {}
-      xhr.status === 200 ? resolve(data) : reject(new Error(data.detail || ("fout " + xhr.status)));
+      if (xhr.status === 200) return resolve(data);
+      const err = new Error(data.detail || ("fout " + xhr.status)); err.status = xhr.status; reject(err);
     };
-    xhr.onerror = () => reject(new Error("netwerkfout"));
+    xhr.onerror = xhr.ontimeout = () => { const err = new Error("netwerkfout"); err.status = 0; reject(err); };
     xhr.send(fd);
   });
 }
 
+// opnieuw bij een netwerkfout of time-out, een server die even niet kan (502-504), of "komt al binnen" (409: de
+// eerste poging loopt nog); niet bij een volle datamap (507) of een fout in de foto
+function retryable(e) { return e.status === 0 || (e.status >= 502 && e.status <= 504) || (e.status === 409 && /al binnen/.test(e.message)); }
+
+async function uploadRetry(file, uid, label) {
+  for (let i = 0; ; i++) {
+    try { return await upload(file, uid); }
+    catch (e) {
+      if (!retryable(e) || i >= RETRY_S.length) throw e;
+      for (let s = RETRY_S[i]; s > 0; s--) {
+        $("melding").textContent = `${label}: ${e.message}, opnieuw over ${s} s…`;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+}
+
 async function addFiles(files) {
-  queue.push(...files);
+  queue.push(...files.map((f) => ({ file: f, uid: newUid(), small: null })));
   if (busy) return;
-  busy = true; $("voortgang").hidden = false;
+  busy = true; $("voortgang").hidden = false; $("hervat").hidden = true;
+  const skipped = [];
   try {
     if (!current) {
       const s = await api("POST", "api/scans", settings());
@@ -280,17 +312,26 @@ async function addFiles(files) {
     }
     let done = 0;
     while (queue.length) {
-      const f = queue.shift();
-      $("melding").textContent = `Foto ${++done} van ${done + queue.length} controleren…`;
-      const data = await upload(await shrink(f));
-      render(data);
+      const item = queue[0], label = `Foto ${done + 1} van ${done + queue.length}`;
+      $("melding").textContent = `${label} controleren…`;
+      try {
+        item.small = item.small || await shrink(item.file);  // bij opnieuw proberen dezelfde bytes
+        render(await uploadRetry(item.small, item.uid, label));
+      } catch (e) {
+        if (e.status !== 400 && e.status !== 413) throw e;  // de foto zelf deugt niet: de rest gaat door
+        skipped.push(`${item.file.name}: ${e.message}`);
+      }
+      queue.shift(); done++;
     }
-    $("melding").textContent = "";
+    $("melding").textContent = skipped.length ? "Niet gebruikt: " + skipped.join("; ") : "";
   } catch (e) {
-    $("melding").textContent = "Upload mislukt: " + e.message;
-    queue.length = 0;
+    // netwerk blijft weg, datamap vol, scan wordt verwerkt: de foto's blijven in de wachtrij
+    $("melding").textContent = `Upload gestopt: ${e.message}.` + (queue.length ? ` ${queue.length} foto('s) wachten.` : "");
+    $("hervat").hidden = queue.length === 0;
   } finally { busy = false; $("voortgang").hidden = true; }
 }
+
+$("hervat").addEventListener("click", () => addFiles([]));
 
 for (const id of ["kies", "maak"]) {
   $(id).addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; addFiles(fs); });
@@ -375,7 +416,17 @@ async function resume(id) {
 }
 
 const label = { upload: "foto's verzamelen", wachtrij: "in de wachtrij", bezig: "bezig", klaar: "klaar", fout: "fout" };
+// gebruik van de datamap (V24, v0.15): de server weigert foto's als hij vol is
+async function loadStorage() {
+  try {
+    const o = (await api("GET", "api/info")).opslag;
+    if (o) $("opslag").textContent = `Datamap: ${o.gebruikt_gb.toFixed(1)} GB in gebruik, ${o.vrij_gb.toFixed(0)} GB vrij op de schijf` +
+      (o.max_gb != null ? `, grens ${o.max_gb} GB` : "");
+  } catch (e) {}
+}
+
 async function load() {
+  loadStorage();
   try {
     const r = await fetch("api/scans");
     if (!r.ok) { $("scans").textContent = r.status === 401 ? "Geen toegang: open de link met ?token=… uit de terminal." : "Fout " + r.status; return; }
@@ -394,6 +445,7 @@ async function load() {
       } else if (s.log && s.log.length) {
         body = `<span class="muted">${esc(s.log[s.log.length - 1])}</span>`;
       }
+      if (s.fotos_opgeruimd) body += `<div class="muted">foto's opgeruimd op ${new Date(s.fotos_opgeruimd * 1000).toLocaleDateString("nl-NL")}</div>`;
       const imgs = (s.debug || []).filter((n) => /\.(jpg|png)$/.test(n));
       if (imgs.length) {
         body += `<details><summary>debugbeelden (${imgs.length})</summary><div class="thumbs">` +
@@ -590,7 +642,7 @@ async function liveCapture() {
     if (!blob) { blob = await grab(4096, 0.92, document.createElement("canvas")); live.mode = "beeld"; }
     if (!blob) throw new Error("geen beeld");
     const type = blob.type || "image/jpeg", ext = type === "image/png" ? "png" : "jpg";
-    const data = await upload(await shrink(new File([blob], `live_${Date.now()}.${ext}`, { type })));
+    const data = await uploadRetry(await shrink(new File([blob], `live_${Date.now()}.${ext}`, { type })), newUid(), "Foto");
     render(data);
     const nieuw = (data.nieuw || [])[0];
     if (nieuw && nieuw.verdict === "onbruikbaar")

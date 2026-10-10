@@ -1,4 +1,4 @@
-"""Opdrachtregel: `camtocad mat | controleer | scan | valideer | demo | server | stresstest`."""
+"""Opdrachtregel: `camtocad mat | controleer | scan | valideer | demo | server | opruimen | doctor | stresstest`."""
 
 from __future__ import annotations
 
@@ -50,13 +50,30 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("demo", help="synthetische testscan renderen en verwerken (zonder camera)")
     p.add_argument("--uit", default="camtocad-demo")
 
-    p = sub.add_parser("server", help="lokale webserver: foto's uploaden vanaf je telefoon via wifi")
-    p.add_argument("--host", default="0.0.0.0")
+    p = sub.add_parser("server", help="lokale webserver: foto's uploaden vanaf je telefoon via wifi (met --lan)")
+    p.add_argument("--lan", action="store_true",
+                   help="bereikbaar op het lokale netwerk (wifi), voor je telefoon; zonder: alleen op deze pc")
+    p.add_argument("--host", default=None, help="adres om op te luisteren (standaard 127.0.0.1, met --lan 0.0.0.0)")
     p.add_argument("--poort", type=int, default=8000)
     p.add_argument("--data", default=str(Path.home() / "camtocad-data"))
     p.add_argument("--token", default=None, help="toegangscode (standaard: willekeurig gegenereerd)")
     p.add_argument("--https-poort", type=int, default=8443,
                    help="poort voor https, nodig voor de camera op de telefoon (live begeleiding); 0: geen https")
+    p.add_argument("--max-gb", type=float, default=None, metavar="GB",
+                   help="grens voor de datamap: daarboven weigert de server nieuwe foto's")
+    p.add_argument("--bewaar-fotos", type=float, default=None, metavar="DAGEN",
+                   help="foto's van scans die zo lang klaar zijn opruimen (model, rapport en metingen blijven)")
+
+    p = sub.add_parser("opruimen", help="foto's van oude, verwerkte scans in de datamap weghalen")
+    p.add_argument("--data", default=str(Path.home() / "camtocad-data"))
+    p.add_argument("--ouder-dan", type=float, required=True, metavar="DAGEN",
+                   help="scans die minstens zo lang klaar (of mislukt) zijn")
+    p.add_argument("--proef", action="store_true", help="alleen tonen wat er weg zou gaan")
+
+    p = sub.add_parser("doctor", help="de installatie controleren (pakketten, OpenCV, CadQuery, geheugen, schijf)")
+    p.add_argument("--data", default=str(Path.home() / "camtocad-data"),
+                   help="map om te controleren op schrijfbaarheid en vrije ruimte (standaard: de datamap van de server)")
+    p.add_argument("--snel", action="store_true", help="zonder de trage controles (matdetectie en CadQuery)")
 
     p = sub.add_parser("stresstest", help="synthetische stresstests draaien en met de waarheid vergelijken "
                                           "(voor ontwikkelaars, zie docs/STRESSTEST.md)")
@@ -115,7 +132,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Vergelijken met de werkelijke maten: camtocad valideer {args.uit}")
         elif args.cmd == "server":
             from .server.app import serve
-            serve(args.host, args.poort, Path(args.data), args.token, args.https_poort or None)
+            host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+            serve(host, args.poort, Path(args.data), args.token, args.https_poort or None, max_gb=args.max_gb,
+                  keep_days=args.bewaar_fotos)
+        elif args.cmd == "opruimen":
+            from .server.app import JobStore
+            done = JobStore(Path(args.data)).cleanup(args.ouder_dan, dry_run=args.proef)
+            total = sum(b for _, b in done) / 1024 ** 3
+            for job_id, b in done:
+                print(f"  {job_id}: {b / 1024 ** 2:.0f} MB foto's")
+            verb = "zou vrijkomen" if args.proef else "vrijgekomen"
+            print(f"{len(done)} scan(s), {total:.2f} GB {verb}" if done else "Niets op te ruimen.")
+        elif args.cmd == "doctor":
+            from .doctor import FOUT, report_lines, run_checks
+            checks = run_checks(Path(args.data), quick=args.snel)
+            print("\n".join(report_lines(checks)))
+            return 1 if any(c.status == FOUT for c in checks) else 0
         elif args.cmd == "stresstest":
             from . import stresstest
             if args.lijst:
@@ -136,6 +168,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Fout: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+def app_main() -> int:
+    """Startpunt van de installer (V23, v0.15; PyApp). Met argumenten gewoon `camtocad`. Zonder argumenten (het
+    programma is dubbelgeklikt) de webserver op het lokale netwerk, zodat je meteen met je telefoon kunt
+    fotograferen; stopt hij met een fout, dan blijft het venster open tot Enter."""
+    if sys.argv[1:]:
+        return main(sys.argv[1:])
+    print("Cam-to-CAD: de webserver start. Open de link hieronder op je telefoon (zelfde wifi), of scan de QR-code.")
+    print("Andere opdrachten: start dit programma in een opdrachtvenster met de opdracht erachter, bijvoorbeeld "
+          "'doctor' (de installatie controleren) of '--help'.\n")
+    try:
+        code = main(["server", "--lan"])
+    except Exception as e:  # noqa: BLE001 - het venster mag niet stil verdwijnen
+        print(f"Fout: {e}", file=sys.stderr)
+        code = 1
+    if code:
+        try:
+            input("\nDruk op Enter om te sluiten...")
+        except EOFError:
+            pass
+    return code
 
 
 def _ruler_scale(values: list[float] | None) -> tuple[float, float] | None:

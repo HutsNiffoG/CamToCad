@@ -302,3 +302,102 @@ def test_measurements_are_compared_and_shared_without_photos(tmp_path):
     assert c.get("/api/meetset").json()["samenvatting"]["maten"] == 0
     c.delete(f"/api/scans/{job}/maten")
     assert c.get(f"/api/scans/{job}/maten").json()["referentie"] is None
+
+
+# --- V24 (v0.15): foto's op inhoud, opnieuw sturen, opslaggrens, opruimen, LAN ---------------------------------
+
+
+def png() -> bytes:
+    return cv2.imencode(".png", np.full((20, 30), 128, np.uint8))[1].tobytes()
+
+
+def test_photos_are_recognised_by_their_content(tmp_path):
+    """Niet de extensie telt maar de inhoud: een PNG die .jpg heet, wordt .png; een HEIC die .jpg heet, .heic;
+    en wat geen foto is, komt er niet in."""
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    job = c.post("/api/scans", data={"mat": "auto"}).json()["id"]
+    heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 64
+    for name, data in (("a.jpg", png()), ("b.jpg", heic), ("c.jpg", b"<html>geen foto</html>"), ("d.jpeg", jpg())):
+        r = c.post(f"/api/scans/{job}/fotos", files=[("fotos", (name, data, "image/jpeg"))])
+        assert r.status_code == 200
+    saved = sorted(p.name for p in (tmp_path / job / "fotos").iterdir())
+    assert saved == ["foto_0000.png", "foto_0001.heic", "foto_0002.jpeg"], saved
+    assert c.get(f"/api/scans/{job}").json()["photos"] == 3
+
+
+def test_a_photo_sent_again_with_the_same_id_is_kept_once(tmp_path):
+    """Na een netwerkfout stuurt de pagina dezelfde foto met hetzelfde id opnieuw: geen tweede kopie."""
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    job = c.post("/api/scans", data={"mat": "auto"}).json()["id"]
+    send = lambda uid: c.post(f"/api/scans/{job}/fotos", files=[("fotos", ("IMG_1.jpg", jpg(), "image/jpeg"))],
+                              data={"uid": uid}).json()
+    first, again, other = send("upload-0001"), send("upload-0001"), send("upload-0002")
+    assert first["nieuw"][0]["name"] == again["nieuw"][0]["name"] == "foto_0000.jpg"
+    assert again["nieuw"][0]["al_ontvangen"] and "al_ontvangen" not in first["nieuw"][0]
+    assert other["nieuw"][0]["name"] == "foto_0001.jpg"
+    assert c.get(f"/api/scans/{job}").json()["photos"] == 2
+
+
+def test_a_full_data_dir_refuses_new_photos(tmp_path):
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner, max_gb=1e-6))
+    c.get("/?token=geheim")
+    info = c.get("/api/info").json()["opslag"]
+    assert info["max_gb"] == 0.0 and info["vrij_gb"] > 0
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"mat": "A4"})
+    assert r.status_code == 507 and "datamap is vol" in r.json()["detail"]
+    assert c.get("/api/scans").json() == []
+
+
+def test_cleanup_removes_only_the_photos_of_old_finished_scans(tmp_path):
+    import time
+
+    from camtocad import cli
+    from camtocad.server.app import JobStore
+
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    files = [("fotos", (f"IMG_{i}.jpg", jpg(), "image/jpeg")) for i in range(3)]
+    old, new = (c.post("/api/scans", files=files, data={"mat": "A4"}).json()["id"] for _ in range(2))
+    store = JobStore(tmp_path)
+    store.update(old, finished=time.time() - 40 * 86400)
+    assert cli.main(["opruimen", "--data", str(tmp_path), "--ouder-dan", "30", "--proef"]) == 0
+    assert len(list((tmp_path / old / "fotos").iterdir())) == 3  # proef: niets weg
+    done = store.cleanup(30)
+    assert [j for j, _ in done] == [old] and done[0][1] > 0
+    assert not list((tmp_path / old / "fotos").iterdir()) and len(list((tmp_path / new / "fotos").iterdir())) == 3
+    status = c.get(f"/api/scans/{old}").json()
+    assert status["state"] == "klaar" and status["photos"] == 0 and status["fotos_opgeruimd"]
+    assert c.get(f"/scans/{old}/report.html").status_code == 200  # het resultaat blijft
+    assert store.cleanup(30) == []
+
+
+def test_the_mat_pdf_is_written_once_per_version(tmp_path):
+    from camtocad import __version__
+
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=fake_runner))
+    c.get("/?token=geheim")
+    first, second = c.get("/mat/A4.pdf"), c.get("/mat/A4.pdf")
+    assert first.content == second.content and first.content.startswith(b"%PDF")
+    folder = tmp_path / "_mat" / __version__
+    assert sorted(p.name for p in folder.iterdir()) == ["kalibratiemat_A4.json", "kalibratiemat_A4.pdf",
+                                                         "kalibratiemat_A4.png"]  # geen tijdelijke bestanden
+
+
+def test_the_server_is_only_on_the_network_with_lan(monkeypatch, tmp_path):
+    import sys
+
+    import camtocad.server.app as server
+    from camtocad import cli
+
+    seen = []
+    monkeypatch.setattr(server, "serve", lambda host, *a, **k: seen.append((host, k)))
+    cli.main(["server", "--data", str(tmp_path)])
+    cli.main(["server", "--data", str(tmp_path), "--lan", "--max-gb", "20", "--bewaar-fotos", "30"])
+    assert seen[0][0] == "127.0.0.1" and seen[1][0] == "0.0.0.0"
+    assert seen[1][1] == {"max_gb": 20.0, "keep_days": 30.0}
+    # het programma van de installer, dubbelgeklikt (zonder argumenten): meteen de server op het netwerk
+    monkeypatch.setattr(sys, "argv", ["camtocad"])
+    monkeypatch.setattr(cli, "main", lambda argv=None: seen.append(argv) or 0)
+    assert cli.app_main() == 0 and seen[-1] == ["server", "--lan"]

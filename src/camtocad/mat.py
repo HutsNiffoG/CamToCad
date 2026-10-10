@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 from . import __version__
-from .imgio import imwrite
+from .imgio import imwrite, write_atomic
 from .pdf import PdfCanvas
 
 Rect = tuple[float, float, float, float, float]  # x, y, breedte, hoogte, grijswaarde (0 = zwart)
@@ -395,5 +395,5 @@ def write_mat(spec: str | MatSpec, out_dir: str | Path) -> dict[str, Path]:
     paths = {"pdf": out / f"{stem}.pdf", "png": out / f"{stem}.png", "json": out / f"{stem}.json"}
     write_pdf(spec, paths["pdf"])
     imwrite(paths["png"], rasterize_page(spec))
-    paths["json"].write_text(json.dumps(descriptor(spec), indent=2), encoding="utf-8")
+    write_atomic(paths["json"], json.dumps(descriptor(spec), indent=2).encode("utf-8"))
     return paths

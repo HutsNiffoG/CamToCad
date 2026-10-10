@@ -108,13 +108,15 @@ def _crop(a: np.ndarray, at: tuple[int, int], y0: int, y1: int, x0: int, x1: int
     return out
 
 
-def _scan_quads(q: np.ndarray, h: int, w: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _scan_quads(q: np.ndarray, h, w, base=0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pixelmiddens binnen convexe vierhoeken (Q, 4, 2), in pixelcoördinaten van de ROI (middens op gehele
     getallen, zoals OpenCV): per vierhoek en rij de kolommen c0..c1. Exact, ook voor een vierhoek die smaller
-    is dan een pixel (V29)."""
+    is dan een pixel (V29). `h`, `w` en `base` mogen per vierhoek verschillen (meer foto's tegelijk, zie
+    _silhouette_runs_many): de rij die terugkomt is dan `base` + de rij in de eigen ROI."""
     empty = np.zeros(0, np.int64)
     if not len(q):
         return empty, empty, empty
+    h, w, base = (np.broadcast_to(np.asarray(a, np.int64), (len(q),)) for a in (h, w, base))
     ya, yb = q[..., 1], q[:, [1, 2, 3, 0], 1]
     xa, xb = q[..., 0], q[:, [1, 2, 3, 0], 0]
     dy = yb - ya
@@ -137,26 +139,31 @@ def _scan_quads(q: np.ndarray, h: int, w: int) -> tuple[np.ndarray, np.ndarray, 
     xl = np.where(cross, x, np.inf).min(axis=1)
     xr = np.where(cross, x, -np.inf).max(axis=1)
     c0 = np.maximum(np.ceil(xl - 1e-9), 0)
-    c1 = np.minimum(np.floor(xr + 1e-9), w - 1)
+    c1 = np.minimum(np.floor(xr + 1e-9), w[qi] - 1)
     ok = c1 >= c0  # ook False als de rij geen rand snijdt (inf)
-    return rows[ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
+    return (rows + base[qi])[ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
 
 
-def _scan_polys(polys: list[np.ndarray], h: int, w: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _scan_polys(polys: list[np.ndarray], h, w, base=0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Als _scan_quads, voor willekeurige (ook holle) polygonen: per polygoon en rij de snijpunten met de rij
-    (halfopen regel op de hoekpunten), gesorteerd en per paar een reeks kolommen (even-oneven)."""
+    (halfopen regel op de hoekpunten), gesorteerd en per paar een reeks kolommen (even-oneven). `h`, `w` en
+    `base` mogen per polygoon verschillen (zie _scan_quads)."""
     empty = np.zeros(0, np.int64)
-    polys = [p for p in polys if len(p) >= 3]
-    if not polys:
+    h, w, base = (np.broadcast_to(np.asarray(a, np.int64), (len(polys),)) for a in (h, w, base))
+    use = [k for k, p in enumerate(polys) if len(p) >= 3]
+    if not use:
         return empty, empty, empty
+    polys = [polys[k] for k in use]
+    h, w, base = h[use], w[use], base[use]
     sizes = np.array([len(p) for p in polys])
+    pid = np.repeat(np.arange(len(polys)), sizes)  # per rand: welke polygoon
     P = np.vstack(polys).astype(float)
     first = np.repeat(np.cumsum(sizes) - sizes, sizes)
     nxt = np.arange(len(P)) + 1
     nxt = np.where(nxt - first >= np.repeat(sizes, sizes), first, nxt)
     ya, yb, xa, xb = P[:, 1], P[nxt, 1], P[:, 0], P[nxt, 0]
     r0 = np.maximum(np.ceil(np.minimum(ya, yb)), 0).astype(np.int64)  # halfopen: laag <= r < hoog
-    r1 = np.minimum(np.ceil(np.maximum(ya, yb)) - 1, h - 1).astype(np.int64)
+    r1 = np.minimum(np.ceil(np.maximum(ya, yb)) - 1, h[pid] - 1).astype(np.int64)
     n = np.maximum(r1 - r0 + 1, 0)
     total = int(n.sum())
     if not total:
@@ -164,12 +171,12 @@ def _scan_polys(polys: list[np.ndarray], h: int, w: int) -> tuple[np.ndarray, np
     e = np.repeat(np.arange(len(P)), n)
     rows = np.repeat(r0, n) + (np.arange(total) - np.repeat(np.cumsum(n) - n, n))
     x = xa[e] + (rows - ya[e]) / (yb[e] - ya[e]) * (xb[e] - xa[e])
-    order = np.lexsort((x, rows, np.repeat(np.arange(len(polys)), sizes)[e]))
-    x, rows = x[order], rows[order]
+    order = np.lexsort((x, rows, pid[e]))
+    x, rows, pe = x[order], rows[order], pid[e][order]
     c0 = np.maximum(np.ceil(x[0::2] - 1e-9), 0)
-    c1 = np.minimum(np.floor(x[1::2] + 1e-9), w - 1)
+    c1 = np.minimum(np.floor(x[1::2] + 1e-9), w[pe[0::2]] - 1)
     ok = c1 >= c0
-    return rows[0::2][ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
+    return (rows[0::2] + base[pe[0::2]])[ok], c0[ok].astype(np.int64), c1[ok].astype(np.int64)
 
 
 def _fill_runs(mask: np.ndarray, rows: np.ndarray, c0: np.ndarray, c1: np.ndarray, value: int = 1) -> None:
@@ -230,34 +237,24 @@ def _union(rows: np.ndarray, c0: np.ndarray, c1: np.ndarray):
 def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np.ndarray]):
     """Het silhouet als losse reeksen (rij, c0, c1) per rij: de vereniging van onder- en bovenvlak en de wanden,
     min de doorkijk door gaten, sleuven en uitsparingen. Alles volgens de pixelmiddenregel (zie render)."""
-    h, w = v.fg.shape
-    off = np.array([v.x0, v.y0], float)
-    cam = v.pose.center
-    faces = []
-    for stack in geom:
-        # Alleen de vlakken die naar de camera kijken: de eerste snijding van een kijkstraal met het onderdeel
-        # ligt altijd op zo'n vlak, dus hun vereniging is precies het silhouet. Het ondervlak en de achterkant
-        # vallen zo weg. De wanden en de banden van een afschuining of afronding tussen twee niveaus zijn
-        # (vlakke) vierhoeken; de ringen lopen tegen de klok in, dus (C - A) x (D - B) wijst naar buiten.
-        n_lev, n = stack.shape[:2]
-        uv, _ = project(stack.reshape(-1, 3), v.pose, K)
-        uv = uv.reshape(n_lev, n, 2) - off
-        if cam[2] > stack[-1, 0, 2]:
-            faces.append(_scan_polys([uv[-1]], h, w))
-        nxt = np.r_[1:n, 0]
-        for j in range(n_lev - 1):
-            a, d = stack[j], stack[j + 1]
-            u, t = d[nxt] - a, d - a[nxt]  # diagonalen C - A en D - B
-            nrm = np.column_stack([u[:, 1] * t[:, 2] - u[:, 2] * t[:, 1], u[:, 2] * t[:, 0] - u[:, 0] * t[:, 2],
-                                   u[:, 0] * t[:, 1] - u[:, 1] * t[:, 0]])
-            front = np.flatnonzero(((cam - a) * nrm).sum(axis=1) > 0)
-            if len(front):
-                lo, hi = uv[j], uv[j + 1]
-                quads = np.stack([lo[front], lo[nxt[front]], hi[nxt[front]], hi[front]], axis=1)
-                faces.append(_scan_quads(quads, h, w))
-    if not faces:
-        return _EMPTY, _EMPTY, _EMPTY
-    solid = _union(*(np.concatenate(parts) for parts in zip(*faces)))
+    return _silhouette_runs_many(part, K, [v], geom)
+
+
+def _row_bases(views: list) -> np.ndarray:
+    """Per foto de eerste rij in de gezamenlijke rijnummering van _silhouette_runs_many (de ROI's onder elkaar)."""
+    return np.concatenate([[0], np.cumsum([v.fg.shape[0] for v in views])]).astype(np.int64)
+
+
+def _silhouette_runs_many(part: Part2p5D, K: np.ndarray, views: list, geom: list[np.ndarray]):
+    """_silhouette_runs voor een reeks foto's tegelijk (v0.15): de ROI's liggen in één rijnummering onder elkaar
+    (_row_bases), zodat vereniging en doorkijk in één keer gaan. Per pixel precies dezelfde regels; alleen de
+    overhead per foto valt weg (de energie wordt zo'n ~1150 keer per scan berekend, over 46 foto's). Geeft
+    (rij, c0, c1), gesorteerd op rij, met rij = rijbegin van de foto + de rij in haar ROI."""
+    nv = len(views)
+    hs = np.array([v.fg.shape[0] for v in views], np.int64)
+    ws = np.array([v.fg.shape[1] for v in views], np.int64)
+    base = _row_bases(views)[:-1]
+    cams = np.array([v.pose.center for v in views], float)
     # doorkijk: binnen de projectie van zowel de boven- als de onderrand van een gat; bij een verzinking (V16) is
     # de bovenrand van het doorgaande gat de onderkant van de kegel (de kegel zelf wordt naar boven toe breder), bij
     # een kamerboring de bodem van de kamer, en dan moet een kijkstraal ook door de kamer zelf (haar rand aan het
@@ -268,7 +265,7 @@ def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np
     chamber = [circle_polygon((hl.x, hl.y), hl.cb / 2, 48) if hl.cb > 0 else None for hl in part.holes]
     rings += list(part.cutouts)
     rings += [s.outline() for s in part.slots]
-    through = []
+    hole_loops = []
     for k, r2 in enumerate(rings):
         if r2 is None:
             continue
@@ -277,10 +274,54 @@ def _silhouette_runs(part: Part2p5D, K: np.ndarray, v: "ViewData", geom: list[np
         loops = [(r2, z_top - (below[k] if k < len(below) else 0.0)), (r2, 0.0)]
         if k < len(chamber) and chamber[k] is not None:
             loops.append((chamber[k], z_top))
-        uv2, _ = project(np.vstack([np.column_stack([r, np.full(len(r), z)]) for r, z in loops]), v.pose, K)
-        uv2 = uv2 - off
-        cuts = np.cumsum([0] + [len(r) for r, _ in loops])
-        rt, a, b, cov = _cover([_scan_polys([uv2[cuts[j]:cuts[j + 1]]], h, w) for j in range(len(loops))])
+        hole_loops.append([np.column_stack([r, np.full(len(r), z)]) for r, z in loops])
+    # alle punten van het model in één projectie per foto: de stapels ringen en de randen van de gaten
+    parts_3d = [stack.reshape(-1, 3) for stack in geom] + [p for loops in hole_loops for p in loops]
+    pts = np.vstack(parts_3d) if parts_3d else np.zeros((0, 3))
+    uv_all = np.empty((nv, len(pts), 2))
+    for i, v in enumerate(views):
+        uv_all[i] = project(pts, v.pose, K)[0] - np.array([v.x0, v.y0], float)
+    polys, pview, quads, qview = [], [], [], []
+    at = 0
+    for stack in geom:
+        # Alleen de vlakken die naar de camera kijken: de eerste snijding van een kijkstraal met het onderdeel
+        # ligt altijd op zo'n vlak, dus hun vereniging is precies het silhouet. Het ondervlak en de achterkant
+        # vallen zo weg. De wanden en de banden van een afschuining of afronding tussen twee niveaus zijn
+        # (vlakke) vierhoeken; de ringen lopen tegen de klok in, dus (C - A) x (D - B) wijst naar buiten.
+        n_lev, n = stack.shape[:2]
+        uv = uv_all[:, at:at + n_lev * n].reshape(nv, n_lev, n, 2)
+        at += n_lev * n
+        for i in np.flatnonzero(cams[:, 2] > stack[-1, 0, 2]):
+            polys.append(uv[i, -1])
+            pview.append(i)
+        nxt = np.r_[1:n, 0]
+        for j in range(n_lev - 1):
+            a, d = stack[j], stack[j + 1]
+            u, t = d[nxt] - a, d - a[nxt]  # diagonalen C - A en D - B
+            nrm = np.column_stack([u[:, 1] * t[:, 2] - u[:, 2] * t[:, 1], u[:, 2] * t[:, 0] - u[:, 0] * t[:, 2],
+                                   u[:, 0] * t[:, 1] - u[:, 1] * t[:, 0]])
+            vi, fi = np.nonzero(((cams[:, None, :] - a[None]) * nrm[None]).sum(axis=2) > 0)
+            if len(vi):
+                quads.append(np.stack([uv[vi, j, fi], uv[vi, j, nxt[fi]], uv[vi, j + 1, nxt[fi]], uv[vi, j + 1, fi]],
+                                      axis=1))
+                qview.append(vi)
+    faces = []
+    if polys:
+        pv = np.array(pview, np.int64)
+        faces.append(_scan_polys(polys, hs[pv], ws[pv], base[pv]))
+    if quads:
+        qv = np.concatenate(qview)
+        faces.append(_scan_quads(np.concatenate(quads), hs[qv], ws[qv], base[qv]))
+    if not faces:
+        return _EMPTY, _EMPTY, _EMPTY
+    solid = _union(*(np.concatenate(parts) for parts in zip(*faces)))
+    through = []
+    for loops in hole_loops:
+        groups = []
+        for p in loops:
+            groups.append(_scan_polys(list(uv_all[:, at:at + len(p)]), hs, ws, base))
+            at += len(p)
+        rt, a, b, cov = _cover(groups)
         inside = np.all(cov > 0, axis=1)
         through.append((rt[inside], a[inside], b[inside]))
     if not through:
@@ -369,12 +410,18 @@ def _mismatch(part: Part2p5D, K: np.ndarray, v: ViewData, geom: list[np.ndarray]
 
 
 def energy(part: Part2p5D, K: np.ndarray, views: list[ViewData], w_unknown: float = 0.25) -> float:
-    # Serieel: per foto is het vooral Python-werk aan kleine arrays; threads maakten het twee keer trager.
-    geom = solids(part)
+    # Alle foto's in één keer (_silhouette_runs_many, v0.15); per foto alleen het tellen langs de reeksen. Threads
+    # hielpen niet: per foto was het vooral Python-werk aan kleine arrays, en dat maakten ze twee keer trager.
+    keys, c0, c1 = _silhouette_runs_many(part, K, views, solids(part))
+    bases = _row_bases(views)
+    cut = np.searchsorted(keys, bases)
     bg = unk = fg = 0
-    for v in views:
-        a, b, c = _mismatch(part, K, v, geom)
-        bg, unk, fg = bg + a, unk + b, fg + c
+    for i, v in enumerate(views):
+        rows, a, e = keys[cut[i]:cut[i + 1]] - bases[i], c0[cut[i]:cut[i + 1]], c1[cut[i]:cut[i + 1]] + 1
+        _, s_bg, s_unk, s_fg, n_fg = v.sums()
+        bg += int((s_bg[rows, e] - s_bg[rows, a]).sum())
+        unk += int((s_unk[rows, e] - s_unk[rows, a]).sum())
+        fg += n_fg - int((s_fg[rows, e] - s_fg[rows, a]).sum())
     return bg + w_unknown * unk + fg
 
 

@@ -18,6 +18,8 @@ op), zie `split_chroma`.
 from __future__ import annotations
 
 import math
+import os
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -193,9 +195,44 @@ def split_chroma(img: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
     return gray, chroma.astype(np.float16)
 
 
+# HEIF-varianten van telefoons (het merk in de ftyp-box): HEIC-foto's van iPhones en Android-toestellen
+_HEIF_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1"}
+
+
+def sniff_image(head: bytes) -> str | None:
+    """Het beeldformaat aan de eerste bytes (magic bytes, V24, v0.15), als extensie (".jpg", ".heic", ...), of None
+    als het geen foto is die de verwerking kan lezen. De extensie in de bestandsnaam zegt niet altijd de waarheid:
+    een HEIC-foto heet soms .jpg, en een upload kan iets heel anders zijn."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head[:4] in (b"II*\x00", b"MM\x00*"):
+        return ".tif"
+    if head[:2] == b"BM" and len(head) >= 14:
+        return ".bmp"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    if head[4:8] == b"ftyp" and head[8:12] in _HEIF_BRANDS:
+        return ".heic"
+    return None
+
+
+def write_atomic(path: str | Path, data: bytes) -> None:
+    """Schrijft een bestand in één keer (V24, v0.15): eerst naast het doel, dan hernoemd. Wie het tegelijk leest
+    (de webserver, een tweede verzoek om dezelfde mat), ziet zo nooit een half bestand."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def imwrite(path: str | Path, img: np.ndarray, params: list[int] | None = None) -> bool:
-    """Schrijft een beeld; het formaat volgt uit de extensie (.png, .jpg, ...)."""
+    """Schrijft een beeld (atomisch); het formaat volgt uit de extensie (.png, .jpg, ...)."""
     ok, buf = cv2.imencode(Path(path).suffix or ".png", img, params or [])
     if ok:
-        buf.tofile(str(path))
+        write_atomic(path, buf.tobytes())
     return bool(ok)

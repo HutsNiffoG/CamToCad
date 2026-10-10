@@ -75,3 +75,56 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
     assert len(photos) == 1
     check = json.loads((job / "controle.json").read_text())["fotos"][photos[0]]
     assert check["mat"] == "A4" and check["verdict"] == "goed", check["notes"]
+
+
+def test_an_interrupted_upload_is_sent_again_without_a_double(tmp_path):
+    """V24 (v0.15): de eerste poging om een foto te uploaden breekt af (de server heeft hem wel), de tweede komt
+    niet aan (netwerkfout); de pagina probeert het opnieuw met hetzelfde id, en de foto staat er precies één keer."""
+    import cv2
+
+    data = tmp_path / "data"
+    app = create_app(data, token="t")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started and thread.is_alive():
+        time.sleep(0.05)
+    photo = tmp_path / "IMG_1.jpg"
+    photo.write_bytes(cv2.imencode(".jpg", np.full((60, 80), 128, np.uint8))[1].tobytes())
+    tries = []
+    try:
+        with sync_api.sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(executable_path=os.environ.get("CTC_CHROMIUM") or None)
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"Chromium niet beschikbaar: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+
+            def flaky(route):
+                tries.append(route.request.post_data_buffer)
+                if len(tries) == 1:  # de server krijgt de foto, maar het antwoord gaat verloren
+                    route.fetch()
+                    route.abort("connectionreset")
+                elif len(tries) == 2:  # verbinding weg
+                    route.abort("internetdisconnected")
+                else:
+                    route.continue_()
+
+            page.route("**/api/scans/*/fotos", flaky)
+            page.goto(f"http://127.0.0.1:{port}/?token=t")
+            page.uncheck("#verklein")
+            page.set_input_files("#kies", str(photo))
+            page.wait_for_function("document.querySelectorAll('#lijst .photo').length === 1", timeout=60000)
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(10)
+    import re
+
+    uids = {re.search(rb'name="uid"\r\n\r\n([^\r]+)', bytes(t)).group(1) for t in tries}
+    assert len(tries) == 3 and len(uids) == 1  # drie keer dezelfde foto met hetzelfde id
+    job = next(p for p in data.iterdir() if p.is_dir() and (p / "status.json").exists())
+    assert [p.name for p in (job / "fotos").iterdir()] == ["foto_0000.jpg"]

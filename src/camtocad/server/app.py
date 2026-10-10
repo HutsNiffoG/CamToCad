@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import queue
 import re
 import secrets
@@ -34,6 +35,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from .. import __version__, preflight, validate
 from . import qr
+from ..imgio import sniff_image
 from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
 
@@ -46,7 +48,14 @@ MAX_BYTES = 40 * 1024 * 1024
 MAX_REQUEST = 2 * 1024 ** 3  # hele upload; losse bestanden blijven onder MAX_BYTES
 MAX_LIVE_BYTES = 4 * 1024 * 1024  # één beeld van de livecamera (de pagina stuurt ~960 px, ~100 kB)
 JOB_ID = re.compile(r"^[0-9a-f]{12}$")
+UPLOAD_ID = re.compile(r"^[\w.-]{8,64}$")  # door de pagina gekozen id per foto: opnieuw sturen geeft geen dubbele
 BUSY = ("wachtrij", "bezig")
+MIN_FREE_BYTES = 1024 ** 3  # zoveel schijfruimte blijft altijd vrij (V24, v0.15)
+USAGE_TTL = 60.0  # s: zo lang geldt een telling van de datamap
+
+
+class StorageFull(Exception):
+    """De datamap is vol (--max-gb), of de schijf bijna."""
 
 
 def _mat_choice(mat: str) -> str:
@@ -72,9 +81,12 @@ def _rulers(meetlijn: float | None, meetlijn_y: float | None) -> list[float] | N
 class JobStore:
     """Scans op schijf: <data>/<id>/fotos, <data>/<id>/resultaat, status.json en controle.json."""
 
-    def __init__(self, root: Path, runner=run_scan):
+    def __init__(self, root: Path, runner=run_scan, max_bytes: int | None = None):
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
+        self.max_bytes = max_bytes  # grens voor de hele datamap (--max-gb), of None
+        self._usage: tuple[float, int] | None = None  # (tijd, bytes) van de laatste telling
+        self._pending: dict[tuple[str, str], str] = {}  # (scan, upload-id) -> foto die nu binnenkomt
         self.queue: queue.Queue[str] = queue.Queue()
         self.runner = runner
         self._locks: dict[str, threading.Lock] = {}
@@ -182,26 +194,113 @@ class JobStore:
 
     # --- foto's en controle ---------------------------------------------------------------
 
-    def save_photo(self, job_id: str, filename: str, stream) -> Path | None:
-        """Slaat één upload op als foto_NNNN.ext; None als het geen foto is (op extensie)."""
-        ext = Path(filename or "").suffix.lower()
-        if ext not in IMAGE_EXT:
-            return None
+    # --- opslag (V24, v0.15) -----------------------------------------------------------------
+
+    def usage(self, refresh: bool = False) -> int:
+        """Bytes in de datamap; een telling geldt USAGE_TTL seconden (bij elke upload tellen is te traag)."""
+        now = time.monotonic()
+        if refresh or self._usage is None or now - self._usage[0] > USAGE_TTL:
+            total = 0
+            for dirpath, _, files in os.walk(self.root):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, f))
+                    except OSError:
+                        pass
+            self._usage = (now, total)
+        return self._usage[1]
+
+    def storage(self) -> dict:
+        """Gebruik van de datamap en vrije ruimte op de schijf, voor /api/info."""
+        free = shutil.disk_usage(self.root).free
+        return {"gebruikt_gb": round(self.usage() / 1024 ** 3, 2), "vrij_gb": round(free / 1024 ** 3, 1),
+                "max_gb": None if self.max_bytes is None else round(self.max_bytes / 1024 ** 3, 1)}
+
+    def ensure_space(self, incoming: int = MAX_BYTES) -> None:
+        """StorageFull als er geen `incoming` bytes meer bij kunnen: de grens van de datamap, of de schijf bijna vol."""
+        if self.max_bytes is not None and self.usage() + incoming > self.max_bytes:
+            raise StorageFull(f"De datamap is vol ({self.usage() / 1024 ** 3:.1f} van {self.max_bytes / 1024 ** 3:.1f} "
+                              "GB): verwijder oude scans, of start de server met een grotere --max-gb")
+        if shutil.disk_usage(self.root).free - incoming < MIN_FREE_BYTES:
+            raise StorageFull("De schijf is bijna vol: maak ruimte vrij, of verwijder oude scans")
+
+    def _added(self, n: int) -> None:
+        if self._usage is not None:
+            self._usage = (self._usage[0], self._usage[1] + n)
+
+    def cleanup(self, days: float, dry_run: bool = False) -> list[tuple[str, int]]:
+        """Haalt de foto's weg van scans die al `days` dagen klaar (of mislukt) zijn; het model, het rapport, de
+        controle van de foto's en de schuifmaatmetingen blijven. Geeft per scan (id, vrijgekomen bytes)."""
+        cutoff = time.time() - days * 86400
+        out = []
+        for st in self.list():
+            if st.get("state") not in ("klaar", "fout") or (st.get("finished") or st.get("created") or 0) > cutoff:
+                continue
+            folder = self.root / st["id"] / "fotos"
+            photos = [f for f in folder.iterdir() if f.is_file()] if folder.is_dir() else []
+            size = sum(f.stat().st_size for f in photos)
+            if not photos:
+                continue
+            out.append((st["id"], size))
+            if dry_run:
+                continue
+            with self.lock(st["id"]):
+                for f in photos:
+                    f.unlink(missing_ok=True)
+                self.update(st["id"], photos=0, fotos_opgeruimd=time.time())
+            self._added(-size)
+            with self._guard:
+                self._overviews.pop(st["id"], None)
+        return out
+
+    def save_photo(self, job_id: str, filename: str, stream, upload_id: str | None = None) -> tuple[Path | None, bool]:
+        """Slaat één upload op als foto_NNNN.ext, met de extensie van wat het werkelijk is (magic bytes). Geeft
+        (pad, nieuw): pad None als het geen foto is; nieuw False als deze `upload_id` al eerder binnenkwam (de pagina
+        stuurt een foto na een netwerkfout opnieuw, met hetzelfde id: dan geen tweede kopie)."""
+        head = stream.read(1 << 20)
+        ext = sniff_image(head[:32])
+        if ext is None:
+            return None, False
+        if ext == ".jpg" and Path(filename or "").suffix.lower() in (".jpg", ".jpeg"):
+            ext = Path(filename).suffix.lower()
+        uid = upload_id if upload_id and UPLOAD_ID.match(upload_id) else None
         folder = self.path(job_id) / "fotos"
-        used = {int(p.stem[5:]) for p in folder.iterdir() if PHOTO_FILE.match(p.name)}
-        target = folder / f"foto_{max(used, default=-1) + 1:04d}{ext}"
+        with self.lock(job_id):
+            if uid is not None:
+                known = self.read(job_id).get("uploads", {}).get(uid)
+                if known and (folder / known).exists():
+                    return folder / known, False
+                if (job_id, uid) in self._pending:
+                    raise HTTPException(409, "Deze foto komt al binnen: probeer het zo nog eens")
+            self.ensure_space()
+            used = {int(p.stem[5:]) for p in folder.iterdir() if PHOTO_FILE.match(p.name)}
+            used |= {int(n[5:9]) for (j, _), n in self._pending.items() if j == job_id}
+            target = folder / f"foto_{max(used, default=-1) + 1:04d}{ext}"
+            target.touch(exist_ok=False)  # de naam is nu van deze upload
+            if uid is not None:
+                self._pending[(job_id, uid)] = target.name
         size = 0
         try:
             with open(target, "wb") as out:
-                while chunk := stream.read(1 << 20):
+                chunk = head
+                while chunk:
                     size += len(chunk)
                     if size > MAX_BYTES:
                         raise HTTPException(413, f"{filename}: bestand te groot")
                     out.write(chunk)
+                    chunk = stream.read(1 << 20)
         except BaseException:
             target.unlink(missing_ok=True)
+            with self.lock(job_id):
+                self._pending.pop((job_id, uid), None)
             raise
-        return target
+        self._added(size)
+        if uid is not None:
+            with self.lock(job_id):
+                status = self.read(job_id)
+                self.update(job_id, uploads={**status.get("uploads", {}), uid: target.name})
+                self._pending.pop((job_id, uid), None)
+        return target, True
 
     def checks(self, job_id: str) -> dict[str, preflight.PhotoCheck]:
         f = self.path(job_id) / "controle.json"
@@ -335,10 +434,16 @@ class JobStore:
                 traceback.print_exc(file=sys.stderr)
 
 
-def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runner=run_scan) -> FastAPI:
+def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runner=run_scan,
+               max_gb: float | None = None) -> FastAPI:
     app = FastAPI(title="Cam-to-CAD (lokaal)", docs_url=None, redoc_url=None)
     app.state.https_port = None  # zet serve() als de https-server draait
-    store = JobStore(Path(data_dir), runner)
+    store = JobStore(Path(data_dir), runner, None if max_gb is None else int(max_gb * 1024 ** 3))
+    app.state.store = store
+
+    @app.exception_handler(StorageFull)
+    async def storage_full(request: Request, exc: StorageFull):
+        return JSONResponse({"detail": str(exc)}, status_code=507)
     if not run_inline:
         threading.Thread(target=store.worker, daemon=True).start()
 
@@ -376,7 +481,7 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         """Versie, en de https-poort: de camera van de telefoon werkt alleen op een beveiligde pagina (V24). De
         toegangscode staat erbij voor de link naar https (de cookie gaat niet mee van http naar https)."""
         check(request)
-        return {"versie": __version__, "https_poort": app.state.https_port, "token": token}
+        return {"versie": __version__, "https_poort": app.state.https_port, "token": token, "opslag": store.storage()}
 
     @app.get("/api/scans")
     def list_scans(request: Request):
@@ -397,13 +502,14 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         mat, rulers = _mat_choice(mat), _rulers(meetlijn, meetlijn_y)
         if fotos is not None and len(fotos) > MAX_FILES:
             raise HTTPException(400, f"Upload hooguit {MAX_FILES} foto's")
+        store.ensure_space()
         job_id = store.create(mat, rulers)
         if not fotos:
             return {"id": job_id, "photos": 0}
         try:
-            saved = sum(store.save_photo(job_id, f.filename, f.file) is not None for f in fotos)
+            saved = sum(store.save_photo(job_id, f.filename, f.file)[0] is not None for f in fotos)
             if saved == 0:
-                raise HTTPException(400, "Geen bruikbare foto's (JPG/PNG) ontvangen")
+                raise HTTPException(400, "Geen bruikbare foto's (JPG, PNG of HEIC) ontvangen")
         except BaseException:
             store.remove(job_id)  # geen halve scans laten staan
             raise
@@ -415,8 +521,10 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         return {"id": job_id, "photos": saved}
 
     @app.post("/api/scans/{job_id}/fotos")
-    def add_photos(job_id: str, request: Request, fotos: list[UploadFile] = File(...)):
-        """Foto's toevoegen (ook aan een scan die al verwerkt is); elke foto wordt direct gecontroleerd."""
+    def add_photos(job_id: str, request: Request, fotos: list[UploadFile] = File(...), uid: str | None = Form(None)):
+        """Foto's toevoegen (ook aan een scan die al verwerkt is); elke foto wordt direct gecontroleerd. `uid`: een id
+        dat de pagina per foto kiest (bij één foto per verzoek). Stuurt ze dezelfde foto na een netwerkfout opnieuw,
+        dan komt er geen tweede kopie bij (V24, v0.15)."""
         check(request)
         status = store.read(job_id)
         if status["state"] in BUSY:
@@ -425,11 +533,13 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
             raise HTTPException(400, f"Hooguit {MAX_FILES} foto's per scan")
         results = []
         for f in fotos:
-            path = store.save_photo(job_id, f.filename, f.file)
+            path, new = store.save_photo(job_id, f.filename, f.file, uid if len(fotos) == 1 else None)
             if path is None:
-                results.append({"name": f.filename, "verdict": "onbruikbaar", "notes": ["geen JPG of PNG"]})
+                results.append({"name": f.filename, "verdict": "onbruikbaar", "notes": ["geen foto (JPG, PNG of HEIC)"]})
                 continue
-            results.append({**store.check_photo(job_id, path).public(), "upload": f.filename})
+            known = store.checks(job_id).get(path.name) if not new else None
+            chk = known if known is not None else store.check_photo(job_id, path)
+            results.append({**chk.public(), "upload": f.filename, **({} if new else {"al_ontvangen": True})})
         if status["state"] != "upload":
             store.update(job_id, state="upload")  # opnieuw verwerken met de extra foto's
         return {"nieuw": results, **store.overview(job_id)}
@@ -583,8 +693,10 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         if formaat.upper() not in PRESETS:
             raise HTTPException(404, "Onbekend formaat")
         spec = PRESETS[formaat.upper()]
-        paths = write_mat(spec, Path(data_dir) / "_mat")
-        return FileResponse(paths["pdf"], media_type="application/pdf", filename=f"kalibratiemat_{spec.name}.pdf")
+        pdf = Path(data_dir) / "_mat" / __version__ / f"kalibratiemat_{spec.name}.pdf"
+        if not pdf.exists():  # één keer per versie; atomisch geschreven, dus een tweede verzoek ziet geen half bestand
+            pdf = write_mat(spec, pdf.parent)["pdf"]
+        return FileResponse(pdf, media_type="application/pdf", filename=f"kalibratiemat_{spec.name}.pdf")
 
     return app
 
@@ -613,13 +725,32 @@ def cert_hosts(ips: list[str]) -> list[str]:
                                               [name] if name else [])
 
 
-def serve(host: str, port: int, data_dir: Path, token: str | None, https_port: int | None = 8443) -> None:
+CLEANUP_EVERY_S = 6 * 3600  # zo vaak ruimt de server oude foto's op (--bewaar-fotos)
+
+
+def _cleanup_loop(store: JobStore, days: float) -> None:
+    while True:
+        try:
+            done = store.cleanup(days)
+            if done:
+                print(f"  opgeruimd: de foto's van {len(done)} scan(s) ouder dan {days:g} dagen "
+                      f"({sum(b for _, b in done) / 1024 ** 3:.2f} GB)")
+        except Exception:  # noqa: BLE001 - opruimen mag de server nooit stoppen
+            traceback.print_exc(file=sys.stderr)
+        time.sleep(CLEANUP_EVERY_S)
+
+
+def serve(host: str, port: int, data_dir: Path, token: str | None, https_port: int | None = 8443,
+          max_gb: float | None = None, keep_days: float | None = None) -> None:
     """http op `port` en (V24, v0.13) https op `https_port` met een eigen certificaat: de camera op de telefoon (live
-    begeleiding) werkt alleen via https. `https_port` None: alleen http."""
+    begeleiding) werkt alleen via https. `https_port` None: alleen http. `max_gb`: grens voor de datamap;
+    `keep_days`: de foto's van scans die zo lang klaar zijn, worden opgeruimd (v0.15)."""
     import uvicorn
 
     token = token or secrets.token_urlsafe(6)
-    app = create_app(data_dir, token)
+    app = create_app(data_dir, token, max_gb=max_gb)
+    if keep_days is not None:
+        threading.Thread(target=_cleanup_loop, args=(app.state.store, keep_days), daemon=True).start()
     local = host in ("127.0.0.1", "localhost")
     ips = lan_addresses() if not local else []
     cert = None
@@ -643,7 +774,11 @@ def serve(host: str, port: int, data_dir: Path, token: str | None, https_port: i
             print(f"  (https op poort {https_port} start niet: kies een andere poort met --https-poort)")
             cert = None
     print("Cam-to-CAD lokale server")
-    print(f"  datamap: {data_dir}")
+    st = app.state.store.storage()
+    print(f"  datamap: {data_dir} ({st['gebruikt_gb']:.1f} GB in gebruik, {st['vrij_gb']:.0f} GB vrij"
+          + (f", grens {st['max_gb']:g} GB" if st["max_gb"] is not None else "") + ")")
+    if local:
+        print("  alleen bereikbaar op deze pc. Foto's uploaden met je telefoon: start de server met --lan")
     shown = ips or (["<ip-adres-van-deze-pc>"] if not local else [])
     for ip in shown:
         if cert is not None:
