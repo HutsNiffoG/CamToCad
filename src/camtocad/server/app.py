@@ -363,14 +363,15 @@ class JobStore:
             self._overviews[job_id] = (key, ov, spec)
         return ov, spec
 
-    def live(self, job_id: str, img: np.ndarray, t: float | None = None) -> dict:
+    def live(self, job_id: str, img: np.ndarray, t: float | None = None, lens: str | None = None) -> dict:
         """Beoordeelt één beeld van de livecamera tegen de foto's van de scan tot nu toe (V25). `t`: het moment van
-        het beeld (s, klok van de telefoon), voor de snelheid van de telefoon (v0.16)."""
+        het beeld (s, klok van de telefoon), voor de snelheid van de telefoon (v0.16); `lens`: welke camera de pagina
+        gebruikt (v0.16.3)."""
         ov, spec = self._overview(job_id)
         with self._guard:
             session = self._live.setdefault(job_id, live.LiveSession())
         t0 = time.perf_counter()
-        res = live.live_check(img, spec, ov["overzicht"], session=session, t=t)
+        res = live.live_check(img, spec, ov["overzicht"], session=session, t=t, lens=lens)
         res["ms"] = round(1000 * (time.perf_counter() - t0))
         res["fotos"] = len(ov["fotos"])
         return res
@@ -544,10 +545,11 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         return store.overview(job_id)
 
     @app.post("/api/scans/{job_id}/live")
-    def live_frame(job_id: str, request: Request, beeld: UploadFile = File(...), t: float | None = Form(None)):
+    def live_frame(job_id: str, request: Request, beeld: UploadFile = File(...), t: float | None = Form(None),
+                   lens: str | None = Form(None)):
         """Eén beeld van de livecamera (V25): waar ligt het onderdeel, waar staat de camera ten opzichte daarvan,
         welke richting ontbreekt nog, en is dit een goed moment voor een foto? `t`: het moment van het beeld (ms, klok
-        van de telefoon). Het beeld wordt niet bewaard."""
+        van de telefoon); `lens`: welke camera (v0.16.3). Het beeld wordt niet bewaard."""
         check(request)
         data = beeld.file.read(MAX_LIVE_BYTES + 1)
         if len(data) > MAX_LIVE_BYTES:
@@ -555,7 +557,7 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE) if data else None
         if img is None:
             raise HTTPException(400, "Geen leesbaar beeld")
-        return store.live(job_id, img, None if t is None else t / 1000.0)
+        return store.live(job_id, img, None if t is None else t / 1000.0, (lens or None) and lens[:200])
 
     @app.delete("/api/scans/{job_id}/fotos/{name}")
     def delete_photo(job_id: str, name: str, request: Request):

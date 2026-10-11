@@ -62,8 +62,10 @@
   /* v0.16.2: bovenin alleen een korte aanwijzing met een pictogram (de kleur zegt de toestand); de hele zin en de
      opmerkingen na een tik erop */
   .live .hud { position:absolute; left:8px; right:8px; top:8px; display:flex; gap:8px; align-items:flex-start; pointer-events:none; }
-  .live .hud button { pointer-events:auto; flex:0 0 auto; margin-left:auto; min-height:34px; padding:0 9px;
+  .live .hud button { pointer-events:auto; flex:0 0 auto; min-height:34px; padding:0 9px;
     background:rgba(15,18,22,.62); color:#fff; border-color:#555; }
+  .live .hud .knoppen { margin-left:auto; display:flex; gap:6px; flex:0 0 auto; }
+  .live .hud button.wijs { border-color:#ffd34d; box-shadow:0 0 0 2px #ffd34d; animation:ctc-pulse .8s ease-in-out infinite alternate; }
   .live .tip { pointer-events:auto; cursor:pointer; min-width:0; max-width:min(100%, 30em); padding:4px 12px 4px 4px;
     border-radius:20px; background:rgba(15,18,22,.62); -webkit-tap-highlight-color:transparent; }
   .live .tip.open { border-radius:14px; background:rgba(15,18,22,.85); }
@@ -226,7 +228,10 @@
         <div id="live-extra" class="extra" hidden></div>
         <div id="live-lang" class="lang"></div>
       </div>
-      <button id="live-stem" type="button" aria-pressed="false" aria-label="Gesproken aanwijzingen aan of uit">🔇</button>
+      <div class="knoppen">
+        <button id="live-lens" type="button" hidden aria-label="Andere camera of lens kiezen">Lens</button>
+        <button id="live-stem" type="button" aria-pressed="false" aria-label="Gesproken aanwijzingen aan of uit">🔇</button>
+      </div>
     </div>
     <div id="live-afstand" class="gauge dist" hidden aria-hidden="true"><span>ver</span>
       <div class="track"><i class="zone goed" style="bottom:30%;height:20%"></i><b class="dot"></b></div><span>dichtbij</span></div>
@@ -553,7 +558,8 @@ $("scans").addEventListener("click", async (e) => {
 // dekking (binnen ~60°, buiten ~35°) en een pijl naar het volgende vak. Twee keer achter elkaar 'opnemen' maakt (met
 // 'automatisch' aan) de foto: met ImageCapture een echte foto, anders (iPhone) het scherpste van drie videobeelden.
 const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null,
-               taken: [], covered: false, open: false, shown: "", shownAt: 0, cand: "", candN: 0, lang: "", hold: 0 };
+               taken: [], covered: false, open: false, shown: "", shownAt: 0, cand: "", candN: 0, lang: "", hold: 0,
+               cams: [], lens: "", switching: false };
 
 // de aanwijzing bovenin (v0.16.2): een pictogram (de kleur zegt de toestand) en een korte zin, daaronder hooguit één
 // regel met opmerkingen; een tik toont de hele zin en alle opmerkingen. Pictogrammen in 24 x 24.
@@ -574,6 +580,7 @@ const ICONS = {
   weg: '<path d="M12 6v12M14.5 12H21M9.5 12H3M17.5 8.5L21 12l-3.5 3.5M6.5 8.5L3 12l3.5 3.5"/>',  // van het onderdeel af
   dichterbij: '<path d="M12 6v12M2.5 12h7M21.5 12h-7M6 8.5L9.5 12 6 15.5M18 8.5L14.5 12l3.5 3.5"/>',  // ernaartoe
   opschuiven: '<path d="M4.5 16.5a8 8 0 0 1 14-6"/><path d="M19.5 4.5v6h-6"/>',
+  lens: '<rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13.5" r="3.5"/><path d="M8.5 7l1.5-2.5h4L15.5 7"/>',
 };
 const iconSvg = (code) => `<svg viewBox="0 0 24 24">${code in DIRS ? `<g transform="rotate(${DIRS[code]} 12 12)">${ARROW}</g>`
   : ICONS[code] || ICONS.mat}</svg>`;
@@ -654,6 +661,41 @@ async function ensureScan() {
   }
 }
 
+// v0.16.3: de camera's aan de achterkant. Een telefoon met meer lenzen kiest in de browser soms de groothoeklens (0,6×),
+// en daarmee is de mat op 25-35 cm klein in beeld. De knop Lens kiest de volgende camera; op Android is camera 0 de
+// hoofdcamera, en die kiest de pagina vanzelf als de browser een andere nam.
+const VIDEO = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+async function backCameras() {
+  try {
+    const all = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput" && d.deviceId);
+    const back = all.filter((d) => /back|rear|environment|achter/i.test(d.label));
+    return back.length ? back : all;
+  } catch (e) { return []; }
+}
+
+async function openCamera(deviceId) {
+  if (live.stream) live.stream.getTracks().forEach((t) => t.stop());  // eerst los: twee camera's tegelijk lukt vaak niet
+  live.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: deviceId ?
+    { deviceId: { exact: deviceId }, ...VIDEO } : { facingMode: { ideal: "environment" }, ...VIDEO } });
+  live.track = live.stream.getVideoTracks()[0];
+  const set = live.track.getSettings ? live.track.getSettings() : {};
+  live.lens = set.deviceId || live.track.label || "";
+  live.mode = null;  // ImageCapture of videobeelden: opnieuw kiezen voor deze camera
+  $("live-video").srcObject = live.stream;
+  try { await $("live-video").play(); } catch (e) {}
+}
+
+async function nextCamera() {
+  if (live.switching || live.cams.length < 2) return;
+  live.switching = true;
+  const i = live.cams.findIndex((d) => d.deviceId === live.lens);
+  const next = live.cams[(i + 1) % live.cams.length];
+  try { await openCamera(next.deviceId); }
+  catch (e) { try { await openCamera(live.lens || null); } catch (e2) {} setTip("zoek", "let_op", "Camera wisselen mislukt", "", [e.message || e.name]); holdTip(); }
+  finally { live.switching = false; }
+}
+
 async function liveStart() {
   const msg = $("live-melding");
   msg.hidden = true;
@@ -676,17 +718,18 @@ async function liveStart() {
   }
   try {
     await ensureScan();
-    live.stream = await navigator.mediaDevices.getUserMedia({ audio: false,
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    await openCamera(null);
   } catch (e) {
     msg.textContent = "Camera niet beschikbaar: " + (e.message || e.name); msg.hidden = false; return;
   }
-  live.track = live.stream.getVideoTracks()[0];
-  const v = $("live-video");
-  v.srcObject = live.stream;
+  live.cams = await backCameras();  // de namen zijn er pas na de toestemming
+  const main = live.cams.find((d) => /camera2? 0\b/i.test(d.label));
+  if (main && main.deviceId !== live.lens && /camera2? \d+/i.test(live.track.label || "")) {
+    try { await openCamera(main.deviceId); } catch (e) { await openCamera(null); }  // Android: de hoofdcamera
+  }
+  $("live-lens").hidden = live.cams.length < 2;
   $("live").hidden = false;
   document.body.style.overflow = "hidden";
-  try { await v.play(); } catch (e) {}
   try { live.wake = await navigator.wakeLock.request("screen"); } catch (e) {}
   live.running = true; live.streak = 0; live.taken = []; live.covered = false;
   live.shown = live.cand = ""; live.candN = 0; live.hold = 0;
@@ -720,7 +763,7 @@ const liveCanvas = document.createElement("canvas");
 async function liveLoop() {
   while (live.running) {
     const t0 = performance.now();
-    if (!live.capturing && !document.hidden) {
+    if (!live.capturing && !live.switching && !document.hidden) {
       try {
         const c = snap(960, liveCanvas);
         const blob = c && await jpeg(c, 0.75);
@@ -728,6 +771,7 @@ async function liveLoop() {
           const fd = new FormData();
           fd.append("beeld", blob, "live.jpg");
           fd.append("t", String(Math.round(t0)));  // het moment van het beeld: de pc meet zo hoe snel het beweegt
+          fd.append("lens", live.lens);  // een andere camera gekozen: de pc begint opnieuw met de brandpuntsafstand
           const r = await fetch(`api/scans/${current}/live`, { method: "POST", body: fd });
           if (r.ok) { if (live.running && !live.capturing) liveShow(await r.json()); }
           else if (r.status === 404) { liveStop(); reset(); return; }
@@ -746,6 +790,7 @@ function liveShow(res) {
     setTip(res.status, res.icoon || "mat", res.spraak || res.aanwijzing, res.aanwijzing, res.opmerkingen || []);
     if (res.spraak !== live.shown) { live.shown = res.spraak; live.shownAt = now; }
   }
+  $("live-lens").classList.toggle("wijs", res.icoon === "lens");
   drawOverlay(res);
   drawDome(res);
   drawGauges(res);
@@ -1057,6 +1102,7 @@ $("live-start").addEventListener("click", liveStart);
 $("live-stop").addEventListener("click", () => liveStop());
 $("live-shoot").addEventListener("click", liveCapture);
 $("live-terug").addEventListener("click", liveUndo);
+$("live-lens").addEventListener("click", nextCamera);
 $("live-tip").addEventListener("click", toggleTip);
 $("live-tip").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleTip(); } });
 $("live-stem").addEventListener("click", () => {

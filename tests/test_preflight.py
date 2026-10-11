@@ -104,6 +104,38 @@ def test_summary_warns_about_photos_from_another_lens(box_scan):
     assert s["bruikbaar"] == len(views) - 2  # die twee tellen niet mee in de dekking
 
 
+def test_a_small_mat_in_the_picture_is_reported(box_scan, tmp_path):
+    """v0.16.3: hoe groot de mat in beeld is (pixels per mm). Met de groothoeklens (0,6×), of van ver weg, is de mat
+    klein, en dan ziet de verwerking de stippen van de mat en een donker onderdeel op de zwarte vakken niet."""
+    from PIL import Image
+
+    spec, views = box_scan
+    top = next(v for v in views if v.name.startswith("top"))
+    chk = preflight.check_image(top.name, top.image, spec)
+    assert chk.px_per_mm == pytest.approx(1300 / 330, rel=0.08) and chk.verdict == "goed"  # brandpunt / afstand
+    half = [(v.name, cv2.resize(v.image, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)) for v in views]
+    small = preflight.check_image("klein", dict(half)[top.name], spec)  # half zo groot in beeld: ~2 px per mm
+    assert small.px_per_mm == pytest.approx(0.5 * 1300 / 330, rel=0.1) and small.verdict == "matig"
+    assert any(n.startswith("mat klein in beeld") and n.endswith("kom dichterbij") for n in small.notes)
+    # met de groothoeklens (EXIF: 13 mm-equivalent) de gewone lens aanraden
+    exif = Image.Exif()
+    exif[0x010F], exif[0x0110] = "samsung", "SM-S921B"
+    sub = exif.get_ifd(0x8769)
+    sub[0x920A], sub[0xA405] = 2.2, 13
+    path = tmp_path / "groothoek.jpg"
+    Image.fromarray(dict(half)[top.name]).convert("RGB").save(path, exif=exif, quality=95)
+    wide = preflight.check_file(path, spec)
+    assert any("groothoeklens (13 mm-equivalent), gebruik de gewone lens (1×)" in n for n in wide.notes), wide.notes
+    checks = [preflight.check_image(n, img, spec) for n, img in half]
+    for c in checks:
+        c.camera = {"make": "samsung", "model": "SM-S921B", "focal_mm": 2.2, "focal35_mm": 13.0}
+    s = preflight.summarize(checks)
+    assert s["groothoek"] and s["px_per_mm"] < preflight.LOW_PX_MM
+    advice = [a for a in s["advies"] if a.startswith("De mat is klein in beeld")]
+    assert len(advice) == 1 and "groothoeklens" in advice[0] and "gewone lens (1×)" in advice[0] and not s["klaar"]
+    assert not preflight.summarize([preflight.check_image(v.name, v.image, spec) for v in views])["groothoek"]
+
+
 def test_summary_warns_about_photos_taken_too_close(box_scan):
     """V28 (v0.12): een foto van dichterbij dan 15 cm boven de mat krijgt een aanwijzing (scherptediepte, macrolens)."""
     import cadquery as cq

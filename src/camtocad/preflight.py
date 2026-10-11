@@ -10,6 +10,8 @@ Alles wordt gemeten aan de mat zelf:
   gefit met een vervaagde stap (foutfunctie);
 * belichting: papierwit en zwart naast de schaakbordhoeken, en het aandeel uitgebeten wit;
 * kijkhoek: per foto grof uit de homografie van de mat, per scan na een snelle zelfkalibratie;
+* hoe groot de mat in beeld is: pixels per mm op de mat (v0.16.3). Met een groothoeklens (0,6×), of van ver weg, is de
+  mat klein in beeld, en dan zijn de stippen van de mat en een donker onderdeel op de zwarte vakken niet te zien;
 * waar het onderdeel ligt: de hoeken en markers die in beeld horen te zijn maar steeds
   ontbreken (het onderdeel ligt erop of ervoor).
 """
@@ -35,6 +37,10 @@ WORK_SIDE = 2000  # dezelfde werkresolutie als de pipeline
 MIN_CORNERS = 12
 BLUR_WARN, BLUR_BAD = 1.8, 3.0  # onscherpte σ in pixels
 CLOSE_MM = 150.0  # een camera dichter bij de mat (mm, langs de kijkrichting): weinig scherptediepte, soms de macrolens
+# v0.16.3: de mat in beeld (pixels per mm op werkresolutie, langs de minst verkorte richting). De gerenderde stresstests
+# hebben 3,6-4,1; de tweede echte scan (een groothoeklens op ~30 cm) ~2,3, en daar vond het masker het onderdeel slecht
+LOW_PX_MM, GOOD_PX_MM = 3.0, 3.5
+WIDE_35MM = 18.0  # brandpuntsafstand (35 mm-equivalent, EXIF) waaronder een foto met de groothoeklens is gemaakt
 # richting van de camera gezien vanaf het onderdeel; boven = kant met de titel, onder = meetlijn X
 SECTORS = ("rechts", "rechtsboven", "boven", "linksboven", "links", "linksonder", "onder", "rechtsonder")
 BANDS = (("hoog", 50.0, 80.0, 60), ("laag", 20.0, 50.0, 35))  # naam, elevatie van-tot, richtwaarde (graden)
@@ -55,6 +61,7 @@ class PhotoCheck:
     clipped: float | None = None  # aandeel van de mat dat wit uitgebeten is
     f_px: float | None = None  # brandpuntsafstand uit de homografie (grof)
     tilt_deg: float | None = None  # optische as t.o.v. loodrecht (grof)
+    px_per_mm: float | None = None  # hoe groot de mat in beeld is, midden op de mat (v0.16.3)
     verdict: str = "onbruikbaar"  # goed | matig | onbruikbaar
     notes: list[str] = field(default_factory=list)
     ids: list[int] = field(default_factory=list)
@@ -238,7 +245,7 @@ def _focal_and_tilt(H: np.ndarray, w: int, h: int) -> tuple[float | None, float]
     b = np.array([h1[2] * h2[2], h1[2] ** 2 - h2[2] ** 2])
     inv_f2 = -float(a @ b) / max(float(a @ a), 1e-30)
     f = 1.0 / math.sqrt(inv_f2) if inv_f2 > 0 else None
-    if f is not None and not 0.4 * max(w, h) < f < 2.5 * max(w, h):
+    if f is not None and not 0.25 * max(w, h) < f < 2.5 * max(w, h):  # een groothoeklens (0,6×): ~0,38 (v0.16.3)
         f = None
     fk = f or 0.8 * max(w, h)
     r1 = np.array([h1[0] / fk, h1[1] / fk, h1[2]])
@@ -276,6 +283,8 @@ def check_image(name: str, img: np.ndarray, spec: MatSpec | None = None) -> Phot
     chk.blur_px = None if blur is None else round(blur, 2)
     f, tilt = _focal_and_tilt(H, w, h)
     chk.f_px, chk.tilt_deg = (None if f is None else round(f, 1)), round(tilt, 1)
+    ppm = mat_scale(H, spec)
+    chk.px_per_mm = None if ppm is None else round(ppm, 2)
 
     bad, weak = False, False
     if blur is not None and blur > BLUR_BAD:
@@ -300,6 +309,10 @@ def check_image(name: str, img: np.ndarray, spec: MatSpec | None = None) -> Phot
     if chk.mat_fraction < 0.25:
         weak = True
         chk.notes.append(f"maar {100 * chk.mat_fraction:.0f}% van de mat in beeld: neem meer van de mat mee")
+    if ppm is not None and ppm < LOW_PX_MM:
+        weak = True
+        chk.notes.append(f"mat klein in beeld ({_dec(ppm)} px per mm, goed is {_dec(GOOD_PX_MM)} of meer): kom "
+                         "dichterbij")
     chk.verdict = "onbruikbaar" if bad else "matig" if weak else "goed"
     return chk
 
@@ -311,8 +324,49 @@ def check_file(path: str | Path, spec: MatSpec | None = None) -> PhotoCheck:
                 {".heic", ".heif"} else "geen leesbare foto (JPG, PNG of HEIC)")
         return PhotoCheck(Path(path).name, notes=[note])
     chk = check_image(Path(path).name, img, spec)
-    chk.camera = read_info(path).to_dict()
+    info = read_info(path)
+    chk.camera = info.to_dict()
+    if is_wide(info.focal35_mm) and chk.px_per_mm is not None and chk.px_per_mm < LOW_PX_MM:
+        chk.notes = [n.replace("kom dichterbij", f"gemaakt met de groothoeklens ({info.focal35_mm:.0f} mm-equivalent), "
+                               "gebruik de gewone lens (1×) of kom dichterbij")
+                     if n.startswith("mat klein in beeld") else n for n in chk.notes]
     return chk
+
+
+def _dec(x: float, nd: int = 1) -> str:
+    return f"{x:.{nd}f}".replace(".", ",")
+
+
+def is_wide(focal35_mm: float | None) -> bool:
+    """Een foto met de groothoeklens (0,6×), volgens de EXIF-gegevens (v0.16.3)."""
+    return focal35_mm is not None and focal35_mm < WIDE_35MM
+
+
+def mat_scale(H: np.ndarray, spec: MatSpec) -> float | None:
+    """Hoe groot de mat in beeld is (v0.16.3): pixels per mm midden op het bord, langs de richting die het minst
+    verkort is (de grootste singuliere waarde van de afgeleide van de homografie; bij een schuine foto is de andere
+    richting korter). Zo groot als brandpuntsafstand / afstand, de maat die de maskers ook gebruiken."""
+    cx, cy = spec.board_w_mm / 2, spec.board_h_mm / 2
+    u, v, q = H @ np.array([cx, cy, 1.0])
+    if abs(q) < 1e-12:
+        return None
+    x, y = u / q, v / q
+    J = np.array([[H[0, 0] - x * H[2, 0], H[0, 1] - x * H[2, 1]],
+                  [H[1, 0] - y * H[2, 0], H[1, 1] - y * H[2, 1]]]) / q
+    s = float(np.linalg.svd(J, compute_uv=False)[0])
+    return s if math.isfinite(s) and s > 0 else None
+
+
+def small_mat_advice(px_per_mm: float, wide_35mm: float | None = None) -> str:
+    """Wat te doen als de mat klein in beeld is (v0.16.3); `wide_35mm`: de brandpuntsafstand als de foto's met de
+    groothoeklens zijn gemaakt."""
+    text = (f"De mat is klein in beeld: gemiddeld {_dec(px_per_mm)} pixels per mm, en de scan rekent op "
+            f"{_dec(GOOD_PX_MM)} of meer. Dan zijn de stippen van de mat niet te zien, en een donker onderdeel op de "
+            "zwarte vakken nauwelijks.")
+    if wide_35mm is not None:
+        text += (f" Deze foto's zijn met de groothoeklens (0,6×) gemaakt ({wide_35mm:.0f} mm-equivalent): gebruik de "
+                 "gewone lens (1×).")
+    return text + " Houd de telefoon op 25-35 cm, met de mat grotendeels in beeld."
 
 
 def check_folder(folder: str | Path, mat: str | None = None, workers: int = 4) -> list[PhotoCheck]:
@@ -462,7 +516,7 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
     out = {"fotos": len(checks), "oordelen": {k: counts.get(k, 0) for k in ("goed", "matig", "onbruikbaar")},
            "mat": spec.label if spec else None, "bruikbaar": 0, "recht_van_boven": 0, "bovenaanzicht": 0,
            "dekking": {b[0]: [0] * 8 for b in BANDS}, "sectoren": list(SECTORS), "object_mm": None,
-           "punten": [], "klaar": False, "advies": []}
+           "punten": [], "klaar": False, "advies": [], "px_per_mm": None, "groothoek": False}
     advice: list[str] = out["advies"]
     if spec is None:
         if checks:
@@ -503,6 +557,13 @@ def summarize(checks: list[PhotoCheck], spec: MatSpec | None = None) -> dict:
         out.update(cov, object_mm=[round(float(point[0]), 1), round(float(point[1]), 1)])
         out["klaar"] = n_ok >= 15 and complete
     out.update(bruikbaar=n_ok, brandpunt_px=round(float(cam.K[0, 0]), 1))
+    # v0.16.3: hoe groot de mat in beeld is, en of de foto's met de groothoeklens zijn gemaakt
+    ppm = [c.px_per_mm for c in found if c.px_per_mm]
+    wide = [c.camera["focal35_mm"] for c in found if is_wide(c.camera.get("focal35_mm"))]
+    out.update(px_per_mm=round(float(np.median(ppm)), 2) if ppm else None, groothoek=len(wide) > len(found) / 2)
+    if ppm and np.median(ppm) < LOW_PX_MM:
+        advice.append(small_mat_advice(float(np.median(ppm)), float(np.median(wide)) if out["groothoek"] else None))
+        out["klaar"] = False  # de richtingen kunnen gedekt zijn, maar zo vindt de verwerking het onderdeel slecht
     if poses and not located:
         advice.append("Het onderdeel is nog niet gevonden op de mat: leg het midden op het geblokte deel en maak "
                       "foto's recht van boven.")

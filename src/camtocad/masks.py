@@ -128,7 +128,7 @@ def _robust_affine(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
     return float(a), float(b), sigma
 
 
-def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float, float]:
+def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray, blur_max: float | None = None) -> tuple[float, float]:
     """Toonkromme van de camera (V2, v0.10): de exponent g in foto = T(a · p + b) met T(x) = 255 · (x / 255)^g,
     met p de voorspelde mat, lineair in het licht (de print vervaagd door de optiek), en a, b belichting en het
     licht dat ook zwart nog terugkaatst.
@@ -145,7 +145,15 @@ def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
       mat minder diep: g wordt samen met een extra vervaging van de voorspelling geschat (TONE_BLUR_PX).
     Op gerenderde scans tot op ~0,04: verscherping in de telefoon (op de gecodeerde grijswaarden) maakt g iets te
     klein, zonder verscherping is hij iets te groot. Geeft (g, extra vervaging in px); g = 1,0 als de kromme weinig
-    uitmaakt."""
+    uitmaakt.
+
+    Een groot zwart onderdeel op een mat die klein in beeld is (~2 pixels per mm, zoals met een groothoeklens),
+    misleidt die schatting: waar het onderdeel de overgangen bedekt, past een vagere voorspelling met een extreme
+    kromme beter. Op de tweede echte fotoset werd dat g 0,25 en 1,5-3,3 px bij scherpe foto's (0,5-0,9 px), en dan
+    paste de voorspelde mat nergens meer: het masker vond geen object (v0.16.3). `blur_max` begrenst de extra vervaging
+    daarom, met de onscherpte die aan de randen van de mat gemeten is (preflight._edge_blur, elk stukje rand apart
+    uitgelijnd) plus een marge (tone.BLUR_MARGIN_PX). Alleen als de schatting daarboven uitkomt, wordt er opnieuw
+    gezocht binnen de grens; anders is de uitkomst precies dezelfde als zonder grens."""
     idx = np.flatnonzero(sel.ravel())[::11]
     if len(idx) < 2000:
         return 1.0, 0.0
@@ -177,14 +185,22 @@ def _tone_exponent(o: np.ndarray, p: np.ndarray, sel: np.ndarray) -> tuple[float
     def best(gs, ss) -> tuple[float, float, float]:
         return min((spread(g, s), float(g), float(s)) for g in gs for s in ss)
 
-    e0, g0, s0 = best(np.arange(0.30, 1.3001, 0.1), TONE_BLUR_PX[:4])
-    if s0 >= TONE_BLUR_PX[3]:  # een bewogen of onscherpe foto: ook ruimer
-        e1, g1, s1 = best(np.arange(0.30, 1.3001, 0.1), TONE_BLUR_PX[4:])
-        if e1 < e0:
-            g0, s0 = g1, s1
-    ds = 0.15 if s0 < 1.5 else 0.3
-    sp, g, s = best(np.arange(max(0.25, g0 - 0.1), g0 + 0.1001, 0.02), (s0 - ds, s0, s0 + ds))
-    s = max(s, 0.0)
+    def search(cap: float) -> tuple[float, float, float]:
+        """Eerst grof (g in stappen van 0,1, een paar vervagingen), dan fijn rond de beste; vervaging hooguit `cap`."""
+        e0, g0, s0 = best(np.arange(0.30, 1.3001, 0.1), [s for s in TONE_BLUR_PX[:4] if s <= cap])
+        if s0 >= TONE_BLUR_PX[3] and cap > TONE_BLUR_PX[3]:  # een bewogen of onscherpe foto: ook ruimer
+            e1, g1, s1 = best(np.arange(0.30, 1.3001, 0.1), [s for s in TONE_BLUR_PX[4:] if s <= cap]
+                              + ([cap] if cap < TONE_BLUR_PX[-1] else []))
+            if e1 < e0:
+                g0, s0 = g1, s1
+        ds = 0.15 if s0 < 1.5 else 0.3
+        near = [s for s in (s0 - ds, s0, s0 + ds) if s <= cap] + ([cap] if s0 < cap < s0 + ds else [])
+        sp, g, s = best(np.arange(max(0.25, g0 - 0.1), g0 + 0.1001, 0.02), near)
+        return sp, g, max(s, 0.0)
+
+    sp, g, s = search(np.inf)
+    if blur_max is not None and s > blur_max:  # alleen als de grens raakt: opnieuw, met hooguit zoveel vervaging
+        sp, g, s = search(max(float(blur_max), 0.0))
     if abs(g - 1.0) < TONE_MIN_DEV or sp > (1.0 - TONE_MIN_GAIN) * spread(1.0, s):
         return 1.0, round(s, 2)
     return round(g, 2), round(s, 2)

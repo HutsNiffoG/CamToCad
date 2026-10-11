@@ -864,6 +864,16 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         warnings.append(f"{len(close)} foto('s) van dichterbij dan {CLOSE_MM / 10:.0f} cm ("
                         + ", ".join(close[:6]) + (" ..." if len(close) > 6 else "") + "): de scherptediepte is "
                         "dan klein en een telefoon schakelt soms naar de macrolens. Houd 25-35 cm aan")
+    # v0.16.3: hoe groot de mat in beeld is (pixels per mm, zoals de maskers rekenen), en of de foto's met de
+    # groothoeklens zijn gemaakt. Een kleine mat is de eerste verdachte als het masker het onderdeel niet vindt
+    mid = np.array([spec.size_mm[0] / 2, spec.size_mm[1] / 2, 0.0])
+    px_per_mm = float(np.median([cam.K[0, 0] / max(float((p.R @ mid + p.t)[2]), 1.0) for p in cal.poses.values()]))
+    wide = [i.focal35_mm for i in used if preflight.is_wide(i.focal35_mm)]
+    small_mat = ""
+    if px_per_mm < preflight.LOW_PX_MM:
+        small_mat = " " + preflight.small_mat_advice(px_per_mm, float(np.median(wide)) if len(wide) > len(used) / 2
+                                                     else None)
+        warnings.append(small_mat.strip())
     if cam.f_std_rel > F_STD_WARN:  # V10: de brandpuntsafstand is slecht bepaald (weinig verschillende hoeken)
         warnings.append(f"brandpuntsafstand onzeker (σ {100 * cam.f_std_rel:.2f}%, goed is < {100 * F_STD_WARN:.1f}%): "
                         "maak foto's van meer verschillende hoeken en hoogtes, met de mat steeds grotendeels in beeld")
@@ -890,7 +900,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if ch is not None:  # kleur (V8): terug naar volle resolutie en dezelfde ontvervorming als het grijsbeeld
             ch = undistort(cv2.resize(ch.astype(np.float32), (img.shape[1], img.shape[0]),
                                       interpolation=cv2.INTER_LINEAR))
-        tn = tone.estimate(lookup[pose.name], pred, valid, cam, sharp)
+        tn = tone.estimate(lookup[pose.name], pred, valid, cam, sharp, blur.get(pose.name))
         return pose, masks.classify(img, pred, valid, px_per_mm=cam.K[0, 0] / max(depth, 1.0),
                                     blur_px=blur.get(pose.name), chroma=ch, tone_params=tn)
 
@@ -911,7 +921,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     top_views: list = []
     all_views, lig_of = views, {}  # ook de foto's die niet bij de rest passen staan in diagnose.json
     diag = {"camtocad": __version__, "opencv": cv2.__version__, "detector_bias_px": bias.tolist(),
-            "camera": cam.to_dict(), "geweigerd": cal.rejected, "verscherping": sharp.to_dict()}
+            "camera": cam.to_dict(), "geweigerd": cal.rejected, "verscherping": sharp.to_dict(),
+            "mat_px_per_mm": round(px_per_mm, 2)}
 
     def write_debug(extra: dict | None = None) -> None:
         if not opts.debug_images:
@@ -939,7 +950,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if len(lig.groups[0]) < 0.75 * lig.judged:  # een kwart of meer past er niet bij: niet stilletjes weglaten
             write_overlays()
             write_debug()
-            raise ScanError(placement.moved_message(lig, [n for n, _ in images]))
+            raise ScanError(placement.moved_message(lig, [n for n, _ in images]) + small_mat)
         odd = {n for g in lig.groups[1:] for n in g} | set(lig.outliers)
         if odd:  # een paar foto's die niet kloppen: onderdeel even aangeraakt, hand in beeld, mislukt masker
             views = [v for v in views if v[0].name not in odd]
@@ -957,7 +968,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         cov = preflight.coverage(cal.poses, [board_bounds[1] / 2, board_bounds[3] / 2, 0.0])
         write_overlays()
         write_debug({"dekking": cov})
-        raise ScanError(f"{e}. " + NO_CONTOUR_HELP.format(debug=dbg) + _advice(cov)) from e
+        raise ScanError(f"{e}. " + NO_CONTOUR_HELP.format(debug=dbg) + small_mat + _advice(cov)) from e
     ijk = np.argwhere(coarse.occ)
     lo = coarse.origin + ijk.min(axis=0) * coarse.voxel
     hi = coarse.origin + ijk.max(axis=0) * coarse.voxel
@@ -1005,7 +1016,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             imwrite(dbg / "bovenaanzicht.png", debug.footprint_image(fp))
         write_debug({"startmodel": {"fout": str(e), "pogingen": e.details}})
         raise ScanError("Geen objectcontour gevonden in de foto's recht van boven. "
-                        + NO_CONTOUR_HELP.format(debug=dbg) + _advice(cov)) from e
+                        + NO_CONTOUR_HELP.format(debug=dbg) + small_mat + _advice(cov)) from e
     warnings += init.notes
     sweep = init.sweep
     if sweep is not None and sweep.best is not None:
@@ -1270,7 +1281,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
     if stats_fit["iou_median"] < 0.9:
         write_debug({"kwaliteit": issues})
         raise ScanError("Het gevonden model past niet bij de foto's (silhouet-IoU mediaan "
-                        f"{stats_fit['iou_median']:.2f}). " + NO_CONTOUR_HELP.format(debug=dbg))
+                        f"{stats_fit['iou_median']:.2f}). " + NO_CONTOUR_HELP.format(debug=dbg) + small_mat)
     if issues:
         log("LET OP, resultaat onbetrouwbaar: " + "; ".join(issues))
         warnings[:0] = [f"onbetrouwbaar: {i}" for i in issues]

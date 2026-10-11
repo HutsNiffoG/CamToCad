@@ -36,7 +36,7 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
     import cadquery as cq
 
     spec = mat.PRESETS["A4"]
-    cam = render.default_camera(1280, 720, 940.0, dist=(0, 0, 0, 0, 0))
+    cam = render.default_camera(1280, 720, 1100.0, dist=(0, 0, 0, 0, 0))  # 3,3 px per mm: groot genoeg (v0.16.3)
     R, t = render.look_at([125.0, 80.0, 330.0], [125.0, 80.0, 0.0])
     box = render.tessellate(render.place(cq.Workplane("XY").box(50, 30, 10, centered=(True, True, False)), spec))
     img, _ = render.render_view(mat.rasterize_board(spec, 5.0, 3.0), cam, R, t, box, rng=np.random.default_rng(2))
@@ -107,6 +107,53 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
     assert len(photos) == 1
     check = json.loads((job / "controle.json").read_text())["fotos"][photos[0]]
     assert check["mat"] == "A4" and check["verdict"] == "goed", check["notes"]
+
+
+def test_the_lens_button_switches_between_the_back_cameras(tmp_path, monkeypatch):
+    """v0.16.3: een telefoon met meer lenzen kiest in de browser soms de groothoeklens (0,6×), en dan is de mat op
+    25-35 cm klein in beeld. Met meer camera's verschijnt de knop Lens: die kiest de volgende camera, en de beelden naar
+    de pc zeggen welke camera het is (dan begint de brandpuntsafstand daar opnieuw)."""
+    from camtocad import live
+
+    lenses = []
+    check = live.live_check
+    monkeypatch.setattr(live, "live_check", lambda *a, **k: lenses.append(k.get("lens")) or check(*a, **k))
+    app = create_app(tmp_path / "data", token="t")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started and thread.is_alive():
+        time.sleep(0.05)
+    try:
+        with sync_api.sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(executable_path=os.environ.get("CTC_CHROMIUM") or None,
+                                             args=["--use-fake-ui-for-media-stream",
+                                                   "--use-fake-device-for-media-stream=device-count=3"])
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"Chromium niet beschikbaar: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{port}/?token=t")
+            page.click("#live-start")
+            page.wait_for_selector("#live-lens", state="visible", timeout=30000)  # drie camera's: de knop staat er
+            first = page.evaluate("live.lens")
+            assert first and page.evaluate("live.cams.length") == 3
+            page.click("#live-lens")
+            page.wait_for_function(f"live.lens && live.lens !== {json.dumps(first)} && !live.switching", timeout=30000)
+            second = page.evaluate("live.lens")
+            for _ in range(100):  # de volgende beelden gaan met de nieuwe camera naar de pc
+                if second in lenses:
+                    break
+                page.wait_for_timeout(100)
+            assert first in lenses and second in lenses
+            assert not page.locator("#live-lens").get_attribute("class")  # niets gevraagd: de knop knippert niet
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(10)
 
 
 def test_an_interrupted_upload_is_sent_again_without_a_double(tmp_path):

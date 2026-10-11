@@ -15,7 +15,9 @@ goed voorspellen, moet dat terug. Per scan en per foto:
   niet (de vorm van de vervaging past niet precies), die komt daarna.
 * **Kromme en onscherpte** (`estimate`), per foto: de ruwe foto eerst ontscherpt, dan masks._tone_exponent op de ruwe
   foto en de voorspelde mat in de ruwe geometrie. Niet op de ontvervormde foto: de interpolatie bij het ontvervormen
-  mengt gecodeerde grijswaarden, en dat maakte een sRGB-kromme ~0,05 te vlak (§3k).
+  mengt gecodeerde grijswaarden, en dat maakte een sRGB-kromme ~0,05 te vlak (§3k). De extra onscherpte blijft binnen
+  de onscherpte die aan de randen van de mat gemeten is, plus BLUR_MARGIN_PX (v0.16.3): een pose die niet helemaal
+  past, lijkt anders op vervaging.
 """
 
 from __future__ import annotations
@@ -42,6 +44,10 @@ SHARP_MIN = 0.05  # kleinere k: geen verscherping
 # Een kleinere straal is geen verscherping van de camera maar een restje van het model: zonder verscherping, met een
 # vage foto en een sRGB-kromme, vindt de fit soms k ~0,2 op de ondergrens van σ (0,5 px)
 SHARP_MIN_PX = 0.75
+# De extra onscherpte van de toonkromme hooguit zoveel boven de gemeten onscherpte (v0.16.3). Op de gerenderde
+# stresstests (2486 foto's) blijft de schatting daar altijd onder (tot 0,34 px boven de gemeten onscherpte, bij de
+# bewogen foto's), en dan verandert de grens niets
+BLUR_MARGIN_PX = 0.5
 
 
 @dataclass
@@ -285,14 +291,16 @@ def tile_grid(raw: np.ndarray, p: np.ndarray, v: np.ndarray, g0: float, blur: fl
     return grid
 
 
-def estimate(gray_raw: np.ndarray, pred: np.ndarray, valid: np.ndarray, cam, sh: Sharpening) -> masks.Tone:
+def estimate(gray_raw: np.ndarray, pred: np.ndarray, valid: np.ndarray, cam, sh: Sharpening,
+             blur_px: float | None = None) -> masks.Tone:
     """Toonkromme en extra onscherpte van één foto (zie de moduletekst), met de verscherping van de camera, en bij
     lokale toonbewerking een kromme per tegel (tile_grid). `pred`, `valid`: de voorspelde mat (ontvervormd, zoals
-    masks.predict_background)."""
+    masks.predict_background); `blur_px`: de onscherpte gemeten aan de randen van de mat (preflight.measure_blur), als
+    grens voor de extra onscherpte (v0.16.3)."""
     raw = desharpen(gray_raw, sh)
     p = to_raw(pred.astype(np.float32), cam)
     v = to_raw(valid.astype(np.uint8), cam, nearest=True) > 0
-    g, blur = masks._tone_exponent(raw, p, v)
+    g, blur = masks._tone_exponent(raw, p, v, None if blur_px is None else blur_px + BLUR_MARGIN_PX)
     grid = tile_grid(raw, p, v, g, blur)
     return masks.Tone(g=g, blur=blur, sharpen=sh.k if sh.k >= SHARP_MIN else 0.0, sharpen_px=sh.sigma, grid=grid)
 

@@ -104,3 +104,35 @@ def test_local_tone_mapping_gets_a_curve_per_tile():
             tn = masks.Tone(g=g0, grid=grid)
             gm = tn.g_map(p.shape)
             assert gm.shape == p.shape and gm[:, -1].mean() > gm[:, 0].mean()
+
+
+def test_a_dark_part_on_a_small_mat_is_not_taken_for_blur():
+    """v0.16.3: de mat klein in beeld (2 px per mm, zoals een groothoeklens op 30 cm) met een groot zwart onderdeel
+    erop, recht van boven. Waar het onderdeel de overgangen van de mat bedekt, past een vagere voorspelling met een
+    extreme kromme beter, en de schatting gaf g 0,25 en 1,8 px extra vervaging bij een lineaire, scherpe foto (zo ook
+    op de tweede echte fotoset, met een groothoeklens: 1,5-3,3 px bij 0,5-0,9 px gemeten). Dan past de voorspelde mat
+    nergens, en het masker vond het onderdeel niet. De onscherpte die aan de randen van de mat gemeten is, begrenst die
+    extra vervaging; dan vindt het masker het onderdeel weer."""
+    import cadquery as cq
+
+    from camtocad import calib, mat, preflight, render
+
+    spec = mat.PRESETS["A4"]
+    raster = mat.rasterize_board(spec, 10.0, 3.0)
+    cam = render.default_camera(dist=(0, 0, 0, 0, 0))
+    box = render.tessellate(render.place(cq.Workplane("XY").box(60, 40, 15, centered=(True, True, False)), spec))
+    c = np.array([spec.board_w_mm / 2, spec.board_h_mm / 2, 0.0])
+    R, t = render.look_at(c + [0.0, 0.0, 650.0], c)
+    img, _ = render.render_view(raster, cam, R, t, box, albedo=0.12, blur=0.5, noise=1.5, rng=np.random.default_rng(3))
+    pred, valid = masks.predict_background(raster, cam.K, calib.Pose("boven", R, t), (cam.width, cam.height))
+    det = calib.detect(img, mat.make_board(spec), "boven", None, np.zeros(2))
+    measured = preflight.measure_blur(img, det, spec)
+    assert measured == pytest.approx(0.5, abs=0.15)
+    ppm, area = cam.K[0, 0] / 650.0, 60 * 40 * (cam.K[0, 0] / 650.0) ** 2  # ~2 px per mm; het doosje in pixels
+    no_sharpening = tone.Sharpening(0.0, 0.5, 0)
+    free = tone.estimate(img, pred, valid, cam, no_sharpening)
+    capped = tone.estimate(img, pred, valid, cam, no_sharpening, measured)
+    assert free.blur > 1.5 and capped.blur <= measured + tone.BLUR_MARGIN_PX + 0.005  # afgerond op 0,01 px
+    found = [masks.classify(img, pred, valid, px_per_mm=ppm, blur_px=measured, tone_params=tn).fg.sum() / area
+             for tn in (free, capped)]
+    assert found[0] < 0.75 and found[1] > 0.9, found

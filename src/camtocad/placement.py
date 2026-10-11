@@ -222,8 +222,28 @@ def _names(group: list[str], order: list[str]) -> str:
     return f"{len(g)} foto's: {shown}"
 
 
+def scattered(res: Placements, order: list[str]) -> bool:
+    """Liggen de foto's die niet bij de grootste groep passen verspreid door de serie (v0.16.3)? Een onderdeel dat
+    verschoven is, splitst de serie in een stuk ervoor en een stuk erna (en terugleggen geeft een derde stuk); foto's
+    die telkens tussendoor niet passen, wijzen op de maskers: het onderdeel is in die foto's niet goed gezien."""
+    if not res.groups:
+        return False
+    main = set(res.groups[0])
+    judged = main | set(res.outliers) | {n for g in res.groups[1:] for n in g}
+    seq = [n in main for n in order if n in judged]
+    return 1 + sum(a != b for a, b in zip(seq, seq[1:])) >= SCATTERED_RUNS
+
+
 def moved_message(res: Placements, order: list[str]) -> str:
     """Uitleg voor de gebruiker als de foto's elkaar tegenspreken (`order`: alle fotonamen)."""
+    if scattered(res, order):
+        return (f"De foto's spreken elkaar tegen: maar {len(res.groups[0])} van de {res.judged} foto's passen bij "
+                f"elkaar ({_names(res.groups[0], order)}). De andere liggen verspreid door de serie, dus het onderdeel "
+                "is waarschijnlijk niet verschoven: de objectmaskers zien het in een deel van de foto's niet goed (kijk "
+                "in debug/masker_*.jpg, oranje = object). Dat gebeurt bij een onderdeel dat nauwelijks afsteekt tegen "
+                "de mat (zwart op de zwarte vakken, wit op wit), bij harde schaduwen of glans, en als de mat klein in "
+                "beeld is. Route A maakt alleen modellen van platte onderdelen (2,5D): een hoog of gebogen voorwerp "
+                "lukt niet.")
     n_odd = len(res.outliers)
     odd = "1 foto past nergens bij" if n_odd == 1 else f"{n_odd} foto's passen nergens bij"
     advice = ("Een scan heeft één vaste ligging nodig. Leg het onderdeel neer en maak alle foto's zonder het aan te "
@@ -244,6 +264,10 @@ def moved_message(res: Placements, order: list[str]) -> str:
             "aan de objectmaskers liggen (harde schaduwen, glans, een onderdeel dat nauwelijks afsteekt tegen de "
             "mat: kijk in debug/masker_*.jpg). " + advice)
 
+
+# v0.16.3: zoveel stukken of meer (afwisselend wel en niet bij de grootste groep, in de volgorde van de serie) is geen
+# verschuiving meer maar een masker dat het onderdeel in een deel van de foto's mist
+SCATTERED_RUNS = 5
 
 # V27 (v0.12): een duwtje telt vanaf zoveel mm (de grootste verplaatsing van een punt op de rand) en zo ver boven de
 # spreiding van de verschuivingen per foto (toetsgrootheid: de sprong gedeeld door zijn standaardfout); aan elke kant

@@ -82,6 +82,20 @@ def test_the_message_names_the_groups_in_photo_order():
     assert "1 foto past nergens bij" in text and "aparte scan" in text
 
 
+def test_photos_that_misfit_here_and_there_point_to_the_masks_not_a_move():
+    """v0.16.3: passen de foto's die niet bij de rest horen telkens tussendoor niet, dan is het onderdeel niet
+    verschoven maar zien de maskers het in die foto's niet goed (zoals op de tweede echte fotoset, met een
+    groothoeklens). Eén verschuiving splitst de serie in een stuk ervoor en een stuk erna."""
+    order = [f"foto_{k:04d}.jpg" for k in range(20)]
+    odd = [order[k] for k in (3, 4, 8, 12, 16, 17)]
+    res = placement.Placements([[n for n in order if n not in odd]], odd, [])
+    text = placement.moved_message(res, order)
+    assert placement.scattered(res, order)
+    assert "niet verschoven" in text and "objectmaskers" in text and "2,5D" in text and "verplaatst" not in text
+    moved = placement.Placements([order[:12]], order[12:], [])
+    assert not placement.scattered(moved, order) and "verplaatst" in placement.moved_message(moved, order)
+
+
 def test_the_split_of_a_nudge_lies_between_the_right_photos():
     """V27: van twee bijna even goede grenzen gaat de foto vlak bij de sprong naar de groep waar hij bij hoort."""
     rng = np.random.default_rng(1)

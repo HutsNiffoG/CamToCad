@@ -220,6 +220,29 @@ def test_a_moving_phone_or_another_lens_gets_no_photo(live_frames):
     assert not r["opnemen"] and "lens" in r["aanwijzing"] and r["spraak"].startswith("Andere lens")
 
 
+def test_a_small_mat_asks_to_come_closer_or_to_switch_to_the_normal_lens(live_frames):
+    """v0.16.3: met de groothoeklens (0,6×) is de mat op 30 cm klein in beeld (~2,5 px per mm in de foto, de
+    verwerking rekent op 3,5): eerst de gewone lens of dichterbij. Kiest de pagina een andere camera, dan begint de
+    brandpuntsafstand opnieuw (geen melding 'andere lens')."""
+    spec, frame = live_frames
+    ov = {"recht_van_boven": 5}
+    s = live.LiveSession()
+    for az in (0, 40, 80, 120, 160):  # schuine beelden: de brandpuntsafstand van deze lens
+        r = live.live_check(frame(az, 45, d=300, f=365.0), spec, ov, session=s, lens="achter-2")
+    assert r["f_rel"] == pytest.approx(365 / 960, rel=0.05)
+    assert not r["opnemen"] and r["icoon"] == "lens" and r["spraak"] == "Groothoeklens: kies 1×."
+    assert r["px_per_mm"] < live.LOW_PX_MM
+    r = live.live_check(frame(0, 60, d=200, f=365.0), spec, ov, session=s, lens="achter-2")  # dichterbij: wel goed
+    assert r["px_per_mm"] >= live.LOW_PX_MM and r["icoon"] != "lens" and r["opnemen"]
+    r = live.live_check(frame(0, 60), spec, ov, session=s, lens="achter-0")  # de gewone lens gekozen
+    assert r["opnemen"] and not r["aanwijzing"].startswith("De telefoon wisselde van lens")
+    # zonder brandpuntsafstand uit de beelden, maar met foto's van de groothoeklens (EXIF): ook verder dan ~55 cm
+    r = live.live_check(frame(0, 60, d=560), spec, {**ov, "groothoek": True}, LIVE_F / 960)
+    assert r["icoon"] == "lens" and not r["opnemen"]
+    r = live.live_check(frame(0, 60, d=560), spec, ov, LIVE_F / 960)
+    assert r["icoon"] == "dichterbij" and r["spraak"] == "Dichterbij."
+
+
 def test_steps_and_progress():
     need = live.missing_views({"recht_van_boven": 2})
     step, progress = live._progress(need)

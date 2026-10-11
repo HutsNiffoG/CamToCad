@@ -32,8 +32,8 @@ import numpy as np
 
 from . import calib
 from .mat import MatSpec, make_board, rasterize_board
-from .preflight import (BANDS, CLOSE_MM, SECTORS, STEEP_DEG, _detect_any, _edge_blur, _focal_and_tilt, _photometry,
-                        to_work, view_distance)
+from .preflight import (BANDS, CLOSE_MM, LOW_PX_MM, SECTORS, STEEP_DEG, WORK_SIDE, _detect_any, _edge_blur,
+                        _focal_and_tilt, _photometry, mat_scale, to_work, view_distance)
 
 LIVE_SIDE = 960  # beelden van de livecamera: kleiner dan de werkresolutie, ~0,05 s per beeld
 LIVE_BLUR_MAX = 1.5  # σ (px op LIVE_SIDE) waarboven het beeld beweegt (~3 px op de werkresolutie, BLUR_BAD)
@@ -55,6 +55,8 @@ FOOT_DECAY = 0.985  # per beeld telt het bewijs iets minder: na ~6 s de helft (h
 FOOT_MIN_CELLS = 20  # kleinste voorwerp: 80 mm²
 RING_MARGIN_MM, RING_MIN_MM = 15.0, 25.0  # de ring ligt zo ver buiten het onderdeel
 EDGE_MM = 15.0  # het onderdeel dichter bij de rand van het bord: melden
+# v0.16.3: een brandpuntsafstand (/ lange zijde) hieronder is een groothoeklens (0,6×: ~0,38; de gewone lens ~0,7)
+WIDE_F_REL = 0.5
 
 
 # ----------------------------------------------------------------------------- richtingen en vakken
@@ -324,6 +326,7 @@ class LiveSession:
         self.spec: MatSpec | None = None
         self.foot: FootprintGrid | None = None
         self.last: tuple[float, str, np.ndarray] | None = None  # (tijd in s, mat, homografie)
+        self.lens: str | None = None  # welke camera de pagina gebruikt (v0.16.3)
 
     def f_rel(self) -> float | None:
         return float(np.median(self.f)) if self.f else None
@@ -361,7 +364,7 @@ def _image_speed(last, now: float | None, spec: MatSpec, H: np.ndarray) -> float
 
 def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | None = None,
                f_rel: float | None = None, hint: MatSpec | None = None, session: LiveSession | None = None,
-               t: float | None = None) -> dict:
+               t: float | None = None, lens: str | None = None) -> dict:
     """Beoordeelt één beeld van de livecamera (V25): is de mat in beeld, waar ligt het onderdeel, waar staat de
     camera ten opzichte daarvan, is dat een richting die nog ontbreekt, en is het beeld stil en scherp genoeg? Geeft
     één aanwijzing (`aanwijzing`; kort, in beeld en om uit te spreken: `spraak`; het pictogram: `icoon`), korte
@@ -370,8 +373,9 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
 
     `spec`: de mat van de scan (als die bekend is); `overview`: de samenvatting van de foto's tot nu toe
     (preflight.summarize: dekking, recht_van_boven, punten, object_mm); `session`: wat de begeleiding van de vorige
-    beelden onthoudt; `t`: het moment van het beeld (s, klok van de telefoon), voor de snelheid. Zonder sessie:
-    `f_rel` (brandpuntsafstand / lange zijde) en `hint` (de mat van het vorige beeld)."""
+    beelden onthoudt; `t`: het moment van het beeld (s, klok van de telefoon), voor de snelheid; `lens`: welke camera
+    de pagina gebruikt (v0.16.3; kiest de gebruiker een andere, dan begint de brandpuntsafstand opnieuw). Zonder
+    sessie: `f_rel` (brandpuntsafstand / lange zijde) en `hint` (de mat van het vorige beeld)."""
     gray = to_work(img, LIVE_SIDE)
     h, w = gray.shape
     need = missing_views(overview)
@@ -380,9 +384,12 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
            "scherpte_px": None, "wit": None, "f_rel": None, "positie": None, "vak": None, "doelvak": None,
            "opnemen": False, "status": "zoek", "aanwijzing": "", "spraak": "", "icoon": "mat", "opmerkingen": [],
            "nodig": need, "gedekt": not any(need.values()), "stap": step, "voortgang": progress, "onderdeel": None,
-           "ring": None, "pijl": None, "boven": None, "doel_elevatie": None, "snelheid_px_s": None, "stil": None}
+           "ring": None, "pijl": None, "boven": None, "doel_elevatie": None, "snelheid_px_s": None, "stil": None,
+           "px_per_mm": None}
     if session is not None:
         with session.lock:
+            if lens is not None and lens != session.lens:  # een andere camera gekozen: een andere brandpuntsafstand
+                session.f, session.last, session.lens = [], None, lens
             f_rel = f_rel or session.f_rel()
             hint = hint or session.spec
     det, found = _detect_any(gray, spec or hint, "live")
@@ -404,6 +411,10 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
         return out
     bw, bh = found.board_w_mm, found.board_h_mm
     out["omtrek"] = _to_image([[0, bh], [bw, bh], [bw, 0], [0, 0]], H, found, w, h)
+    # hoe groot de mat in de foto komt (pixels per mm, op de werkresolutie van de verwerking; v0.16.3): uit de
+    # homografie zelf, dus ook zonder brandpuntsafstand
+    scale = mat_scale(H, found)
+    out["px_per_mm"] = None if scale is None else round(scale * WORK_SIDE / max(w, h), 2)
     white, _, clipped = _photometry(gray, H, det, found)
     blur = _edge_blur(gray, H, det, found.nominal(), n_patches=16)
     out.update(wit=round(white, 1), scherpte_px=None if blur is None else round(blur, 2))
@@ -515,6 +526,17 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
         return out
     if dist > FAR_MM:
         _tell(out, "Te ver weg: kom dichterbij, tot 25-35 cm van het onderdeel.", "Dichterbij.", "dichterbij")
+        return out
+    # v0.16.3: de mat klein in beeld, bijvoorbeeld met de groothoeklens: dan ziet de verwerking de stippen van de mat
+    # en een donker onderdeel niet
+    wide = (f_rel is not None and f_rel < WIDE_F_REL) or bool(ov.get("groothoek"))
+    if out["px_per_mm"] is not None and out["px_per_mm"] < LOW_PX_MM:
+        if wide:
+            _tell(out, "De telefoon gebruikt de groothoeklens (0,6×), en dan is de mat klein in beeld: kies de gewone "
+                       "lens (1×) met de knop Lens, of kom dichterbij.", "Groothoeklens: kies 1×.", "lens")
+        else:
+            _tell(out, "De mat is klein in beeld: kom dichterbij, met de mat grotendeels in beeld.", "Dichterbij.",
+                  "dichterbij")
         return out
     if cell is not None and need.get(cell, 0) > 0 and (cell == "boven" or need["boven"] == 0):
         out["doelvak"] = cell
