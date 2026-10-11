@@ -33,7 +33,7 @@ import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from .. import __version__, preflight, validate
+from .. import __version__, live, preflight, validate
 from . import qr
 from ..imgio import sniff_image
 from ..mat import PRESETS, get_spec, write_mat
@@ -94,7 +94,7 @@ class JobStore:
         # overzicht per scan, met de inhoud van controle.json en de matkeuze als sleutel: summarize kalibreert een
         # snelle camera (tot ~1 s), en de live begeleiding vraagt het overzicht bij elk beeld (V25)
         self._overviews: dict[str, tuple] = {}
-        self._live: dict[str, dict] = {}  # per scan: brandpuntsafstand en mat van de vorige livebeelden
+        self._live: dict[str, live.LiveSession] = {}  # per scan: wat de live begeleiding onthoudt (V25)
 
     def lock(self, job_id: str) -> threading.Lock:
         with self._guard:
@@ -363,21 +363,15 @@ class JobStore:
             self._overviews[job_id] = (key, ov, spec)
         return ov, spec
 
-    def live(self, job_id: str, img: np.ndarray) -> dict:
-        """Beoordeelt één beeld van de livecamera tegen de foto's van de scan tot nu toe (V25)."""
+    def live(self, job_id: str, img: np.ndarray, t: float | None = None) -> dict:
+        """Beoordeelt één beeld van de livecamera tegen de foto's van de scan tot nu toe (V25). `t`: het moment van
+        het beeld (s, klok van de telefoon), voor de snelheid van de telefoon (v0.16)."""
         ov, spec = self._overview(job_id)
         with self._guard:
-            state = self._live.setdefault(job_id, {"f": [], "mat": None})
-            f_rel = float(np.median(state["f"])) if state["f"] else None
-            hint = state["mat"]
+            session = self._live.setdefault(job_id, live.LiveSession())
         t0 = time.perf_counter()
-        res = preflight.live_check(img, spec, ov["overzicht"], f_rel, hint)
+        res = live.live_check(img, spec, ov["overzicht"], session=session, t=t)
         res["ms"] = round(1000 * (time.perf_counter() - t0))
-        with self._guard:
-            if res["mat"]:
-                state["mat"] = get_spec(res["mat"])
-            if res["f_rel"]:
-                state["f"] = (state["f"] + [res["f_rel"]])[-25:]
         res["fotos"] = len(ov["fotos"])
         return res
 
@@ -550,9 +544,10 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         return store.overview(job_id)
 
     @app.post("/api/scans/{job_id}/live")
-    def live_frame(job_id: str, request: Request, beeld: UploadFile = File(...)):
-        """Eén beeld van de livecamera (V25): waar staat de camera ten opzichte van het onderdeel, welke richting
-        ontbreekt nog, en is dit een goed moment voor een foto? Het beeld wordt niet bewaard."""
+    def live_frame(job_id: str, request: Request, beeld: UploadFile = File(...), t: float | None = Form(None)):
+        """Eén beeld van de livecamera (V25): waar ligt het onderdeel, waar staat de camera ten opzichte daarvan,
+        welke richting ontbreekt nog, en is dit een goed moment voor een foto? `t`: het moment van het beeld (ms, klok
+        van de telefoon). Het beeld wordt niet bewaard."""
         check(request)
         data = beeld.file.read(MAX_LIVE_BYTES + 1)
         if len(data) > MAX_LIVE_BYTES:
@@ -560,7 +555,7 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
         img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE) if data else None
         if img is None:
             raise HTTPException(400, "Geen leesbaar beeld")
-        return store.live(job_id, img)
+        return store.live(job_id, img, None if t is None else t / 1000.0)
 
     @app.delete("/api/scans/{job_id}/fotos/{name}")
     def delete_photo(job_id: str, name: str, request: Request):

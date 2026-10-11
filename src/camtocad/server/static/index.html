@@ -12,6 +12,7 @@
       --ok-bg:#1d3325; --warn-bg:#3a2c16; --err-bg:#3d1f1c; --miss:#4a2522; }
   }
   * { box-sizing: border-box; }
+  [hidden] { display:none !important; }  /* ook voor knoppen: hun display wint anders van hidden */
   body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
   main { max-width:760px; margin:0 auto; padding:16px 16px 48px; }
   h1 { font-size:1.4rem; margin:8px 0 4px; } h2 { font-size:1.05rem; margin:0 0 8px; } h3 { font-size:.95rem; margin:14px 0 6px; }
@@ -50,28 +51,64 @@
   .thumbs { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
   .thumbs img { width:104px; height:78px; object-fit:cover; border-radius:6px; border:1px solid var(--line); }
   details summary { cursor:pointer; color:var(--accent); }
-  /* live begeleiding (V25): de camera schermvullend, met de mat als overlay en één aanwijzing */
+  /* live begeleiding (V25; v0.16): de camera schermvullend; over het beeld de mat, het onderdeel, een ring rond het
+     onderdeel met per richting de dekking, een pijl naar het volgende vak, meters voor hoogte en afstand */
   .live { position:fixed; inset:0; z-index:10; background:#000; color:#fff; display:flex; flex-direction:column; }
   .live[hidden] { display:none; }
   .live .view { position:relative; flex:1; min-height:0; overflow:hidden; }
   .live video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
-  .live svg.overlay { position:absolute; pointer-events:none; }
-  .live .tip { position:absolute; left:8px; right:8px; top:8px; padding:10px 12px; border-radius:10px; font-size:1.05rem;
-    font-weight:600; background:rgba(20,24,30,.78); border-left:6px solid #888; }
+  .live svg.overlay { position:absolute; pointer-events:none; overflow:visible; }
+  .live svg.overlay * { vector-effect:non-scaling-stroke; }
+  .live .hud { position:absolute; left:8px; right:8px; top:8px; display:flex; flex-direction:column; gap:6px; pointer-events:none; }
+  .live .hudrow { display:flex; gap:8px; align-items:center; }
+  .live .stap { flex:1; font-size:.85rem; background:rgba(20,24,30,.72); padding:4px 10px; border-radius:8px; }
+  .live .hud button { pointer-events:auto; min-height:36px; padding:0 10px; background:rgba(20,24,30,.78); color:#fff; border-color:#555; }
+  .live .tip { padding:10px 12px; border-radius:10px; font-size:1.05rem; font-weight:600; background:rgba(20,24,30,.78);
+    border-left:6px solid #888; }
   .live .tip.opnemen { border-color:#3fbf6f; } .live .tip.verplaats { border-color:#5aa0ff; }
   .live .tip.let_op { border-color:#f0b35a; } .live .tip.zoek { border-color:#f2a39c; } .live .tip.klaar { border-color:#3fbf6f; }
   .live .tip small { display:block; font-weight:400; opacity:.85; margin-top:2px; }
+  .live svg .mat { fill:rgba(90,160,255,.08); stroke:#5aa0ff; stroke-width:3; } .live svg .mat.opnemen { stroke:#3fbf6f; }
+  .live svg .part { fill:rgba(255,255,255,.10); stroke:#fff; stroke-width:2; stroke-dasharray:6 5; }
+  .live svg .seg { fill:none; stroke-width:7; stroke-linecap:round; opacity:.85; }
+  .live svg .seg.ok { stroke:#3fbf6f; } .live svg .seg.open { stroke:#ff5a4e; } .live svg .seg.dun { stroke-width:4; opacity:.5; }
+  .live svg .seg.doel { stroke:#fff; stroke-width:10; opacity:1; animation:ctc-pulse .8s ease-in-out infinite alternate; }
+  @keyframes ctc-pulse { from { opacity:.3; } to { opacity:1; } }
+  .live svg .pijl { fill:none; stroke:#ffd34d; stroke-width:5; stroke-linecap:round; stroke-linejoin:round; }
+  .live svg .pijl.richt { stroke-dasharray:8 6; } .live svg .punt { fill:#ffd34d; }
+  .live svg .hier { fill:#fff; stroke:#000; stroke-width:2; } .live svg .kruis { stroke:#fff; stroke-width:3; }
+  .live svg .zone { fill:none; stroke:#fff; stroke-width:2; stroke-dasharray:5 5; opacity:.85; }
+  .live svg text { fill:#fff; font-weight:700; paint-order:stroke; stroke:#000; stroke-width:4px; }
+  .live .gauge { position:absolute; top:30%; height:42%; width:44px; display:flex; flex-direction:column; align-items:center;
+    gap:4px; font-size:.7rem; pointer-events:none; text-shadow:0 0 3px #000; }
+  .live .gauge[hidden] { display:none; }
+  .live .gauge.elev { right:4px; } .live .gauge.dist { left:4px; }
+  .live .gauge .track { position:relative; flex:1; width:12px; border-radius:6px; background:rgba(255,255,255,.2); }
+  .live .gauge .zone { position:absolute; left:0; right:0; border-radius:6px; background:rgba(255,255,255,.35); }
+  .live .gauge .zone.goed { background:rgba(63,191,111,.8); } .live .gauge .zone.doel { background:rgba(255,211,77,.95); }
+  .live .gauge .dot { position:absolute; left:50%; width:20px; height:20px; margin:-10px 0 0 -10px; border-radius:50%;
+    background:#fff; border:3px solid #000; transition:top .12s linear; }
   .live .bar { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 10px calc(8px + env(safe-area-inset-bottom));
     background:#111; }
   .live .bar button { background:#222; color:#fff; border-color:#444; }
+  .live .bar button.primary { background:#2e7d4f; border-color:#3fbf6f; }
   .live .bar .shutter { width:68px; height:68px; min-height:68px; border-radius:50%; border:4px solid #fff; background:#e33; padding:0; }
   .live .dome { width:124px; height:124px; flex:0 0 auto; }
   .live .dome .cell { fill:#7a2a24; stroke:#111; stroke-width:1; } .live .dome .cell.ok { fill:#2e6b45; }
   .live .dome .cell.doel { stroke:#fff; stroke-width:2.5; }
   .live .flash { position:absolute; inset:0; background:#fff; opacity:0; transition:opacity .25s; pointer-events:none; }
   .live .flash.on { opacity:.7; transition:none; }
-  .live .side { display:flex; flex-direction:column; gap:6px; align-items:flex-start; font-size:.85rem; }
+  .live .side { display:flex; flex-direction:column; gap:6px; align-items:stretch; font-size:.85rem; min-width:118px; }
+  .live .side progress { height:6px; }
   .live label { display:flex; gap:6px; align-items:center; }
+  @media (max-height: 520px) {  /* liggend: minder tekst over het beeld, de knoppen rechts naast het beeld */
+    .live { flex-direction:row; }
+    .live .tip { font-size:.85rem; padding:6px 10px; } .live .stap { font-size:.75rem; padding:2px 8px; }
+    .live .hud { right:auto; max-width:min(560px, 70%); } .live .gauge { top:auto; bottom:6px; height:46%; }
+    .live .bar { flex-direction:column; justify-content:center; gap:8px; padding:6px calc(8px + env(safe-area-inset-right)) 6px 8px; }
+    .live .dome { width:92px; height:92px; } .live .bar .shutter { width:60px; height:60px; min-height:60px; }
+    .live .side { min-width:110px; gap:4px; }
+  }
   /* Fase 0: schuifmaatmetingen per scan en de meetset */
   .maten input[type=text] { min-height:40px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--fg);
     font:inherit; padding:0 8px; width:100%; max-width:22em; }
@@ -167,8 +204,20 @@
 <div id="live" class="live" hidden>
   <div class="view" id="live-view">
     <video id="live-video" playsinline muted autoplay></video>
-    <svg id="live-overlay" class="overlay" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true"></svg>
-    <div id="live-tip" class="tip zoek" role="status" aria-live="polite">Camera starten…</div>
+    <svg id="live-overlay" class="overlay" aria-hidden="true"></svg>
+    <div class="hud">
+      <div class="hudrow">
+        <span id="live-stap" class="stap">Camera starten…</span>
+        <button id="live-geluid" type="button" aria-pressed="true" aria-label="Gesproken aanwijzingen en geluid aan of uit">🔊</button>
+      </div>
+      <div id="live-tip" class="tip zoek" role="status" aria-live="polite">Camera starten…</div>
+    </div>
+    <div id="live-afstand" class="gauge dist" hidden aria-hidden="true"><span>ver</span>
+      <div class="track"><i class="zone goed" style="bottom:30%;height:20%"></i><b class="dot"></b></div><span>dichtbij</span></div>
+    <div id="live-elev" class="gauge elev" hidden aria-hidden="true"><span>boven</span>
+      <div class="track"><i class="zone" data-el="35" style="bottom:22.2%;height:33.3%"></i>
+        <i class="zone" data-el="60" style="bottom:55.6%;height:33.3%"></i>
+        <i class="zone" data-el="90" style="bottom:91.1%;height:8.9%"></i><b class="dot"></b></div><span>laag</span></div>
     <div id="live-flash" class="flash"></div>
   </div>
   <div class="bar">
@@ -177,7 +226,12 @@
     <div class="side">
       <label><input id="live-auto" type="checkbox" checked> automatisch</label>
       <span id="live-count">0 foto's</span>
-      <button id="live-stop" type="button" class="small">Klaar</button>
+      <progress id="live-voortgang" max="37" value="0" aria-label="Voortgang van de foto's"></progress>
+      <div class="row" style="gap:6px">
+        <button id="live-terug" type="button" class="small" disabled aria-label="Laatste foto weghalen">↶</button>
+        <button id="live-stop" type="button" class="small">Klaar</button>
+      </div>
+      <button id="live-verwerk" type="button" class="small primary" hidden>Verwerken</button>
     </div>
   </div>
 </div>
@@ -391,14 +445,15 @@ $("lijst").addEventListener("click", async (e) => {
   catch (err) { $("melding").textContent = err.message; }
 });
 
-$("start").addEventListener("click", async () => {
+async function startProcessing() {
   if (!current || busy) return;
   try {
     await api("POST", `api/scans/${current}/start`, settings());
     $("melding").textContent = "De verwerking loopt op de pc; volg de status hieronder.";
     reset(false); load();
   } catch (e) { $("melding").textContent = "Starten mislukt: " + e.message; }
-});
+}
+$("start").addEventListener("click", startProcessing);
 
 function reset(clearMsg = true) {
   current = null; store.set("ctc_scan", null);
@@ -474,11 +529,61 @@ $("scans").addEventListener("click", async (e) => {
   }
 });
 
-// ---------------------------------------------------------------- live begeleiding (V25)
-// De camera draait in de pagina; ~6 beelden per seconde gaan verkleind naar de pc, die per beeld zegt waar de
-// telefoon staat, welke richting nog ontbreekt en of dit een goed moment is voor een foto. Twee keer achter elkaar
-// 'opnemen' maakt (met 'automatisch' aan) de foto: met ImageCapture een echte foto, anders (iPhone) het videobeeld.
-const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null };
+// ---------------------------------------------------------------- live begeleiding (V25; v0.16)
+// De camera draait in de pagina; ~8 beelden per seconde gaan verkleind naar de pc. Die zegt per beeld waar het
+// onderdeel ligt, waar de telefoon staat, welke richting nog ontbreekt en of dit een goed moment is voor een foto, en
+// geeft de geometrie voor de overlay: de mat, het onderdeel, een ring op de mat rond het onderdeel met per richting de
+// dekking (binnen ~60°, buiten ~35°) en een pijl naar het volgende vak. Twee keer achter elkaar 'opnemen' maakt (met
+// 'automatisch' aan) de foto: met ImageCapture een echte foto, anders (iPhone) het scherpste van drie videobeelden.
+const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null,
+               taken: [], covered: false };
+
+// gesproken aanwijzingen en geluid (v0.16): een korte zin als de aanwijzing verandert, een sluitergeluid bij een foto
+const sound = { on: store.get("ctc_geluid") !== "uit", ctx: null, said: "", saidAt: 0, cand: "", candN: 0, voice: null };
+function pickVoice() {
+  try { sound.voice = speechSynthesis.getVoices().find((v) => /^nl([-_]|$)/i.test(v.lang)) || null; } catch (e) {}
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+function say(text, force = false) {
+  if (!sound.on || !text || !("speechSynthesis" in window)) return;
+  const now = performance.now();
+  if (!force && (now - sound.saidAt < 2500 || (text === sound.said && now - sound.saidAt < 9000))) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "nl-NL"; u.rate = 1.05;
+    if (sound.voice) u.voice = sound.voice;
+    speechSynthesis.speak(u);
+    sound.said = text; sound.saidAt = now;
+  } catch (e) {}
+}
+
+// alleen een zin die twee beelden achter elkaar gelijk is: geen gestotter als één beeld twijfelt
+function speakFrom(res) {
+  if (res.spraak === sound.cand) sound.candN++; else { sound.cand = res.spraak; sound.candN = 1; }
+  if (sound.candN === 2) say(res.spraak);
+}
+
+function beep(freq, ms, vol = 0.15, type = "sine", delay = 0) {
+  if (!sound.on || !sound.ctx) return;
+  try {
+    const o = sound.ctx.createOscillator(), g = sound.ctx.createGain(), t = sound.ctx.currentTime + delay / 1000;
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000);
+    o.connect(g); g.connect(sound.ctx.destination); o.start(t); o.stop(t + ms / 1000 + 0.02);
+  } catch (e) {}
+}
+const shutterSound = () => { beep(1800, 35, 0.18, "square"); beep(900, 60, 0.14, "square", 45); };
+const doneSound = () => { beep(660, 140); beep(880, 140, 0.15, "sine", 150); beep(1320, 280, 0.15, "sine", 300); };
+
+function setSound(on) {
+  sound.on = on; store.set("ctc_geluid", on ? null : "uit");
+  const b = $("live-geluid");
+  b.textContent = on ? "🔊" : "🔇"; b.setAttribute("aria-pressed", String(on));
+  if (!on && "speechSynthesis" in window) speechSynthesis.cancel();
+}
+setSound(sound.on);
 
 async function ensureScan() {
   if (!current) {
@@ -490,6 +595,10 @@ async function ensureScan() {
 async function liveStart() {
   const msg = $("live-melding");
   msg.hidden = true;
+  // geluid en spraak mogen (iOS) alleen beginnen binnen een tik: hier, vóór het wachten op de camera
+  try { sound.ctx = sound.ctx || new (window.AudioContext || window.webkitAudioContext)(); sound.ctx.resume(); } catch (e) {}
+  sound.said = ""; sound.cand = ""; sound.saidAt = 0;
+  say("Livecamera aan.", true);
   if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     let html = "De camera werkt in de browser alleen op een beveiligde pagina (https).";
     try {
@@ -517,45 +626,51 @@ async function liveStart() {
   document.body.style.overflow = "hidden";
   try { await v.play(); } catch (e) {}
   try { live.wake = await navigator.wakeLock.request("screen"); } catch (e) {}
-  live.running = true; live.streak = 0;
+  live.running = true; live.streak = 0; live.taken = []; live.covered = false;
+  $("live-terug").disabled = true; $("live-verwerk").hidden = true;
   liveLoop();
 }
 
-function liveStop() {
+function liveStop(refresh = true) {
   live.running = false;
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = live.track = null;
   if (live.wake) { live.wake.release().catch(() => {}); live.wake = null; }
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
   $("live").hidden = true; document.body.style.overflow = "";
-  if (current) api("GET", `api/scans/${current}/controle`).then(render).catch(() => {});
+  if (refresh && current) api("GET", `api/scans/${current}/controle`).then(render).catch(() => {});
 }
 
-const grabCanvas = document.createElement("canvas");
-function grab(maxSide, quality, canvas = grabCanvas) {
+// een beeld van de video op een canvas, de lange zijde hooguit maxSide
+function snap(maxSide, canvas = document.createElement("canvas")) {
   const v = $("live-video"), w = v.videoWidth, h = v.videoHeight;
-  if (!w || !h) return Promise.resolve(null);
+  if (!w || !h) return null;
   const k = Math.min(1, maxSide / Math.max(w, h));
   canvas.width = Math.round(w * k); canvas.height = Math.round(h * k);
   canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
-  return new Promise((res) => canvas.toBlob(res, "image/jpeg", quality));
+  return canvas;
 }
+const jpeg = (canvas, q) => new Promise((res) => canvas.toBlob(res, "image/jpeg", q));
+const liveCanvas = document.createElement("canvas");
 
 async function liveLoop() {
   while (live.running) {
     const t0 = performance.now();
     if (!live.capturing && !document.hidden) {
       try {
-        const blob = await grab(960, 0.75);
+        const c = snap(960, liveCanvas);
+        const blob = c && await jpeg(c, 0.75);
         if (blob && live.running && !live.capturing) {
           const fd = new FormData();
           fd.append("beeld", blob, "live.jpg");
+          fd.append("t", String(Math.round(t0)));  // het moment van het beeld: de pc meet zo hoe snel het beweegt
           const r = await fetch(`api/scans/${current}/live`, { method: "POST", body: fd });
           if (r.ok) { if (live.running && !live.capturing) liveShow(await r.json()); }
           else if (r.status === 404) { liveStop(); reset(); return; }
         }
       } catch (e) { $("live-tip").textContent = "Geen verbinding met de pc…"; }
     }
-    await new Promise((res) => setTimeout(res, Math.max(0, 150 - (performance.now() - t0))));
+    await new Promise((res) => setTimeout(res, Math.max(0, 90 - (performance.now() - t0))));
   }
 }
 
@@ -565,29 +680,91 @@ function liveShow(res) {
   tip.innerHTML = esc(res.aanwijzing) + (notes ? `<small>${esc(notes)}</small>` : "");
   drawOverlay(res);
   drawDome(res);
+  drawGauges(res);
+  const st = res.stap || {}, vg = res.voortgang || {};
+  $("live-stap").textContent = st.nummer === 3 ? `Klaar · ${res.fotos} foto's` :
+    `Stap ${st.nummer} van 2 · ${st.naam} · ${st.gedaan}/${st.totaal}`;
+  $("live-voortgang").max = vg.totaal || 37; $("live-voortgang").value = vg.gedaan || 0;
   $("live-count").textContent = `${res.fotos} foto's`;
+  $("live-verwerk").hidden = !res.gedekt;
+  if (res.gedekt && !live.covered) doneSound();
+  live.covered = !!res.gedekt;
+  speakFrom(res);
   live.streak = res.opnemen ? live.streak + 1 : 0;
   if (live.streak >= 2 && $("live-auto").checked && !live.capturing && performance.now() - live.last > 1500) liveCapture();
 }
 
-// de overlay precies over het zichtbare videobeeld (object-fit: contain), in genormaliseerde coördinaten
+// een pijl door de punten (pixels van de video), met een punt aan het eind
+function arrowSvg(points, unit, cls = "pijl") {
+  const n = points.length, [x1, y1] = points[n - 1], [x0, y0] = points[n - 2];
+  const len = Math.hypot(x1 - x0, y1 - y0) || 1, dx = (x1 - x0) / len, dy = (y1 - y0) / len, s = 0.045 * unit;
+  const f = (x, y) => `${x.toFixed(1)},${y.toFixed(1)}`;
+  return `<polyline class="${cls}" points="${points.map(([x, y]) => f(x, y)).join(" ")}"/>` +
+    `<polygon class="punt" points="${f(x1 + dx * s, y1 + dy * s)} ${f(x1 - dy * s * 0.6, y1 + dx * s * 0.6)} ` +
+    `${f(x1 + dy * s * 0.6, y1 - dx * s * 0.6)}"/>`;
+}
+
+// de overlay precies over het zichtbare videobeeld (object-fit: contain), in pixels van de video
 function drawOverlay(res) {
   const v = $("live-video"), box = $("live-view").getBoundingClientRect(), o = $("live-overlay");
   const vw = v.videoWidth || res.breedte, vh = v.videoHeight || res.hoogte, k = Math.min(box.width / vw, box.height / vh);
   Object.assign(o.style, { left: `${(box.width - vw * k) / 2}px`, top: `${(box.height - vh * k) / 2}px`,
                            width: `${vw * k}px`, height: `${vh * k}px` });
+  o.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+  const unit = Math.min(vw, vh), P = ([x, y]) => [x * vw, y * vh];
+  const pts = (list) => list.map((p) => P(p).map((t) => t.toFixed(1)).join(",")).join(" ");
   let svg = "";
-  if (res.omtrek) {
-    const pts = res.omtrek.map(([x, y]) => `${x},${y}`).join(" ");
-    svg += `<polygon points="${pts}" fill="rgba(90,160,255,.10)" stroke="${res.opnemen ? "#3fbf6f" : "#5aa0ff"}" ` +
-      `stroke-width="3" vector-effect="non-scaling-stroke"/>`;
+  if (res.omtrek) svg += `<polygon class="mat${res.opnemen ? " opnemen" : ""}" points="${pts(res.omtrek)}"/>`;
+  const part = res.onderdeel;
+  if (part && part.omtrek) svg += `<polygon class="part" points="${pts(part.omtrek)}"/>`;
+  const ring = res.ring, need = res.nodig || {};
+  if (ring) {  // binnen ~60°, buiten ~35°; groen = genoeg foto's, rood = ontbreekt, wit knipperend = het doel
+    let target = "";
+    for (const band of ["laag", "hoog"]) {
+      (ring[band] || []).forEach((arc, i) => {
+        const id = `${band}-${i}`, thin = ring.band && ring.band !== band ? " dun" : "";
+        svg += `<polyline class="seg ${need[id] ? "open" : "ok"}${thin}" points="${pts(arc)}"/>`;
+        if (res.doelvak === id) target = `<polyline class="seg doel" points="${pts(arc)}"/>`;
+      });
+    }
+    svg += target;
   }
+  if (res.pijl && res.pijl.length > 1) svg += arrowSvg(res.pijl.map(P), unit);
+  if (ring && ring.hier) {
+    const [x, y] = P(ring.hier);
+    svg += `<circle class="hier" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(0.02 * unit).toFixed(1)}"/>`;
+  }
+  const cx = vw / 2, cy = vh / 2;
   if (res.doel) {
-    const [x, y] = res.doel, d = 0.035;
-    for (const [x1, y1, x2, y2] of [[x - d, y, x + d, y], [x, y - d, x, y + d]])
-      svg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#fff" stroke-width="3" vector-effect="non-scaling-stroke"/>`;
+    const [x, y] = P(res.doel), d = 0.03 * unit;
+    svg += `<line class="kruis" x1="${x - d}" y1="${y}" x2="${x + d}" y2="${y}"/>` +
+      `<line class="kruis" x1="${x}" y1="${y - d}" x2="${x}" y2="${y + d}"/>`;
+    const off = Math.hypot(x - cx, y - cy);
+    if (!res.boven && off > 0.3 * unit) {  // het onderdeel ver van het midden: een pijl ernaartoe
+      const L = Math.min(off - 0.06 * unit, 0.25 * unit);
+      svg += arrowSvg([[cx, cy], [cx + (x - cx) / off * L, cy + (y - cy) / off * L]], unit, "pijl richt");
+    }
+  }
+  if (res.boven) {  // recht van boven: schuif de telefoon in de richting van de pijl, tot het doel in de cirkel valt
+    const [dx, dy] = res.boven.richting, L = (0.1 + 0.2 * Math.min(1, res.boven.hoek / 30)) * unit;
+    svg += `<circle class="zone" cx="${cx}" cy="${cy}" r="${(0.08 * unit).toFixed(1)}"/>`;
+    svg += arrowSvg([[cx, cy], [cx + dx * L, cy + dy * L]], unit);
+    // de hoek tot recht boven, aan de andere kant van de cirkel (bij een pijl omhoog niet onder de tekst bovenin)
+    svg += `<text x="${(cx - dx * 0.15 * unit).toFixed(1)}" y="${(cy - dy * 0.15 * unit + 0.02 * unit).toFixed(1)}" ` +
+      `text-anchor="middle" font-size="${(0.06 * unit).toFixed(0)}">${Math.round(res.boven.hoek)}°</text>`;
   }
   o.innerHTML = svg;
+}
+
+// meters langs de randen: de hoogte van de camera (doel geel) en de afstand tot het onderdeel (groen = 25-35 cm)
+function drawGauges(res) {
+  const pos = res.positie, el = $("live-elev"), di = $("live-afstand");
+  el.hidden = di.hidden = !pos;
+  if (!pos) return;
+  const e = Math.max(0, Math.min(90, pos.elevatie)), d = Math.max(100, Math.min(600, pos.afstand_mm));
+  el.querySelector(".dot").style.top = `${(100 - e / 90 * 100).toFixed(1)}%`;
+  for (const z of el.querySelectorAll(".zone")) z.classList.toggle("doel", Number(z.dataset.el) === res.doel_elevatie);
+  di.querySelector(".dot").style.top = `${(100 - (d - 100) / 500 * 100).toFixed(1)}%`;
 }
 
 // Minikaart van boven, gedraaid zodat jij onderaan staat: rechts op de kaart is naar rechts lopen.
@@ -625,12 +802,41 @@ async function takePhoto(track) {
   return ic.takePhoto(opts);
 }
 
+// scherpte van een beeld: de gemiddelde |Laplace|² van een verkleinde grijsversie (hoger = scherper)
+function sharpness(canvas) {
+  const w = 320, h = Math.max(3, Math.round(canvas.height * w / canvas.width));
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const g = c.getContext("2d", { willReadFrequently: true });
+  g.drawImage(canvas, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data, Y = new Float32Array(w * h);
+  for (let i = 0, j = 0; j < Y.length; i += 4, j++) Y[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  let s = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1, k = y * w + 1; x < w - 1; x++, k++) { const l = 4 * Y[k] - Y[k - 1] - Y[k + 1] - Y[k - w] - Y[k + w]; s += l * l; }
+  }
+  return s / ((w - 2) * (h - 2));
+}
+
+// zonder ImageCapture (iPhone): het scherpste van een paar videobeelden, ~0,1 s na elkaar
+async function sharpestFrame(n = 3, gap = 90) {
+  let best = null;
+  for (let i = 0; i < n; i++) {
+    if (i) await new Promise((r) => setTimeout(r, gap));
+    const c = snap(4096);
+    if (!c) continue;
+    const s = sharpness(c);
+    if (!best || s > best.s) best = { c, s };
+  }
+  return best ? jpeg(best.c, 0.92) : null;
+}
+
 async function liveCapture() {
   if (live.capturing || !current) return;
   live.capturing = true; live.streak = 0;
   const flash = $("live-flash");
   flash.classList.add("on"); setTimeout(() => flash.classList.remove("on"), 80);
   if (navigator.vibrate) navigator.vibrate(40);
+  shutterSound();
   $("live-tip").className = "tip opnemen"; $("live-tip").textContent = "Foto…";
   try {
     // één bron per scan: foto's van ImageCapture en videobeelden hebben een ander formaat en beeldhoek
@@ -639,17 +845,34 @@ async function liveCapture() {
       try { blob = await takePhoto(live.track); live.mode = "foto"; }
       catch (e) { if (live.mode === "foto") throw e; live.mode = "beeld"; }
     }
-    if (!blob) { blob = await grab(4096, 0.92, document.createElement("canvas")); live.mode = "beeld"; }
+    if (!blob) { blob = await sharpestFrame(); live.mode = "beeld"; }
     if (!blob) throw new Error("geen beeld");
     const type = blob.type || "image/jpeg", ext = type === "image/png" ? "png" : "jpg";
     const data = await uploadRetry(await shrink(new File([blob], `live_${Date.now()}.${ext}`, { type })), newUid(), "Foto");
-    render(data);
     const nieuw = (data.nieuw || [])[0];
-    if (nieuw && nieuw.verdict === "onbruikbaar")
-      $("live-tip").textContent = "Foto onbruikbaar: " + (nieuw.notes || []).join("; ");
+    if (nieuw && nieuw.verdict === "onbruikbaar" && /^foto_\d+\./.test(nieuw.name || "")) {
+      // een onbruikbare foto meteen weg: de dekking telt hem toch niet mee
+      render(await api("DELETE", `api/scans/${current}/fotos/${encodeURIComponent(nieuw.name)}`));
+      $("live-tip").className = "tip let_op";
+      $("live-tip").textContent = `Foto onbruikbaar (${(nieuw.notes || []).join("; ")}): ik maak een nieuwe.`;
+      say("Foto onbruikbaar. Opnieuw.", true);
+    } else {
+      render(data);
+      if (nieuw && /^foto_\d+\./.test(nieuw.name || "")) live.taken.push(nieuw.name);
+    }
+    $("live-terug").disabled = !live.taken.length;
   } catch (e) {
     $("live-tip").className = "tip zoek"; $("live-tip").textContent = "Foto mislukt: " + e.message;
   } finally { live.capturing = false; live.last = performance.now(); }
+}
+
+// de laatste foto van de livecamera weg (bijvoorbeeld met een hand in beeld)
+async function liveUndo() {
+  const name = live.taken.pop();
+  $("live-terug").disabled = !live.taken.length;
+  if (!name || !current) return;
+  try { render(await api("DELETE", `api/scans/${current}/fotos/${encodeURIComponent(name)}`)); say("Foto weg.", true); }
+  catch (e) { $("live-tip").textContent = "Weghalen mislukt: " + e.message; }
 }
 
 // ---------------------------------------------------------------- Fase 0: schuifmaatmetingen (v0.13)
@@ -763,8 +986,11 @@ $("meetset-ververs").addEventListener("click", loadMeetset);
 loadMeetset();
 
 $("live-start").addEventListener("click", liveStart);
-$("live-stop").addEventListener("click", liveStop);
+$("live-stop").addEventListener("click", () => liveStop());
 $("live-shoot").addEventListener("click", liveCapture);
+$("live-terug").addEventListener("click", liveUndo);
+$("live-geluid").addEventListener("click", () => setSound(!sound.on));
+$("live-verwerk").addEventListener("click", async () => { liveStop(false); await startProcessing(); });
 
 if (current) resume(current);
 load(); setInterval(load, 3000);

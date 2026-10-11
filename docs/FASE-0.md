@@ -55,11 +55,12 @@ Sinds v0.13 kan alles ook in de browser van je telefoon (`camtocad server --lan`
   - rondom op ongeveer 35° en 60° boven de mat, om de ~45°;
   - in kleur, zonder filter: kleur is bewijs voor het object (v0.8). JPG en HEIC (iPhone) werken allebei; voor HEIC is de extra `heic` nodig (de installer en `pip install -e ".[server]"` hebben hem al);
   - met één lens: een iPhone schakelt dichtbij vanzelf naar de macrolens (ultragroothoek). Blijf op 25–35 cm, of zet Macrobesturing aan en de macrostand uit. Foto's van een andere lens of met digitale zoom worden aan de EXIF-gegevens herkend en niet gebruikt; de fotocontrole meldt het.
-- **Of gebruik de livecamera** (v0.13), dan hoef je de richtingen niet te onthouden:
+- **Of gebruik de livecamera** (v0.13, veel beter in v0.16), dan hoef je de richtingen niet te onthouden:
   - Open op de telefoon de https-link uit de terminal (of scan de QR-code). De camera werkt in de browser alleen via https; de eerste keer waarschuwt de telefoon voor het certificaat van je pc: kies "doorgaan".
-  - Tik op **Live camera**. Je ziet de omtrek van de mat over het beeld, een kruisje op het onderdeel en één aanwijzing, zoals "Volgende foto: loop ~45° naar rechts om het onderdeel" of "houd de telefoon lager, ~35° boven de mat".
+  - Tik op **Live camera**. Je ziet de omtrek van de mat en van het onderdeel over het beeld, een ring op de mat rond het onderdeel (per richting groen of rood, het volgende vak knippert wit, een gele pijl wijst de weg), meters voor de hoogte en de afstand, en één aanwijzing, zoals "Volgende foto: loop ~45° naar rechts om het onderdeel" of "houd de telefoon lager, ~35° boven de mat". De aanwijzingen worden ook uitgesproken (🔊 zet het uit).
+  - Ligt er nog iets op de mat, of ligt het onderdeel tegen de rand, dan zegt de livecamera dat al vóór de eerste foto (v0.16).
   - De volgorde: eerst 5 foto's recht van boven, daarna rondom op ~60° en ~35°, 2 foto's per richting (8 richtingen).
-  - Staat de telefoon goed en stil, dan maakt de pagina zelf de foto (vinkje "automatisch"; de rode knop kan altijd). De minikaart onderaan is gedraaid zodat jij onderaan staat: groen is genoeg, rood ontbreekt, wit omrand is de volgende.
+  - Staat de telefoon goed en stil, dan maakt de pagina zelf de foto (vinkje "automatisch"; de rode knop kan altijd). ↶ neemt de laatste foto terug, bijvoorbeeld als je hand in beeld was; een onbruikbare foto gaat vanzelf weg. De minikaart onderaan is gedraaid zodat jij onderaan staat: groen is genoeg, rood ontbreekt, wit omrand is de volgende.
   - Gebruik binnen één scan óf de livecamera óf de camera-app, niet allebei: hun foto's hebben een ander formaat en een andere beeldhoek. Op een iPhone zijn de foto's van de livecamera beelden uit de video (Safari kent geen ImageCapture), dus wat kleiner dan een gewone foto.
 - **Controleer de set direct**, vóór je het onderdeel weghaalt:
   - Via de telefoonpagina (`camtocad server --lan`) gebeurt dat vanzelf. Elke foto krijgt een oordeel (goed, matig of onbruikbaar), en een dekkingskaart toont in het rood welke richtingen nog ontbreken.

@@ -30,10 +30,15 @@ def write_y4m(path, frames) -> None:
 
 
 def test_live_camera_guides_and_takes_the_photo(tmp_path):
+    """v0.16: ook het onderdeel (uit de livebeelden), de ring met de dekking, de stappen, de meters, het geluid en de
+    laatste foto terugnemen."""
+    import cadquery as cq
+
     spec = mat.PRESETS["A4"]
     cam = render.default_camera(1280, 720, 940.0, dist=(0, 0, 0, 0, 0))
     R, t = render.look_at([125.0, 80.0, 330.0], [125.0, 80.0, 0.0])
-    img, _ = render.render_view(mat.rasterize_board(spec, 5.0, 3.0), cam, R, t, rng=np.random.default_rng(2))
+    box = render.tessellate(render.place(cq.Workplane("XY").box(50, 30, 10, centered=(True, True, False)), spec))
+    img, _ = render.render_view(mat.rasterize_board(spec, 5.0, 3.0), cam, R, t, box, rng=np.random.default_rng(2))
     video = tmp_path / "mat.y4m"
     write_y4m(video, [(img * 0.8).astype(np.uint8)] * 3)  # Chromium rekt de grijswaarden soms op naar 'full range'
     data = tmp_path / "data"
@@ -59,11 +64,25 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
             page.click("#live-start")
             page.wait_for_function("document.querySelector('#live-tip').textContent.includes('recht van boven')",
                                    timeout=30000)
-            assert page.locator("#live-overlay polygon").count() == 1  # de omtrek van de mat over het beeld
+            assert page.locator("#live-overlay polygon.mat").count() == 1  # de omtrek van de mat over het beeld
+            # het onderdeel uit de livebeelden, en de ring: 8 richtingen op ~60° en 8 op ~35°
+            page.wait_for_selector("#live-overlay polygon.part", timeout=30000)
+            assert page.locator("#live-overlay polyline.seg.open").count() == 16
+            assert "Stap 1 van 2" in page.text_content("#live-stap") and page.is_visible("#live-elev")
             # 'automatisch' staat aan: na twee keer 'opnemen' maakt de pagina de foto en uploadt hem
             page.wait_for_function("/^[1-9]/.test(document.querySelector('#live-count').textContent)", timeout=30000)
             page.wait_for_function("document.querySelector('#live-tip').textContent.includes('al een foto')",
                                    timeout=30000)  # vanaf dezelfde plek geen tweede foto
+            assert "1/5" in page.text_content("#live-stap")
+            page.click("#live-geluid")  # geluid uit, en dat blijft zo
+            assert page.get_attribute("#live-geluid", "aria-pressed") == "false"
+            assert page.evaluate("localStorage.getItem('ctc_geluid')") == "uit"
+            page.uncheck("#live-auto")
+            page.click("#live-terug")  # de laatste foto terugnemen
+            page.wait_for_function("document.querySelector('#live-count').textContent.startsWith('0')", timeout=30000)
+            assert page.is_disabled("#live-terug")
+            page.click("#live-shoot")  # met de hand
+            page.wait_for_function("document.querySelector('#live-count').textContent.startsWith('1')", timeout=30000)
             page.click("#live-stop")
             assert page.locator("#live").is_hidden()
             browser.close()
