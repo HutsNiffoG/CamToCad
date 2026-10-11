@@ -9,12 +9,12 @@ beeld bepaalt de pc:
   vlak van de mat. Daarmee richt de begeleiding al vóór de eerste foto op het echte onderdeel, en meldt ze een
   onderdeel aan de rand van de mat of een tweede voorwerp;
 * welke richtingen nog foto's missen: eerst recht van boven, dan rondom op ~60° en daarna op ~35°. Eén aanwijzing in
-  tekst en een korte zin om uit te spreken;
+  tekst, een korte zin die in beeld staat en uitgesproken kan worden, en een pictogram (v0.16.2);
 * of dit een goed moment is voor een foto: het beeld is scherp (onscherpte aan de mat), de mat beweegt niet door het
   beeld (v0.16), en de telefoon wisselde niet van lens of zoom (v0.16);
 * de geometrie voor de overlay: de omtrek van de mat en van het onderdeel, een ring op de mat rond het onderdeel met
   per richting en hoogte de dekking, een pijl langs de ring naar het volgende doel, en voor de foto's recht van boven
-  de richting waarin de telefoon moet schuiven (v0.16).
+  de richting waarin de telefoon moet schuiven (v0.16), en een cirkel rond een ander voorwerp op de mat (v0.16.2).
 
 De positie is grof (een paar graden): genoeg om de weg te wijzen. De foto zelf wordt na het uploaden gewoon
 gecontroleerd (preflight.py). Wat er tussen de beelden onthouden wordt (brandpuntsafstand, mat, voetafdruk, het vorige
@@ -126,32 +126,42 @@ def _band_of(el: float) -> str | None:
     return next((b[0] for b in BANDS if b[1] <= el < b[2]), None)
 
 
-def _direction(az: float, el: float, cell: str) -> tuple[str, str]:
-    """Eén aanwijzing om van de huidige positie naar `cell` te gaan, als tekst en als korte zin om uit te spreken.
-    Azimut groeit als je rechtsom loopt (gezien vanaf de telefoon: naar rechts)."""
+def _direction(az: float, el: float, cell: str) -> tuple[str, str, str]:
+    """Eén aanwijzing om van de huidige positie naar `cell` te gaan: als tekst, als korte zin (om uit te spreken, en
+    in beeld) en als pictogram ('boven', een richting zoals 'rechts' of 'links-lager', of 'opschuiven'). Azimut groeit
+    als je rechtsom loopt (gezien vanaf de telefoon: naar rechts)."""
     if cell == "boven":
         return ("Volgende foto's: recht boven het onderdeel. Schuif de telefoon in de richting van de pijl, "
-                "evenwijdig aan de mat.", "Recht boven het onderdeel.")
+                "evenwijdig aan de mat.", "Recht boven het onderdeel.", "boven")
     caz, cel = _cell_center(cell)
     band, k = cell.split("-")
     if el >= LIVE_HIGH_DEG:  # van bovenaf: de kant van de mat noemen, want de azimut zegt hier weinig
         return (f"Volgende foto: houd de telefoon lager, ~{cel:.0f}° boven de mat, aan de kant {SECTORS[int(k)]} van "
-                "de mat (boven = kant met de titel).", f"Lager, aan de kant {SECTORS[int(k)]}.")
-    moves, said = [], []
+                "de mat (boven = kant met de titel).", f"Lager, aan de kant {SECTORS[int(k)]}.", "lager")
+    moves, said, icon = [], [], []
     daz = (caz - az + 180.0) % 360.0 - 180.0
     if abs(daz) >= 10.0:
         side = "rechts" if daz > 0 else "links"
         moves.append(f"loop ~{5 * round(abs(daz) / 5):.0f}° naar {side} om het onderdeel")
         said.append(f"naar {side}")
+        icon.append(side)
     if _band_of(el) != band:
         up = "hoger" if cel > el else "lager"
         moves.append(f"houd de telefoon {up}, ~{cel:.0f}° boven de mat")
         said.append(up)
+        icon.append(up)
     if not moves:
         moves.append("een klein stukje verder dan de vorige foto")
         said.append("een stukje verder")
+        icon.append("opschuiven")
     text, speech = " en ".join(moves), " en ".join(said)
-    return f"Volgende foto: {text[0].lower()}{text[1:]}.", f"{speech[0].upper()}{speech[1:]}."
+    return f"Volgende foto: {text[0].lower()}{text[1:]}.", f"{speech[0].upper()}{speech[1:]}.", "-".join(icon)
+
+
+def _tell(out: dict, text: str, speech: str, icon: str) -> None:
+    """De aanwijzing: de hele zin (`aanwijzing`), de korte zin die in beeld staat en uitgesproken wordt (`spraak`) en
+    het pictogram ervoor (`icoon`, v0.16.2)."""
+    out["aanwijzing"], out["spraak"], out["icoon"] = text, speech, icon
 
 
 def _progress(need: dict[str, int]) -> tuple[dict, dict]:
@@ -187,13 +197,13 @@ def _quad_fit(x: np.ndarray, y: np.ndarray, v: np.ndarray, xs: np.ndarray, ys: n
 @dataclass
 class Footprint:
     """Het onderdeel op de mat (mat-mm): midden, straal (het verste punt vanaf het midden), afstand tot de rand van
-    het bord, de omtrek, en de andere voorwerpen (midden en oppervlak in mm²)."""
+    het bord, de omtrek, en de andere voorwerpen (midden, oppervlak in mm² en straal)."""
 
     center: tuple[float, float]
     radius_mm: float
     edge_mm: float
     outline: list[tuple[float, float]]
-    others: list[tuple[float, float, float]] = field(default_factory=list)
+    others: list[tuple[float, float, float, float]] = field(default_factory=list)
 
 
 class FootprintGrid:
@@ -285,15 +295,19 @@ class FootprintGrid:
         def to_mat(cx: float, cy: float) -> tuple[float, float]:  # cel → mat-mm (nominaal: Y = bordhoogte - y)
             return (cx + 0.5) * mm, bh - (cy + 0.5) * mm
 
-        ii, jj = np.nonzero(labels == main)
-        X, Y = (jj + 0.5) * mm, bh - (ii + 0.5) * mm
-        cx, cy = float(X.mean()), float(Y.mean())
-        radius = float(np.sqrt((X - cx) ** 2 + (Y - cy) ** 2).max()) + 0.5 * mm
+        def extent(i: int) -> tuple[float, float, float, np.ndarray, np.ndarray]:  # midden en straal (mm)
+            ii, jj = np.nonzero(labels == i)
+            X, Y = (jj + 0.5) * mm, bh - (ii + 0.5) * mm
+            cx, cy = float(X.mean()), float(Y.mean())
+            return cx, cy, float(np.sqrt((X - cx) ** 2 + (Y - cy) ** 2).max()) + 0.5 * mm, X, Y
+
+        cx, cy, radius, X, Y = extent(main)
         edge = float(min(X.min(), (bw - X).min(), Y.min(), (bh - Y).min())) - 0.5 * mm
         cont, _ = cv2.findContours((labels == main).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         poly = cv2.approxPolyDP(max(cont, key=cv2.contourArea), 1.0, True).reshape(-1, 2)
         outline = [to_mat(float(x), float(y)) for x, y in poly]
-        others = [(*to_mat(*cents[i]), float(stats[i, cv2.CC_STAT_AREA] * mm * mm)) for i in comps if i != main]
+        others = [(*to_mat(*cents[i]), float(stats[i, cv2.CC_STAT_AREA] * mm * mm), extent(i)[2])
+                  for i in comps if i != main]
         return Footprint((round(cx, 1), round(cy, 1)), round(radius, 1), round(edge, 1), outline, others)
 
 
@@ -350,8 +364,9 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
                t: float | None = None) -> dict:
     """Beoordeelt één beeld van de livecamera (V25): is de mat in beeld, waar ligt het onderdeel, waar staat de
     camera ten opzichte daarvan, is dat een richting die nog ontbreekt, en is het beeld stil en scherp genoeg? Geeft
-    één aanwijzing (`aanwijzing`, om uit te spreken: `spraak`), `opnemen` (dit is een goed moment voor een foto) en de
-    geometrie voor de overlay, in genormaliseerde beeldcoördinaten.
+    één aanwijzing (`aanwijzing`; kort, in beeld en om uit te spreken: `spraak`; het pictogram: `icoon`), korte
+    `opmerkingen`, `opnemen` (dit is een goed moment voor een foto) en de geometrie voor de overlay, in
+    genormaliseerde beeldcoördinaten.
 
     `spec`: de mat van de scan (als die bekend is); `overview`: de samenvatting van de foto's tot nu toe
     (preflight.summarize: dekking, recht_van_boven, punten, object_mm); `session`: wat de begeleiding van de vorige
@@ -363,9 +378,9 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
     step, progress = _progress(need)
     out = {"breedte": w, "hoogte": h, "mat": None, "hoeken": 0, "mat_fractie": 0.0, "omtrek": None, "doel": None,
            "scherpte_px": None, "wit": None, "f_rel": None, "positie": None, "vak": None, "doelvak": None,
-           "opnemen": False, "status": "zoek", "aanwijzing": "", "spraak": "", "opmerkingen": [], "nodig": need,
-           "gedekt": not any(need.values()), "stap": step, "voortgang": progress, "onderdeel": None, "ring": None,
-           "pijl": None, "boven": None, "doel_elevatie": None, "snelheid_px_s": None, "stil": None}
+           "opnemen": False, "status": "zoek", "aanwijzing": "", "spraak": "", "icoon": "mat", "opmerkingen": [],
+           "nodig": need, "gedekt": not any(need.values()), "stap": step, "voortgang": progress, "onderdeel": None,
+           "ring": None, "pijl": None, "boven": None, "doel_elevatie": None, "snelheid_px_s": None, "stil": None}
     if session is not None:
         with session.lock:
             f_rel = f_rel or session.f_rel()
@@ -375,17 +390,17 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
         white = float(np.percentile(gray, 95))
         out["wit"] = round(white, 1)
         if white < 60:
-            out["aanwijzing"], out["spraak"] = "Te donker: zorg voor meer (diffuus) licht.", "Te donker."
+            _tell(out, "Te donker: zorg voor meer (diffuus) licht.", "Te donker.", "donker")
         else:
-            out["aanwijzing"] = "Richt de camera op de kalibratiemat (grotendeels in beeld) en houd de telefoon stil."
-            out["spraak"] = "Richt op de mat."
+            _tell(out, "Richt de camera op de kalibratiemat (grotendeels in beeld) en houd de telefoon stil.",
+                  "Richt op de mat.", "mat")
         return out
     board = make_board(found)
     chess = np.asarray(board.getChessboardCorners(), float)[:, :2]
     out.update(mat=found.name, hoeken=int(len(det.ids)), mat_fractie=round(len(det.ids) / len(chess), 3))
     H, _ = cv2.findHomography(chess[det.ids], det.corners)
     if H is None:
-        out["aanwijzing"], out["spraak"] = "Houd de mat in beeld.", "Houd de mat in beeld."
+        _tell(out, "Houd de mat in beeld.", "Houd de mat in beeld.", "mat")
         return out
     bw, bh = found.board_w_mm, found.board_h_mm
     out["omtrek"] = _to_image([[0, bh], [bw, bh], [bw, 0], [0, 0]], H, found, w, h)
@@ -426,14 +441,14 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
     K = np.array([[fk, 0.0, (w - 1) / 2], [0.0, fk, (h - 1) / 2], [0.0, 0.0, 1.0]])
     pose = calib.solve_pose(det, found.nominal(), calib.CameraModel(K, np.zeros(5), w, h))
     if spec is not None and found.name != spec.name:
-        out["aanwijzing"] = f"Dit is mat {found.label}, maar de foto's van deze scan zijn op mat {spec.label} gemaakt."
-        out["spraak"] = "Verkeerde mat."
+        _tell(out, f"Dit is mat {found.label}, maar de foto's van deze scan zijn op mat {spec.label} gemaakt.",
+              f"Verkeerde mat: neem {spec.label}.", "let_op")
         return out
     if white < 45:
-        out["aanwijzing"], out["spraak"] = "Te donker: zorg voor meer (diffuus) licht.", "Te donker."
+        _tell(out, "Te donker: zorg voor meer (diffuus) licht.", "Te donker.", "donker")
         return out
     if pose is None:
-        out["aanwijzing"], out["spraak"] = "Houd de mat in beeld.", "Houd de mat in beeld."
+        _tell(out, "Houd de mat in beeld.", "Houd de mat in beeld.", "mat")
         return out
 
     # waar ligt het onderdeel: de voetafdruk uit de livebeelden, anders uit de foto's, anders het midden van de mat
@@ -441,19 +456,25 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
     radius = None
     if foot is not None:
         obj, radius = foot.center, foot.radius_mm
+        # de andere voorwerpen: in beeld een cirkel op de mat eromheen (v0.16.2), dan hoeft de opmerking niet te
+        # zeggen waar ze liggen
+        circles = [_to_image(_arc((x, y), r + 6.0, 0.0, 360.0, 25), H, found, w, h) for x, y, _, r in foot.others]
         out["onderdeel"] = {"midden_mm": list(foot.center), "straal_mm": foot.radius_mm, "rand_mm": foot.edge_mm,
                             "omtrek": _to_image(foot.outline, H, found, w, h), "bron": "live",
-                            "andere": [[round(x), round(y)] for x, y, _ in foot.others]}
-        for x, y, area in foot.others:
-            notes.append(f"er ligt nog iets op de mat (bij {x:.0f}, {y:.0f} mm, {area:.0f} mm²): haal het weg")
+                            "andere": [[round(x), round(y)] for x, y, *_ in foot.others],
+                            "andere_beeld": [c for c in circles if c is not None]}
+        if len(foot.others) == 1:
+            notes.append("ander voorwerp op de mat: haal het weg")
+        elif foot.others:
+            notes.append(f"{len(foot.others)} andere voorwerpen op de mat: haal ze weg")
         if foot.edge_mm < EDGE_MM:
-            notes.append("het onderdeel ligt dicht bij de rand van de mat: leg het meer naar het midden")
+            notes.append("onderdeel dicht bij de rand: leg het meer naar het midden")
         if foot.radius_mm > 0.4 * min(bw, bh):
-            notes.append("het onderdeel is groot voor deze mat: neem een grotere mat (A3)")
+            notes.append("onderdeel groot voor deze mat" + ("" if found.base_name == "A3" else ": neem A3"))
     elif ov.get("object_mm"):
         obj = tuple(float(v) for v in ov["object_mm"])
         out["onderdeel"] = {"midden_mm": list(obj), "straal_mm": None, "rand_mm": None, "omtrek": None,
-                            "bron": "fotos", "andere": []}
+                            "bron": "fotos", "andere": [], "andere_beeld": []}
     else:
         obj = (found.size_mm[0] / 2, found.size_mm[1] / 2)
     point = np.array([obj[0], obj[1], 0.0])
@@ -478,22 +499,22 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
     ring["hier"] = here[0] if here and el < LIVE_HIGH_DEG else None  # de kant van de camera
     out["ring"] = ring
     if white < 70:
-        notes.append("donker: meer (diffuus) licht")
+        notes.append("donker: meer licht")
     if clipped > 0.05:
-        notes.append("glans op de mat: vermijd direct licht")
+        notes.append("glans op de mat: geen direct licht")
     if out["snelheid_px_s"] is not None and out["snelheid_px_s"] > FAST_PX_S:
-        notes.append("beweeg rustiger: het beeld schiet weg")
+        notes.append("beweeg rustiger")
     out["status"] = "let_op"
     if lens_jump:
-        out["aanwijzing"] = ("De telefoon wisselde van lens of zoom (de beeldhoek is anders): houd 25-35 cm afstand en "
-                             "zoom niet; foto's van een andere lens passen niet in de scan.")
-        out["spraak"] = "Andere lens. Houd meer afstand."
+        _tell(out, "De telefoon wisselde van lens of zoom (de beeldhoek is anders): houd 25-35 cm afstand en zoom "
+                   "niet; foto's van een andere lens passen niet in de scan.", "Andere lens. Houd meer afstand.",
+              "let_op")
         return out
     if view_distance(pose) < CLOSE_MM:
-        out["aanwijzing"], out["spraak"] = "Te dichtbij: houd de telefoon 25-35 cm van het onderdeel.", "Verder weg."
+        _tell(out, "Te dichtbij: houd de telefoon 25-35 cm van het onderdeel.", "Verder weg.", "weg")
         return out
     if dist > FAR_MM:
-        out["aanwijzing"], out["spraak"] = "Te ver weg: kom dichterbij, tot 25-35 cm van het onderdeel.", "Dichterbij."
+        _tell(out, "Te ver weg: kom dichterbij, tot 25-35 cm van het onderdeel.", "Dichterbij.", "dichterbij")
         return out
     if cell is not None and need.get(cell, 0) > 0 and (cell == "boven" or need["boven"] == 0):
         out["doelvak"] = cell
@@ -504,32 +525,32 @@ def live_check(img: np.ndarray, spec: MatSpec | None = None, overview: dict | No
         near = [p for p in ov.get("punten") or [] if p.get("oordeel") != "onbruikbaar"
                 and _angle(az, el, p["azimut"], p["elevatie"]) < sep]
         if blur is None or blur > LIVE_BLUR_MAX:  # eerst: een bewogen beeld mist ook mathoeken
-            out["aanwijzing"], out["spraak"] = "Houd de telefoon stil: het beeld is onscherp.", "Stil houden."
+            _tell(out, "Houd de telefoon stil: het beeld is onscherp.", "Stil houden.", "stil")
         elif out["stil"] is False:
-            out["aanwijzing"], out["spraak"] = "Houd de telefoon stil: het beeld beweegt nog.", "Stil houden."
+            _tell(out, "Houd de telefoon stil: het beeld beweegt nog.", "Stil houden.", "stil")
         elif not (margin <= u <= 1 - margin and margin <= v <= 1 - margin):
-            out["aanwijzing"], out["spraak"] = "Richt de camera op het onderdeel: midden in beeld.", "Richt op het onderdeel."
+            _tell(out, "Richt de camera op het onderdeel: midden in beeld.", "Richt op het onderdeel.", "richt")
         elif out["mat_fractie"] < 0.25:
-            out["aanwijzing"], out["spraak"] = "Neem meer van de mat mee in beeld.", "Meer mat in beeld."
+            _tell(out, "Neem meer van de mat mee in beeld.", "Meer mat in beeld.", "mat")
         elif near:
             out["status"] = "verplaats"
-            out["aanwijzing"] = "Hier is al een foto: schuif de telefoon een paar centimeter op."
-            out["spraak"] = "Een stukje verder."
+            _tell(out, "Hier is al een foto: schuif de telefoon een paar centimeter op.", "Een stukje verder.",
+                  "opschuiven")
         else:
             out["opnemen"], out["status"] = True, "opnemen"
             where = "recht van boven" if cell == "boven" else "deze richting ontbreekt nog"
-            out["aanwijzing"], out["spraak"] = f"Goed, {where}: houd stil voor de foto.", "Stil houden."
+            _tell(out, f"Goed, {where}: houd stil voor de foto.", "Goed, stil houden.", "opnemen")
         return out
     target = _next_cell(az, el, need)
     if target is None:
         out["status"] = "klaar"
-        out["aanwijzing"] = "Alle richtingen zijn gedekt: je kunt de scan verwerken (meer foto's mag)."
-        out["spraak"] = "Klaar. Alle richtingen zijn gedekt."
+        _tell(out, "Alle richtingen zijn gedekt: je kunt de scan verwerken (meer foto's mag).",
+              "Klaar. Alle richtingen zijn gedekt.", "klaar")
         return out
     out["status"] = "verplaats"
     out["doelvak"] = target
     out["doel_elevatie"] = _cell_center(target)[1]
-    out["aanwijzing"], out["spraak"] = _direction(az, el, target)
+    _tell(out, *_direction(az, el, target))
     if target == "boven":
         # schuif de telefoon (evenwijdig aan de mat) tot recht boven het onderdeel: de richting in het beeld
         shift = pose.R @ np.array([point[0] - pose.center[0], point[1] - pose.center[1], 0.0])

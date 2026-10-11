@@ -31,7 +31,8 @@ def write_y4m(path, frames) -> None:
 
 def test_live_camera_guides_and_takes_the_photo(tmp_path):
     """v0.16: ook het onderdeel (uit de livebeelden), de ring met de dekking, de stappen, de meters, de stem (standaard
-    uit) en de laatste foto terugnemen."""
+    uit) en de laatste foto terugnemen. v0.16.2: bovenin alleen een korte aanwijzing met een pictogram; de hele zin
+    na een tik erop."""
     import cadquery as cq
 
     spec = mat.PRESETS["A4"]
@@ -62,17 +63,26 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{port}/?token=t")  # localhost telt als beveiligde pagina
             page.click("#live-start")
-            page.wait_for_function("document.querySelector('#live-tip').textContent.includes('recht van boven')",
+            page.wait_for_function("document.querySelector('#live-lang').textContent.includes('recht van boven')",
                                    timeout=30000)
             assert page.locator("#live-overlay polygon.mat").count() == 1  # de omtrek van de mat over het beeld
+            # klein bovenin: pictogram en korte zin; de hele zin pas na een tik
+            assert page.locator("#live-ico svg").count() == 1 and page.text_content("#live-kort").strip()
+            assert page.evaluate("document.querySelector('#live-tip').getBoundingClientRect().height") < 80
+            assert not page.is_visible("#live-lang")
+            page.click("#live-tip")
+            assert page.is_visible("#live-lang") and page.get_attribute("#live-tip", "aria-expanded") == "true"
+            page.click("#live-tip")
+            assert not page.is_visible("#live-lang")
             # het onderdeel uit de livebeelden, en de ring: 8 richtingen op ~60° en 8 op ~35°
             page.wait_for_selector("#live-overlay polygon.part", timeout=30000)
             assert page.locator("#live-overlay polyline.seg.open").count() == 16
-            assert "Stap 1 van 2" in page.text_content("#live-stap") and page.is_visible("#live-elev")
+            assert "Stap 1/2" in page.text_content("#live-stap") and page.is_visible("#live-elev")
             # 'automatisch' staat aan: na twee keer 'opnemen' maakt de pagina de foto en uploadt hem
             page.wait_for_function("/^[1-9]/.test(document.querySelector('#live-count').textContent)", timeout=30000)
-            page.wait_for_function("document.querySelector('#live-tip').textContent.includes('al een foto')",
+            page.wait_for_function("document.querySelector('#live-lang').textContent.includes('al een foto')",
                                    timeout=30000)  # vanaf dezelfde plek geen tweede foto
+            assert page.text_content("#live-kort") == "Een stukje verder"
             assert "1/5" in page.text_content("#live-stap")
             assert page.get_attribute("#live-stem", "aria-pressed") == "false"  # de stem staat standaard uit (v0.16.1)
             page.click("#live-stem")  # aan, en dat blijft zo

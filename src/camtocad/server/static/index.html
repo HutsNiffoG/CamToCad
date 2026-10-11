@@ -59,15 +59,26 @@
   .live video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
   .live svg.overlay { position:absolute; pointer-events:none; overflow:visible; }
   .live svg.overlay * { vector-effect:non-scaling-stroke; }
-  .live .hud { position:absolute; left:8px; right:8px; top:8px; display:flex; flex-direction:column; gap:6px; pointer-events:none; }
-  .live .hudrow { display:flex; gap:8px; align-items:center; }
-  .live .stap { flex:1; font-size:.85rem; background:rgba(20,24,30,.72); padding:4px 10px; border-radius:8px; }
-  .live .hud button { pointer-events:auto; min-height:36px; padding:0 10px; background:rgba(20,24,30,.78); color:#fff; border-color:#555; }
-  .live .tip { padding:10px 12px; border-radius:10px; font-size:1.05rem; font-weight:600; background:rgba(20,24,30,.78);
-    border-left:6px solid #888; }
-  .live .tip.opnemen { border-color:#3fbf6f; } .live .tip.verplaats { border-color:#5aa0ff; }
-  .live .tip.let_op { border-color:#f0b35a; } .live .tip.zoek { border-color:#f2a39c; } .live .tip.klaar { border-color:#3fbf6f; }
-  .live .tip small { display:block; font-weight:400; opacity:.85; margin-top:2px; }
+  /* v0.16.2: bovenin alleen een korte aanwijzing met een pictogram (de kleur zegt de toestand); de hele zin en de
+     opmerkingen na een tik erop */
+  .live .hud { position:absolute; left:8px; right:8px; top:8px; display:flex; gap:8px; align-items:flex-start; pointer-events:none; }
+  .live .hud button { pointer-events:auto; flex:0 0 auto; margin-left:auto; min-height:34px; padding:0 9px;
+    background:rgba(15,18,22,.62); color:#fff; border-color:#555; }
+  .live .tip { pointer-events:auto; cursor:pointer; min-width:0; max-width:min(100%, 30em); padding:4px 12px 4px 4px;
+    border-radius:20px; background:rgba(15,18,22,.62); -webkit-tap-highlight-color:transparent; }
+  .live .tip.open { border-radius:14px; background:rgba(15,18,22,.85); }
+  .live .tip .kort { display:flex; align-items:center; gap:8px; font-size:1rem; font-weight:650; line-height:1.25; }
+  .live .tip .ico { flex:0 0 auto; width:28px; height:28px; border-radius:50%; display:grid; place-items:center; background:#6b7480; }
+  .live .tip .ico svg { width:20px; height:20px; fill:none; stroke:#fff; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
+  .live .tip .ico svg .vol { fill:#fff; stroke:none; }
+  .live .tip.opnemen .ico, .live .tip.klaar .ico { background:#23a55a; } .live .tip.verplaats .ico { background:#2f7fe0; }
+  .live .tip.let_op .ico { background:#d98a00; } .live .tip.zoek .ico { background:#d4493d; }
+  .live .tip .meer { flex:0 0 auto; width:18px; height:18px; border:1.5px solid rgba(255,255,255,.6); border-radius:50%;
+    font:italic 700 11px/15px Georgia, serif; text-align:center; opacity:.75; }
+  .live .tip .extra { margin:1px 0 1px 36px; font-size:.78rem; color:#ffd27a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .live .tip .lang { display:none; margin:6px 2px 4px 36px; font-size:.85rem; line-height:1.35; }
+  .live .tip .lang ul { margin:4px 0 0; padding-left:1.1rem; color:#ffd27a; } .live .tip .lang li { margin:2px 0; }
+  .live .tip.open .lang { display:block; } .live .tip.open .extra, .live .tip.open .meer { display:none; }
   .live svg .mat { fill:rgba(90,160,255,.08); stroke:#5aa0ff; stroke-width:3; } .live svg .mat.opnemen { stroke:#3fbf6f; }
   .live svg .part { fill:rgba(255,255,255,.10); stroke:#fff; stroke-width:2; stroke-dasharray:6 5; }
   .live svg .seg { fill:none; stroke-width:7; stroke-linecap:round; opacity:.85; }
@@ -79,6 +90,7 @@
   .live svg .hier { fill:#fff; stroke:#000; stroke-width:2; } .live svg .kruis { stroke:#fff; stroke-width:3; }
   .live svg .zone { fill:none; stroke:#fff; stroke-width:2; stroke-dasharray:5 5; opacity:.85; }
   .live svg text { fill:#fff; font-weight:700; paint-order:stroke; stroke:#000; stroke-width:4px; }
+  .live svg .ander { fill:rgba(255,90,78,.18); stroke:#ff5a4e; stroke-width:3; stroke-dasharray:7 5; }
   .live .gauge { position:absolute; top:30%; height:42%; width:44px; display:flex; flex-direction:column; align-items:center;
     gap:4px; font-size:.7rem; pointer-events:none; text-shadow:0 0 3px #000; }
   .live .gauge[hidden] { display:none; }
@@ -93,18 +105,19 @@
   .live .bar button { background:#222; color:#fff; border-color:#444; }
   .live .bar button.primary { background:#2e7d4f; border-color:#3fbf6f; }
   .live .bar .shutter { width:68px; height:68px; min-height:68px; border-radius:50%; border:4px solid #fff; background:#e33; padding:0; }
-  .live .dome { width:124px; height:124px; flex:0 0 auto; }
+  .live .dome { width:112px; height:112px; flex:0 0 auto; }
   .live .dome .cell { fill:#7a2a24; stroke:#111; stroke-width:1; } .live .dome .cell.ok { fill:#2e6b45; }
   .live .dome .cell.doel { stroke:#fff; stroke-width:2.5; }
   .live .flash { position:absolute; inset:0; background:#fff; opacity:0; transition:opacity .25s; pointer-events:none; }
   .live .flash.on { opacity:.7; transition:none; }
   .live .side { display:flex; flex-direction:column; gap:6px; align-items:stretch; font-size:.85rem; min-width:118px; }
+  .live .side .stap { font-size:.78rem; color:#c8cdd3; line-height:1.25; white-space:nowrap; }
   .live .side progress { height:6px; }
   .live label { display:flex; gap:6px; align-items:center; }
   @media (max-height: 520px) {  /* liggend: minder tekst over het beeld, de knoppen rechts naast het beeld */
     .live { flex-direction:row; }
-    .live .tip { font-size:.85rem; padding:6px 10px; } .live .stap { font-size:.75rem; padding:2px 8px; }
-    .live .hud { right:auto; max-width:min(560px, 70%); } .live .gauge { top:auto; bottom:6px; height:46%; }
+    .live .tip .kort { font-size:.92rem; } .live .tip .ico { width:24px; height:24px; } .live .tip .ico svg { width:17px; height:17px; }
+    .live .tip .extra, .live .tip .lang { margin-left:32px; } .live .gauge { top:auto; bottom:6px; height:46%; }
     .live .bar { flex-direction:column; justify-content:center; gap:8px; padding:6px calc(8px + env(safe-area-inset-right)) 6px 8px; }
     .live .dome { width:92px; height:92px; } .live .bar .shutter { width:60px; height:60px; min-height:60px; }
     .live .side { min-width:110px; gap:4px; }
@@ -206,11 +219,14 @@
     <video id="live-video" playsinline muted autoplay></video>
     <svg id="live-overlay" class="overlay" aria-hidden="true"></svg>
     <div class="hud">
-      <div class="hudrow">
-        <span id="live-stap" class="stap">Camera starten…</span>
-        <button id="live-stem" type="button" aria-pressed="false" aria-label="Gesproken aanwijzingen aan of uit">🔇</button>
+      <div id="live-tip" class="tip zoek" role="button" tabindex="0" aria-expanded="false" aria-controls="live-lang"
+           title="Tik voor uitleg">
+        <div class="kort"><span id="live-ico" class="ico" aria-hidden="true"></span>
+          <span id="live-kort" role="status" aria-live="polite">Camera starten…</span><span class="meer" aria-hidden="true">i</span></div>
+        <div id="live-extra" class="extra" hidden></div>
+        <div id="live-lang" class="lang"></div>
       </div>
-      <div id="live-tip" class="tip zoek" role="status" aria-live="polite">Camera starten…</div>
+      <button id="live-stem" type="button" aria-pressed="false" aria-label="Gesproken aanwijzingen aan of uit">🔇</button>
     </div>
     <div id="live-afstand" class="gauge dist" hidden aria-hidden="true"><span>ver</span>
       <div class="track"><i class="zone goed" style="bottom:30%;height:20%"></i><b class="dot"></b></div><span>dichtbij</span></div>
@@ -225,6 +241,7 @@
     <button id="live-shoot" class="shutter" type="button" aria-label="Foto maken"></button>
     <div class="side">
       <label><input id="live-auto" type="checkbox" checked> automatisch</label>
+      <span id="live-stap" class="stap">Camera starten…</span>
       <span id="live-count">0 foto's</span>
       <progress id="live-voortgang" max="37" value="0" aria-label="Voortgang van de foto's"></progress>
       <div class="row" style="gap:6px">
@@ -536,7 +553,51 @@ $("scans").addEventListener("click", async (e) => {
 // dekking (binnen ~60°, buiten ~35°) en een pijl naar het volgende vak. Twee keer achter elkaar 'opnemen' maakt (met
 // 'automatisch' aan) de foto: met ImageCapture een echte foto, anders (iPhone) het scherpste van drie videobeelden.
 const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null,
-               taken: [], covered: false };
+               taken: [], covered: false, open: false, shown: "", shownAt: 0, cand: "", candN: 0, lang: "", hold: 0 };
+
+// de aanwijzing bovenin (v0.16.2): een pictogram (de kleur zegt de toestand) en een korte zin, daaronder hooguit één
+// regel met opmerkingen; een tik toont de hele zin en alle opmerkingen. Pictogrammen in 24 x 24.
+const ARROW = '<path d="M4.5 12h14M13 6.5l5.5 5.5-5.5 5.5"/>';
+const DIRS = { rechts: 0, "rechts-lager": 45, lager: 90, "links-lager": 135, links: 180, "links-hoger": 225, hoger: 270,
+               "rechts-hoger": 315 };
+const ICONS = {
+  boven: '<circle cx="12" cy="12" r="8.5"/><circle class="vol" cx="12" cy="12" r="3.2"/>',
+  opnemen: '<circle cx="12" cy="12" r="8.5"/><circle class="vol" cx="12" cy="12" r="5.2"/>',
+  klaar: '<path d="M4.5 12.5l5 5L19.5 7"/>',
+  stil: '<path d="M7.5 12.5V7a1.5 1.5 0 0 1 3 0v4.5M10.5 11V5a1.5 1.5 0 0 1 3 0v6M13.5 11V6.5a1.5 1.5 0 0 1 3 0V14' +
+        'a6.5 6.5 0 0 1-6.5 6.5h-.3a6 6 0 0 1-4.9-2.6L3.6 15a1.5 1.5 0 0 1 2.5-1.6l1.4 1.9"/>',
+  richt: '<circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v4.5M12 17v4.5M2.5 12H7M17 12h4.5"/>',
+  mat: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 12h16M12 4v16"/>',
+  donker: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9' +
+          'l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/>',
+  let_op: '<path d="M12 3.5l9 16H3z"/><path d="M12 10v4"/><circle class="vol" cx="12" cy="17" r="1.3"/>',
+  weg: '<path d="M12 6v12M14.5 12H21M9.5 12H3M17.5 8.5L21 12l-3.5 3.5M6.5 8.5L3 12l3.5 3.5"/>',  // van het onderdeel af
+  dichterbij: '<path d="M12 6v12M2.5 12h7M21.5 12h-7M6 8.5L9.5 12 6 15.5M18 8.5L14.5 12l3.5 3.5"/>',  // ernaartoe
+  opschuiven: '<path d="M4.5 16.5a8 8 0 0 1 14-6"/><path d="M19.5 4.5v6h-6"/>',
+};
+const iconSvg = (code) => `<svg viewBox="0 0 24 24">${code in DIRS ? `<g transform="rotate(${DIRS[code]} 12 12)">${ARROW}</g>`
+  : ICONS[code] || ICONS.mat}</svg>`;
+
+function setTip(status, icon, short, long = "", notes = []) {
+  const tip = $("live-tip"), text = String(short).replace(/\.$/, ""), extra = notes.join(" · ");
+  tip.className = "tip " + status + (live.open ? " open" : "");
+  if (tip.dataset.icon !== icon) { $("live-ico").innerHTML = iconSvg(icon); tip.dataset.icon = icon; }
+  if ($("live-kort").textContent !== text) $("live-kort").textContent = text;
+  $("live-extra").hidden = !extra;
+  if ($("live-extra").textContent !== extra) $("live-extra").textContent = extra;
+  const lang = esc(long || short) + (notes.length ? `<ul>${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : "");
+  if (live.lang !== lang) { $("live-lang").innerHTML = lang; live.lang = lang; }
+  tip.querySelector(".meer").hidden = !notes.length && (!long || long === short);  // niets meer te vertellen
+}
+
+// een melding van de pagina zelf (een onbruikbare of mislukte foto) blijft even staan, ook als er beelden binnenkomen
+const holdTip = (ms = 2500) => { live.hold = performance.now() + ms; };
+
+function toggleTip() {
+  live.open = !live.open;
+  $("live-tip").classList.toggle("open", live.open);
+  $("live-tip").setAttribute("aria-expanded", String(live.open));
+}
 
 // gesproken aanwijzingen (v0.16): een korte zin als de aanwijzing verandert. Sinds v0.16.1 staat de stem standaard
 // uit; de knop zet haar aan en die keuze blijft bewaard. Het sluitergeluid bij een foto klinkt altijd.
@@ -628,6 +689,8 @@ async function liveStart() {
   try { await v.play(); } catch (e) {}
   try { live.wake = await navigator.wakeLock.request("screen"); } catch (e) {}
   live.running = true; live.streak = 0; live.taken = []; live.covered = false;
+  live.shown = live.cand = ""; live.candN = 0; live.hold = 0;
+  setTip("zoek", "mat", "Camera starten…");
   $("live-terug").disabled = true; $("live-verwerk").hidden = true;
   liveLoop();
 }
@@ -669,22 +732,26 @@ async function liveLoop() {
           if (r.ok) { if (live.running && !live.capturing) liveShow(await r.json()); }
           else if (r.status === 404) { liveStop(); reset(); return; }
         }
-      } catch (e) { $("live-tip").textContent = "Geen verbinding met de pc…"; }
+      } catch (e) { setTip("zoek", "let_op", "Geen verbinding met de pc…"); }
     }
     await new Promise((res) => setTimeout(res, Math.max(0, 90 - (performance.now() - t0))));
   }
 }
 
 function liveShow(res) {
-  const tip = $("live-tip"), notes = (res.opmerkingen || []).join("; ");
-  tip.className = "tip " + res.status;
-  tip.innerHTML = esc(res.aanwijzing) + (notes ? `<small>${esc(notes)}</small>` : "");
+  // een nieuwe aanwijzing komt in beeld als ze twee beelden achter elkaar gelijk is (of na 0,6 s): geen geflikker
+  const now = performance.now();
+  if (res.spraak === live.cand) live.candN++; else { live.cand = res.spraak; live.candN = 1; }
+  if (now >= live.hold && (res.spraak === live.shown || res.opnemen || live.candN >= 2 || now - live.shownAt > 600)) {
+    setTip(res.status, res.icoon || "mat", res.spraak || res.aanwijzing, res.aanwijzing, res.opmerkingen || []);
+    if (res.spraak !== live.shown) { live.shown = res.spraak; live.shownAt = now; }
+  }
   drawOverlay(res);
   drawDome(res);
   drawGauges(res);
   const st = res.stap || {}, vg = res.voortgang || {};
-  $("live-stap").textContent = st.nummer === 3 ? `Klaar · ${res.fotos} foto's` :
-    `Stap ${st.nummer} van 2 · ${st.naam} · ${st.gedaan}/${st.totaal}`;
+  $("live-stap").textContent = st.nummer === 3 ? "Klaar: alles gedekt" :
+    `Stap ${st.nummer}/2 · ${st.nummer === 1 ? "boven" : "rondom"} ${st.gedaan}/${st.totaal}`;
   $("live-voortgang").max = vg.totaal || 37; $("live-voortgang").value = vg.gedaan || 0;
   $("live-count").textContent = `${res.fotos} foto's`;
   $("live-verwerk").hidden = !res.gedekt;
@@ -718,6 +785,7 @@ function drawOverlay(res) {
   if (res.omtrek) svg += `<polygon class="mat${res.opnemen ? " opnemen" : ""}" points="${pts(res.omtrek)}"/>`;
   const part = res.onderdeel;
   if (part && part.omtrek) svg += `<polygon class="part" points="${pts(part.omtrek)}"/>`;
+  for (const c of (part && part.andere_beeld) || []) svg += `<polygon class="ander" points="${pts(c)}"/>`;  // weghalen
   const ring = res.ring, need = res.nodig || {};
   if (ring) {  // binnen ~60°, buiten ~35°; groen = genoeg foto's, rood = ontbreekt, wit knipperend = het doel
     let target = "";
@@ -752,7 +820,7 @@ function drawOverlay(res) {
     svg += arrowSvg([[cx, cy], [cx + dx * L, cy + dy * L]], unit);
     // de hoek tot recht boven, aan de andere kant van de cirkel (bij een pijl omhoog niet onder de tekst bovenin)
     svg += `<text x="${(cx - dx * 0.15 * unit).toFixed(1)}" y="${(cy - dy * 0.15 * unit + 0.02 * unit).toFixed(1)}" ` +
-      `text-anchor="middle" font-size="${(0.06 * unit).toFixed(0)}">${Math.round(res.boven.hoek)}°</text>`;
+      `text-anchor="middle" font-size="${(0.045 * unit).toFixed(0)}">${Math.round(res.boven.hoek)}°</text>`;
   }
   o.innerHTML = svg;
 }
@@ -838,7 +906,7 @@ async function liveCapture() {
   flash.classList.add("on"); setTimeout(() => flash.classList.remove("on"), 80);
   if (navigator.vibrate) navigator.vibrate(40);
   shutterSound();
-  $("live-tip").className = "tip opnemen"; $("live-tip").textContent = "Foto…";
+  setTip("opnemen", "opnemen", "Foto…");
   try {
     // één bron per scan: foto's van ImageCapture en videobeelden hebben een ander formaat en beeldhoek
     let blob = null;
@@ -854,8 +922,7 @@ async function liveCapture() {
     if (nieuw && nieuw.verdict === "onbruikbaar" && /^foto_\d+\./.test(nieuw.name || "")) {
       // een onbruikbare foto meteen weg: de dekking telt hem toch niet mee
       render(await api("DELETE", `api/scans/${current}/fotos/${encodeURIComponent(nieuw.name)}`));
-      $("live-tip").className = "tip let_op";
-      $("live-tip").textContent = `Foto onbruikbaar (${(nieuw.notes || []).join("; ")}): ik maak een nieuwe.`;
+      setTip("let_op", "let_op", "Foto onbruikbaar: ik maak een nieuwe", "", nieuw.notes || []); holdTip();
       say("Foto onbruikbaar. Opnieuw.", true);
     } else {
       render(data);
@@ -863,7 +930,7 @@ async function liveCapture() {
     }
     $("live-terug").disabled = !live.taken.length;
   } catch (e) {
-    $("live-tip").className = "tip zoek"; $("live-tip").textContent = "Foto mislukt: " + e.message;
+    setTip("zoek", "let_op", "Foto mislukt", "", [e.message]); holdTip();
   } finally { live.capturing = false; live.last = performance.now(); }
 }
 
@@ -873,7 +940,7 @@ async function liveUndo() {
   $("live-terug").disabled = !live.taken.length;
   if (!name || !current) return;
   try { render(await api("DELETE", `api/scans/${current}/fotos/${encodeURIComponent(name)}`)); say("Foto weg.", true); }
-  catch (e) { $("live-tip").textContent = "Weghalen mislukt: " + e.message; }
+  catch (e) { setTip("zoek", "let_op", "Weghalen mislukt", "", [e.message]); holdTip(); }
 }
 
 // ---------------------------------------------------------------- Fase 0: schuifmaatmetingen (v0.13)
@@ -990,6 +1057,8 @@ $("live-start").addEventListener("click", liveStart);
 $("live-stop").addEventListener("click", () => liveStop());
 $("live-shoot").addEventListener("click", liveCapture);
 $("live-terug").addEventListener("click", liveUndo);
+$("live-tip").addEventListener("click", toggleTip);
+$("live-tip").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleTip(); } });
 $("live-stem").addEventListener("click", () => {
   setVoice(!sound.speak);
   if (sound.speak) { sound.saidAt = 0; say("Gesproken aanwijzingen aan.", true); }  // binnen de tik: iOS laat de stem dan toe

@@ -232,7 +232,7 @@ def test_live_frames_are_judged_against_the_photos_so_far(tmp_path, mat_photos, 
     res = c.post(f"/api/scans/{job}/live", files=frame, data={"t": "1000"}).json()
     assert res["mat"] == "A4" and res["vak"] == "boven" and res["opnemen"] and res["nodig"]["boven"] == 5
     assert res["fotos"] == 0 and len(res["omtrek"]) == 4 and res["ms"] < 5000 and res["stil"] is None
-    assert res["stap"]["nummer"] == 1 and res["voortgang"]["totaal"] == 37 and res["spraak"] == "Stil houden."
+    assert res["stap"]["nummer"] == 1 and res["voortgang"]["totaal"] == 37 and res["spraak"] == "Goed, stil houden."
     res = c.post(f"/api/scans/{job}/live", files=frame, data={"t": "1150"}).json()  # v0.16: de sessie per scan
     assert res["stil"] is True and res["snelheid_px_s"] < 5 and res["ring"]["hoog"]
     assert not list((tmp_path / job / "fotos").iterdir())  # een livebeeld wordt niet bewaard

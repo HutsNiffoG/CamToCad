@@ -1,6 +1,7 @@
 """Live begeleiding bij het fotograferen (V25: v0.13, uitgebreid in v0.16): waar staat de camera, waar ligt het
 onderdeel, welke richting ontbreekt nog, en is dit een goed moment voor een foto?"""
 
+import cv2
 import numpy as np
 import pytest
 
@@ -51,13 +52,13 @@ def test_live_guidance_starts_with_the_views_from_straight_above(live_frames):
     f_rel = LIVE_F / 960
     r = live.live_check(frame(270, 60), spec, None, f_rel)
     assert r["mat"] == "A4" and r["status"] == "verplaats" and not r["opnemen"] and r["doelvak"] == "boven"
-    assert "recht boven het onderdeel" in r["aanwijzing"]
+    assert "recht boven het onderdeel" in r["aanwijzing"] and r["icoon"] == "boven"
     assert r["positie"]["azimut"] == pytest.approx(270, abs=2) and r["positie"]["elevatie"] == pytest.approx(60, abs=2)
     assert r["positie"]["afstand_mm"] == pytest.approx(320, rel=0.04)
     assert r["f_rel"] == pytest.approx(f_rel, rel=0.03)  # uit de homografie, voor de volgende beelden
     assert np.allclose(r["doel"], [0.5, 0.5], atol=0.02) and len(r["omtrek"]) == 4  # het onderdeel midden in beeld
     top = live.live_check(frame(270, 89), spec, None, f_rel)
-    assert top["vak"] == "boven" and top["opnemen"] and top["status"] == "opnemen"
+    assert top["vak"] == "boven" and top["opnemen"] and top["status"] == "opnemen" and top["icoon"] == "opnemen"
     assert top["nodig"]["boven"] == live.LIVE_TOP and not top["gedekt"]
 
 
@@ -75,14 +76,14 @@ def test_live_guidance_walks_around_the_part(live_frames):
     assert not r["opnemen"] and r["status"] == "verplaats" and "al een foto" in r["aanwijzing"]
     r = live.live_check(img, spec, {**ov, "dekking": {"hoog": [2, 0, 0, 0, 0, 0, 0, 0], "laag": [0] * 8}}, f_rel)
     assert r["doelvak"] == "hoog-1" and "~45° naar rechts" in r["aanwijzing"] and not r["opnemen"]  # gelijk: rechtsom
-    assert r["spraak"] == "Naar rechts."
+    assert r["spraak"] == "Naar rechts." and r["icoon"] == "rechts"
     r = live.live_check(img, spec, {**ov, "dekking": {"hoog": [2, 2] + [0] * 6, "laag": [2] * 8}}, f_rel)
     assert r["doelvak"] == "hoog-7" and "~45° naar links" in r["aanwijzing"]
     r = live.live_check(img, spec, {**ov, "dekking": {"hoog": [2] * 8, "laag": [0] * 8}}, f_rel)
     assert r["doelvak"] == "laag-0" and "lager, ~35°" in r["aanwijzing"] and "loop" not in r["aanwijzing"]
-    assert r["spraak"] == "Lager." and r["doel_elevatie"] == 35
+    assert r["spraak"] == "Lager." and r["icoon"] == "lager" and r["doel_elevatie"] == 35
     r = live.live_check(img, spec, {**ov, "dekking": {"hoog": [2] * 8, "laag": [2] * 8}}, f_rel)
-    assert r["status"] == "klaar" and r["gedekt"] and not r["opnemen"]
+    assert r["status"] == "klaar" and r["gedekt"] and not r["opnemen"] and r["icoon"] == "klaar"
 
 
 def test_live_guidance_checks_the_frame_before_a_photo(live_frames):
@@ -91,14 +92,15 @@ def test_live_guidance_checks_the_frame_before_a_photo(live_frames):
     ov = {"recht_van_boven": 5}
     r = live.live_check(frame(0, 60, blur=2.2), spec, ov, f_rel)
     assert r["scherpte_px"] > live.LIVE_BLUR_MAX and not r["opnemen"] and "stil" in r["aanwijzing"]
+    assert r["icoon"] == "stil"
     r = live.live_check(frame(0, 60, d=130), spec, ov, f_rel)
-    assert not r["opnemen"] and r["aanwijzing"].startswith("Te dichtbij")
+    assert not r["opnemen"] and r["aanwijzing"].startswith("Te dichtbij") and r["icoon"] == "weg"
     r = live.live_check(frame(0, 60, aim=(90.0, 0.0, 0.0)), spec, ov, f_rel)
-    assert not r["opnemen"] and "op het onderdeel" in r["aanwijzing"]
+    assert not r["opnemen"] and "op het onderdeel" in r["aanwijzing"] and r["icoon"] == "richt"
     r = live.live_check(frame(0, 60) // 6, spec, ov, f_rel)
-    assert not r["opnemen"] and "donker" in r["aanwijzing"]
+    assert not r["opnemen"] and "donker" in r["aanwijzing"] and r["icoon"] == "donker"
     r = live.live_check(np.full((540, 960), 120, np.uint8), spec, ov)
-    assert r["status"] == "zoek" and r["mat"] is None and "kalibratiemat" in r["aanwijzing"]
+    assert r["status"] == "zoek" and r["mat"] is None and "kalibratiemat" in r["aanwijzing"] and r["icoon"] == "mat"
 
 
 def test_live_guidance_from_above_names_the_side_of_the_mat(live_frames):
@@ -108,6 +110,7 @@ def test_live_guidance_from_above_names_the_side_of_the_mat(live_frames):
     r = live.live_check(frame(30, 88), spec, {"recht_van_boven": 5}, LIVE_F / 960)
     assert r["vak"] == "boven" and r["doelvak"] == "hoog-6" and not r["opnemen"]
     assert "aan de kant onder van de mat" in r["aanwijzing"] and "loop" not in r["aanwijzing"]
+    assert r["spraak"] == "Lager, aan de kant onder." and r["icoon"] == "lager"
     full = {"recht_van_boven": 5, "dekking": {"hoog": [0] * 6 + [2, 0], "laag": [0] * 8}}
     r = live.live_check(frame(30, 88), spec, full, LIVE_F / 960)
     assert r["doelvak"] == "hoog-7" and "rechtsonder" in r["aanwijzing"]  # rechtsom verder
@@ -144,15 +147,24 @@ def test_a_second_object_and_a_part_at_the_edge_are_reported(live_frames):
     scene = ((0, 0, 50, 30, 10), (75, 45, 20, 20, 2))  # en een klein plat ding rechtsboven
     for az in (0, 120, 240):
         r = live.live_check(frame(az, 86, scene=scene), spec, None, LIVE_F / 960, session=s)
-    assert len(r["onderdeel"]["andere"]) == 1 and any("er ligt nog iets op de mat" in n for n in r["opmerkingen"])
+    assert len(r["onderdeel"]["andere"]) == 1 and "ander voorwerp op de mat: haal het weg" in r["opmerkingen"]
     x, y = r["onderdeel"]["andere"][0]
     assert abs(x - (spec.board_w_mm / 2 + 75)) < 4 and abs(y - (spec.board_h_mm / 2 + 45)) < 4
+    # in beeld een cirkel om het voorwerp heen (v0.16.2); de omtrek van de mat geeft waar het voorwerp in beeld ligt
+    bw, bh = spec.board_w_mm, spec.board_h_mm
+    Hn = cv2.getPerspectiveTransform(np.float32([[0, bh], [bw, bh], [bw, 0], [0, 0]]), np.float32(r["omtrek"]))
+    u, v = cv2.perspectiveTransform(np.float32([[[x, y]]]), Hn)[0, 0]
+    circle = np.float32(r["onderdeel"]["andere_beeld"][0])
+    assert len(r["onderdeel"]["andere_beeld"]) == 1 and len(circle) == 25
+    assert cv2.pointPolygonTest(circle, (float(u), float(v)), False) > 0
+    assert cv2.pointPolygonTest(circle, tuple(map(float, r["doel"])), False) < 0  # niet om het onderdeel zelf
+    assert all(len(n) <= 60 for n in r["opmerkingen"])  # kort: één regel in beeld
     s = live.LiveSession()
     for az in (0, 120, 240):
         r = live.live_check(frame(az, 86, scene=((-85, 0, 50, 30, 10),), aim=(-85, 0, 0)), spec, None, LIVE_F / 960,
                             session=s)
     assert r["onderdeel"]["rand_mm"] == pytest.approx(spec.board_w_mm / 2 - 110, abs=4)
-    assert any("rand van de mat" in n for n in r["opmerkingen"])
+    assert "onderdeel dicht bij de rand: leg het meer naar het midden" in r["opmerkingen"]
 
 
 def test_the_ring_and_the_arrow_point_the_way(live_frames):
