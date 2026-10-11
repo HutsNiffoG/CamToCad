@@ -208,7 +208,7 @@
     <div class="hud">
       <div class="hudrow">
         <span id="live-stap" class="stap">Camera starten…</span>
-        <button id="live-geluid" type="button" aria-pressed="true" aria-label="Gesproken aanwijzingen en geluid aan of uit">🔊</button>
+        <button id="live-stem" type="button" aria-pressed="false" aria-label="Gesproken aanwijzingen aan of uit">🔇</button>
       </div>
       <div id="live-tip" class="tip zoek" role="status" aria-live="polite">Camera starten…</div>
     </div>
@@ -538,15 +538,16 @@ $("scans").addEventListener("click", async (e) => {
 const live = { stream: null, track: null, running: false, streak: 0, last: 0, capturing: false, mode: null, wake: null,
                taken: [], covered: false };
 
-// gesproken aanwijzingen en geluid (v0.16): een korte zin als de aanwijzing verandert, een sluitergeluid bij een foto
-const sound = { on: store.get("ctc_geluid") !== "uit", ctx: null, said: "", saidAt: 0, cand: "", candN: 0, voice: null };
+// gesproken aanwijzingen (v0.16): een korte zin als de aanwijzing verandert. Sinds v0.16.1 staat de stem standaard
+// uit; de knop zet haar aan en die keuze blijft bewaard. Het sluitergeluid bij een foto klinkt altijd.
+const sound = { speak: store.get("ctc_stem") === "aan", ctx: null, said: "", saidAt: 0, cand: "", candN: 0, voice: null };
 function pickVoice() {
   try { sound.voice = speechSynthesis.getVoices().find((v) => /^nl([-_]|$)/i.test(v.lang)) || null; } catch (e) {}
 }
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 
 function say(text, force = false) {
-  if (!sound.on || !text || !("speechSynthesis" in window)) return;
+  if (!sound.speak || !text || !("speechSynthesis" in window)) return;
   const now = performance.now();
   if (!force && (now - sound.saidAt < 2500 || (text === sound.said && now - sound.saidAt < 9000))) return;
   try {
@@ -566,7 +567,7 @@ function speakFrom(res) {
 }
 
 function beep(freq, ms, vol = 0.15, type = "sine", delay = 0) {
-  if (!sound.on || !sound.ctx) return;
+  if (!sound.ctx) return;
   try {
     const o = sound.ctx.createOscillator(), g = sound.ctx.createGain(), t = sound.ctx.currentTime + delay / 1000;
     o.type = type; o.frequency.value = freq;
@@ -577,13 +578,13 @@ function beep(freq, ms, vol = 0.15, type = "sine", delay = 0) {
 const shutterSound = () => { beep(1800, 35, 0.18, "square"); beep(900, 60, 0.14, "square", 45); };
 const doneSound = () => { beep(660, 140); beep(880, 140, 0.15, "sine", 150); beep(1320, 280, 0.15, "sine", 300); };
 
-function setSound(on) {
-  sound.on = on; store.set("ctc_geluid", on ? null : "uit");
-  const b = $("live-geluid");
+function setVoice(on) {
+  sound.speak = on; store.set("ctc_stem", on ? "aan" : null);
+  const b = $("live-stem");
   b.textContent = on ? "🔊" : "🔇"; b.setAttribute("aria-pressed", String(on));
   if (!on && "speechSynthesis" in window) speechSynthesis.cancel();
 }
-setSound(sound.on);
+setVoice(sound.speak);
 
 async function ensureScan() {
   if (!current) {
@@ -989,7 +990,10 @@ $("live-start").addEventListener("click", liveStart);
 $("live-stop").addEventListener("click", () => liveStop());
 $("live-shoot").addEventListener("click", liveCapture);
 $("live-terug").addEventListener("click", liveUndo);
-$("live-geluid").addEventListener("click", () => setSound(!sound.on));
+$("live-stem").addEventListener("click", () => {
+  setVoice(!sound.speak);
+  if (sound.speak) { sound.saidAt = 0; say("Gesproken aanwijzingen aan.", true); }  // binnen de tik: iOS laat de stem dan toe
+});
 $("live-verwerk").addEventListener("click", async () => { liveStop(false); await startProcessing(); });
 
 if (current) resume(current);

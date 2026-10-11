@@ -30,8 +30,8 @@ def write_y4m(path, frames) -> None:
 
 
 def test_live_camera_guides_and_takes_the_photo(tmp_path):
-    """v0.16: ook het onderdeel (uit de livebeelden), de ring met de dekking, de stappen, de meters, het geluid en de
-    laatste foto terugnemen."""
+    """v0.16: ook het onderdeel (uit de livebeelden), de ring met de dekking, de stappen, de meters, de stem (standaard
+    uit) en de laatste foto terugnemen."""
     import cadquery as cq
 
     spec = mat.PRESETS["A4"]
@@ -74,9 +74,12 @@ def test_live_camera_guides_and_takes_the_photo(tmp_path):
             page.wait_for_function("document.querySelector('#live-tip').textContent.includes('al een foto')",
                                    timeout=30000)  # vanaf dezelfde plek geen tweede foto
             assert "1/5" in page.text_content("#live-stap")
-            page.click("#live-geluid")  # geluid uit, en dat blijft zo
-            assert page.get_attribute("#live-geluid", "aria-pressed") == "false"
-            assert page.evaluate("localStorage.getItem('ctc_geluid')") == "uit"
+            assert page.get_attribute("#live-stem", "aria-pressed") == "false"  # de stem staat standaard uit (v0.16.1)
+            page.click("#live-stem")  # aan, en dat blijft zo
+            assert page.get_attribute("#live-stem", "aria-pressed") == "true"
+            assert page.evaluate("localStorage.getItem('ctc_stem')") == "aan"
+            page.click("#live-stem")
+            assert page.evaluate("localStorage.getItem('ctc_stem')") is None
             page.uncheck("#live-auto")
             page.click("#live-terug")  # de laatste foto terugnemen
             page.wait_for_function("document.querySelector('#live-count').textContent.startsWith('0')", timeout=30000)
