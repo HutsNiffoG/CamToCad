@@ -124,6 +124,38 @@ def test_measured_rulers_are_passed_as_mat_scale(tmp_path):
     assert c.post("/api/scans", data={"mat": "B5"}).status_code == 400
 
 
+def test_the_shape_choice_is_passed_and_the_free_form_files_are_listed(tmp_path):
+    """v0.17: 'vorm' (auto, plat, vrij) gaat mee naar de verwerking; een vrije vorm heeft STL en 3MF, en de lijst met
+    bestanden zegt welke er zijn."""
+    seen = {}
+
+    def runner(photos, out, opts, log, scan_name=""):
+        seen["shape"] = opts.shape
+        out.mkdir(parents=True, exist_ok=True)
+        names = ("model.stl", "model.3mf", "report.json") if opts.shape == "vrij" else ("model.step", "model.stl",
+                                                                                       "model.py", "report.json")
+        for name in names:
+            (out / name).write_text("x")
+        (out / "report.html").write_text("<h1>rapport</h1>")
+        return {"summary": {"objectklasse": "vrije vorm"}, "warnings": []}
+
+    c = TestClient(create_app(tmp_path, token="geheim", run_inline=True, runner=runner))
+    c.get("/?token=geheim")
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"vorm": "vrij"})
+    assert r.status_code == 200 and seen["shape"] == "vrij"
+    status = c.get(f"/api/scans/{r.json()['id']}").json()
+    assert status["vorm"] == "vrij" and status["bestanden"] == ["model.3mf", "model.stl", "report.html", "report.json"]
+    assert c.get(f"/scans/{r.json()['id']}/model.3mf").status_code == 200
+    r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))])
+    assert r.status_code == 200 and seen["shape"] == "auto" and "model.3mf" not in c.get(
+        f"/api/scans/{r.json()['id']}").json()["bestanden"]
+    assert c.post("/api/scans", data={"vorm": "rond"}).status_code == 400
+    # bij het starten mag de keuze nog veranderen
+    job = c.post("/api/scans", data={}).json()["id"]
+    c.post(f"/api/scans/{job}/fotos", files=[("fotos", (f"f{i}.jpg", jpg(), "image/jpeg")) for i in range(6)])
+    assert c.post(f"/api/scans/{job}/start", data={"vorm": "plat"}).status_code == 200 and seen["shape"] == "plat"
+
+
 @pytest.fixture(scope="module")
 def mat_photos():
     from camtocad import mat, render

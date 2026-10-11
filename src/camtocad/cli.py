@@ -35,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="gemeten lengte (mm) van de 100 mm-meetlijnen op de geprinte mat: X (onder) en eventueel "
                         "Y (links); één waarde geldt voor beide. Corrigeert de printschaal en verkleint de U95 "
                         "(zonder meting telt 0,3%% printschaal mee)")
+    p.add_argument("--vorm", choices=("auto", "plat", "vrij"), default="auto",
+                   help="auto: een plat onderdeel als parametrisch model, en is het niet plat, de vorm als mesh; "
+                        "plat: alleen het parametrische model; vrij: meteen de vorm als mesh (STL, 3MF), voor een "
+                        "onderdeel dat niet plat is")
 
     p = sub.add_parser("controleer", help="fotoset snel controleren vóór het verwerken (mat, scherpte, dekking)")
     p.add_argument("fotos", help="map met foto's (JPG/PNG)")
@@ -105,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             from .pipeline import ScanOptions, run_scan
             out = args.uit or f"{Path(args.fotos).resolve()}_cad"
             opts = ScanOptions(mat=args.mat, max_side=args.max_zijde, snap_threshold=args.snapdrempel,
-                               imperial=args.inch, mat_scale=_ruler_scale(args.meetlijn))
+                               imperial=args.inch, mat_scale=_ruler_scale(args.meetlijn), shape=args.vorm)
             result = run_scan(args.fotos, out, opts)
             _print_result(result)
         elif args.cmd == "controleer":
@@ -203,6 +207,16 @@ def _ruler_scale(values: list[float] | None) -> tuple[float, float] | None:
 
 
 def _print_result(result: dict) -> None:
+    if result.get("niveau") == 0:  # vrije vorm (v0.17): een mesh met de buitenmaten
+        print("\nVrije vorm (mesh), buitenmaten in mm (indicatief):")
+        for d in result["dimensions"]:
+            print(f"  {d['name']:24s} {d['measured']:9.1f}  (± {d['u95']:.1f})")
+        if result["warnings"]:
+            print("\nWaarschuwingen:")
+            for w in result["warnings"][:15]:
+                print(f"  - {w}")
+        print(f"\nUitvoer: {result['out_dir']} (model.stl, model.3mf, report.html)")
+        return
     print("\nMaten (werkassenstelsel, mm):")
     for d in result["dimensions"]:
         flag = "gesnapt" if d["snapped"] else "gemeten"

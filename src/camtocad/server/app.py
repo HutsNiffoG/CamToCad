@@ -40,7 +40,8 @@ from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
 
 STATIC = Path(__file__).parent / "static"
-OUTPUTS = {"model.step", "model.stl", "model.py", "report.html", "report.json"}
+OUTPUTS = {"model.step", "model.stl", "model.3mf", "model.py", "report.html", "report.json"}
+SHAPES = ("auto", "plat", "vrij")  # ScanOptions.shape (v0.17)
 DEBUG_FILE = re.compile(r"^(masker_[\w.-]{1,80}\.jpg|lokalisatie\.png|bovenaanzicht\.png|diagnose\.json)$")
 PHOTO_FILE = re.compile(r"^foto_\d{4}\.[a-z]{3,4}$")
 MAX_FILES = 300
@@ -64,6 +65,13 @@ def _mat_choice(mat: str) -> str:
     if mat.upper() not in PRESETS:
         raise HTTPException(400, f"Onbekende mat: {mat}")
     return PRESETS[mat.upper()].name
+
+
+def _shape_choice(vorm: str) -> str:
+    """Soort onderdeel (v0.17): auto, plat of vrij."""
+    if vorm.lower() not in SHAPES:
+        raise HTTPException(400, f"Onbekende vorm: {vorm} (kies auto, plat of vrij)")
+    return vorm.lower()
 
 
 def _rulers(meetlijn: float | None, meetlijn_y: float | None) -> list[float] | None:
@@ -108,11 +116,11 @@ class JobStore:
             raise HTTPException(404, "Onbekende scan")
         return p
 
-    def create(self, mat: str = "auto", meetlijn=None) -> str:
+    def create(self, mat: str = "auto", meetlijn=None, vorm: str = "auto") -> str:
         job_id = uuid.uuid4().hex[:12]
         (self.root / job_id / "fotos").mkdir(parents=True)
         self.write(job_id, {"id": job_id, "state": "upload", "mat": mat,
-                            "meetlijn": list(meetlijn) if meetlijn is not None else None,
+                            "meetlijn": list(meetlijn) if meetlijn is not None else None, "vorm": vorm,
                             "created": time.time(), "photos": 0, "log": []})
         return job_id
 
@@ -143,6 +151,8 @@ class JobStore:
         dbg = self.root / job_id / "resultaat" / "debug"
         data["debug"] = sorted(p.name for p in dbg.iterdir() if DEBUG_FILE.match(p.name)) if dbg.is_dir() else []
         data["maten"] = (self.root / job_id / validate.REFERENCE).exists()
+        res = self.root / job_id / "resultaat"  # welke uitvoer er is (v0.17: een vrije vorm heeft STL en 3MF)
+        data["bestanden"] = sorted(n for n in OUTPUTS if (res / n).exists()) if res.is_dir() else []
         return data
 
     # --- Fase 0: schuifmaatmetingen per scan (maten.json, zoals bij camtocad valideer) ----------------------
@@ -392,7 +402,7 @@ class JobStore:
             rulers = status.get("meetlijn")  # None: niet gemeten
             rulers = [rulers, rulers] if isinstance(rulers, (int, float)) else rulers
             scale = (rulers[0] / 100.0, rulers[1] / 100.0) if rulers else None
-            opts = ScanOptions(mat=status.get("mat", "auto"), mat_scale=scale)
+            opts = ScanOptions(mat=status.get("mat", "auto"), mat_scale=scale, shape=status.get("vorm", "auto"))
             result = self.runner(base / "fotos", base / "resultaat", opts, log=log, scan_name=job_id)
             self.update(job_id, state="klaar", finished=time.time(), summary=result.get("summary", {}),
                         warnings=result.get("warnings", [])[:20])
@@ -490,15 +500,16 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
 
     @app.post("/api/scans")
     def create_scan(request: Request, fotos: list[UploadFile] | None = File(None), mat: str = Form("auto"),
-                    meetlijn: float | None = Form(None), meetlijn_y: float | None = Form(None)):
+                    meetlijn: float | None = Form(None), meetlijn_y: float | None = Form(None),
+                    vorm: str = Form("auto")):
         """Nieuwe scan. Met foto's erbij wordt hij meteen verwerkt (alles in één keer); zonder foto's
         volgen die één voor één via /api/scans/{id}/fotos, met directe controle, en daarna /start."""
         check(request)
-        mat, rulers = _mat_choice(mat), _rulers(meetlijn, meetlijn_y)
+        mat, rulers, vorm = _mat_choice(mat), _rulers(meetlijn, meetlijn_y), _shape_choice(vorm)
         if fotos is not None and len(fotos) > MAX_FILES:
             raise HTTPException(400, f"Upload hooguit {MAX_FILES} foto's")
         store.ensure_space()
-        job_id = store.create(mat, rulers)
+        job_id = store.create(mat, rulers, vorm)
         if not fotos:
             return {"id": job_id, "photos": 0}
         try:
@@ -569,12 +580,14 @@ def create_app(data_dir: Path, token: str | None, run_inline: bool = False, runn
 
     @app.post("/api/scans/{job_id}/start")
     def start_scan(job_id: str, request: Request, mat: str | None = Form(None), meetlijn: float | None = Form(None),
-                   meetlijn_y: float | None = Form(None)):
-        """Verwerking starten; mat en meetlijnen mogen hier nog aangepast worden."""
+                   meetlijn_y: float | None = Form(None), vorm: str | None = Form(None)):
+        """Verwerking starten; mat, meetlijnen en soort onderdeel (vorm) mogen hier nog aangepast worden."""
         check(request)
         changes = {}
         if mat is not None:
             changes["mat"] = _mat_choice(mat)
+        if vorm is not None:
+            changes["vorm"] = _shape_choice(vorm)
         if meetlijn is not None or meetlijn_y is not None:
             changes["meetlijn"] = _rulers(meetlijn, meetlijn_y)
         if changes:

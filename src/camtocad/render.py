@@ -71,7 +71,9 @@ def tessellate(shape, tolerance: float = 0.05, angular: float = 0.15) -> tuple[n
     return V, F
 
 
-def _rasterize_mesh(V, F, K, R, t, width, height, light, albedo, ambient):
+def _rasterize_mesh(V, F, K, R, t, width, height, light, albedo, ambient, texture=None):
+    """`texture` (v0.17): een functie van punten op het object (mat-mm, (n, 3)) naar een factor op de albedo, voor
+    onderdelen met textuur (de stereo van de vrije vorm)."""
     img = np.zeros((height, width), np.float32)
     zbuf = np.full((height, width), np.inf, np.float32)
     pc = V @ R.T + t
@@ -103,7 +105,12 @@ def _rasterize_mesh(V, F, K, R, t, width, height, light, albedo, ambient):
         sub_z = zbuf[ymin:ymax + 1, xmin:xmax + 1]
         upd = inside & (zz < sub_z)
         sub_z[upd] = zz[upd]
-        img[ymin:ymax + 1, xmin:xmax + 1][upd] = s
+        if texture is None:
+            img[ymin:ymax + 1, xmin:xmax + 1][upd] = s
+        elif upd.any():  # het punt op de driehoek, perspectivisch juist geïnterpoleerd
+            b = [(w / z[f[i]] * zz)[upd] for i, w in enumerate((w0, w1, w2))]
+            P = b[0][:, None] * V[f[0]] + b[1][:, None] * V[f[1]] + b[2][:, None] * V[f[2]]
+            img[ymin:ymax + 1, xmin:xmax + 1][upd] = s * texture(P)
     return img, np.isfinite(zbuf)
 
 
@@ -120,7 +127,7 @@ def _distort(img: np.ndarray, cam: CameraModel, border: int) -> np.ndarray:
 def render_view(raster: BoardRaster, cam: CameraModel, R: np.ndarray, t: np.ndarray, mesh=None, *,
                 albedo: float = 0.55, light=(0.35, -0.45, 0.82), ambient: float = 0.35,
                 noise: float = 1.5, blur: float = 0.5, table: int = 105, gradient: float = 0.08,
-                rng: np.random.Generator | None = None) -> tuple[np.ndarray, np.ndarray]:
+                rng: np.random.Generator | None = None, texture=None) -> tuple[np.ndarray, np.ndarray]:
     """Rendert één view; geeft (grijswaardenbeeld uint8, objectmasker bool)."""
     rng = rng or np.random.default_rng()
     s = 3  # supersampling (oneven: een pixel is nooit precies half bedekt, dus geen voorkeur bij gelijkspel)
@@ -136,7 +143,7 @@ def render_view(raster: BoardRaster, cam: CameraModel, R: np.ndarray, t: np.ndar
     # papier met iets witbalans/belichtingsverloop, zoals in een echte foto
     bg = bg * 0.86 + 12.0
     if mesh is not None:
-        obj, cover = _rasterize_mesh(mesh[0], mesh[1], Ks, R, t, W, H, light, albedo, ambient)
+        obj, cover = _rasterize_mesh(mesh[0], mesh[1], Ks, R, t, W, H, light, albedo, ambient, texture)
         img = np.where(cover, obj, bg)
     else:
         cover = np.zeros((H, W), bool)

@@ -136,3 +136,69 @@ kritieke maten met een schuifmaat.</p>
     hpath = out_dir / "report.html"
     hpath.write_text(page, encoding="utf-8")
     return {"json": jpath, "html": hpath}
+
+
+def write_freeform(out_dir: Path, data: dict, previews: dict[str, np.ndarray]) -> dict[str, Path]:
+    """Rapport van een vrije vorm (v0.17, uitvoerniveau 0): JSON, en een HTML-pagina met aanzichten van de mesh (blauwgrijs
+    = gemeten met stereo, oranje = alleen uit de silhouetten), de buitenmaten en de samenvatting."""
+    import base64
+
+    import cv2
+    out_dir = Path(out_dir)
+    jpath = out_dir / "report.json"
+    jpath.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=float), encoding="utf-8")
+    figs = []
+    for name, img in previews.items():
+        ok, png = cv2.imencode(".png", img)
+        if ok:
+            figs.append(f'<figure><img alt="{html.escape(name)}" src="data:image/png;base64,'
+                        f'{base64.b64encode(png.tobytes()).decode()}"><figcaption>{html.escape(name)}</figcaption>'
+                        "</figure>")
+    rows = "".join(f"<tr><td>{html.escape(s['name'])}</td><td><b>{s['measured']:.1f}</b></td>"
+                   f"<td>± {s['u95']:.1f} (indicatief)</td></tr>" for s in data.get("dimensions", []))
+    info_rows = "".join(f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
+                        for k, v in data.get("summary", {}).items())
+    warnings = "".join(f"<li>{html.escape(w)}</li>" for w in data.get("warnings", [])) or "<li>geen</li>"
+    files = "".join(f'<li><a href="{html.escape(v)}">{html.escape(v)}</a></li>'
+                    for v in data.get("files", {}).values())
+    page = f"""<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cam-to-CAD vrije vorm</title>
+<style>
+:root {{ --bg:#fff; --fg:#1d232b; --muted:#5b6673; --line:#d8dde3; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#15191e; --fg:#e6e9ed; --muted:#9aa4af; --line:#2c333b; }} }}
+body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }}
+main {{ max-width:980px; margin:0 auto; padding:24px 16px 48px; }}
+h1 {{ font-size:1.5rem; margin:0 0 4px; }} h2 {{ font-size:1.1rem; margin:28px 0 8px; }}
+.muted {{ color:var(--muted); }}
+table {{ border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }}
+th, td {{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
+.wrap {{ overflow-x:auto; }}
+.views {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:12px; }}
+figure {{ margin:0; }} figure img {{ width:100%; height:auto; border:1px solid var(--line); border-radius:6px;
+  background:#fff; }} figcaption {{ color:var(--muted); font-size:.9rem; }}
+.key {{ display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:-1px; margin:0 4px 0 10px; }}
+</style></head><body><main>
+<h1>Cam-to-CAD: vrije vorm</h1>
+<p class="muted">{html.escape(data.get('title', ''))}</p>
+<p>Dit onderdeel is als <b>vrije vorm</b> verwerkt (uitvoerniveau 0): een mesh van de vorm, om te 3D-printen of als
+basis in een CAD-programma, met de buitenmaten. Geen parametrisch model met benoemde maten; dat maakt de scan alleen
+van platte onderdelen.</p>
+<h2>Aanzichten</h2>
+<div class="views">{''.join(figs)}</div>
+<p class="muted"><span class="key" style="background:#99bddb"></span>gemeten met stereo
+<span class="key" style="background:#f5b873"></span>alleen uit de silhouetten: hier kan het model te vol zijn, waar
+geen foto de mat erachter zag (een kuil, een spleet, de ruimte onder een overhang)</p>
+<h2>Buitenmaten</h2>
+<div class="wrap"><table><thead><tr><th>Maat</th><th>mm</th><th>Onzekerheid</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<h2>Samenvatting</h2>
+<div class="wrap"><table>{info_rows}</table></div>
+<h2>Waarschuwingen</h2><ul>{warnings}</ul>
+<h2>Bestanden</h2><ul>{files}</ul>
+<p class="muted">STL en 3MF in mm, in het assenstelsel van het onderdeel (lange zijde langs X, de mat op z = 0).
+Getoetst op gerenderde scans; meet kritieke maten na met een schuifmaat.</p>
+</main></body></html>"""
+    hpath = out_dir / "report.html"
+    hpath.write_text(page, encoding="utf-8")
+    return {"json": jpath, "html": hpath}

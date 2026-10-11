@@ -159,6 +159,12 @@
         <option value="A4">A4</option><option value="A3">A3</option><option value="Letter">Letter</option>
         <option value="A4-v1">A4 (oude mat, v1)</option><option value="A3-v1">A3 (oude mat, v1)</option>
       </select>
+      <label for="vorm">Onderdeel</label>
+      <select id="vorm">
+        <option value="auto">automatisch (plat model, anders de vorm als mesh)</option>
+        <option value="plat">plat (parametrisch model met maten)</option>
+        <option value="vrij">niet plat: de vorm als mesh (STL, 3MF)</option>
+      </select>
       <label for="meetlijn">Meetlijn X</label>
       <span><input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" placeholder="100,0"> mm</span>
       <label for="meetlijn_y">Meetlijn Y</label>
@@ -270,6 +276,7 @@ const queue = [];
 function settings() {
   const fd = new FormData();
   fd.append("mat", $("mat").value);
+  fd.append("vorm", $("vorm").value);
   // alleen gemeten meetlijnen meesturen: niets opgeven telt als 'printschaal onbekend' (ruimere U95)
   const mx = $("meetlijn").value.replace(",", "."), my = $("meetlijn_y").value.replace(",", ".");
   if (mx) fd.append("meetlijn", mx);
@@ -513,8 +520,14 @@ async function load() {
       const when = new Date(s.created * 1000).toLocaleString("nl-NL");
       let body = "";
       if (s.state === "klaar") {
-        body = ["report.html:rapport", "model.step:STEP", "model.stl:STL", "model.py:CadQuery-script"]
-          .map((x) => { const [f, t] = x.split(":"); return `<a href="scans/${s.id}/${f}">${t}</a>`; }).join(" · ");
+        // welke bestanden er zijn: een vrije vorm (v0.17) heeft STL en 3MF, geen STEP of script
+        const names = { "report.html": "rapport", "model.step": "STEP", "model.stl": "STL", "model.3mf": "3MF",
+                        "model.py": "CadQuery-script" };
+        const have = s.bestanden && s.bestanden.length ? s.bestanden : ["report.html", "model.step", "model.stl", "model.py"];
+        body = Object.keys(names).filter((f) => have.includes(f))
+          .map((f) => `<a href="scans/${s.id}/${f}">${names[f]}</a>`).join(" · ");
+        if (s.summary && s.summary.objectklasse && s.summary.objectklasse.startsWith("vrije vorm"))
+          body += `<div class="muted">vrije vorm: ${esc(s.summary.buitenmaten || "")}</div>`;
         if (s.summary && s.summary.betrouwbaarheid && s.summary.betrouwbaarheid !== "normaal")
           body += `<div class="fout">betrouwbaarheid ${esc(s.summary.betrouwbaarheid)}</div>`;
       } else if (s.state === "fout") {

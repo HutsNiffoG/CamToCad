@@ -32,6 +32,16 @@ def mask_overlay(img: np.ndarray, m: ViewMasks) -> np.ndarray:
     return np.clip(base, 0, 255).astype(np.uint8)
 
 
+def shape_overlay(img: np.ndarray, sil: np.ndarray) -> np.ndarray:
+    """De vrije vorm (v0.17) over een foto: het silhouet van de mesh licht groen, met zijn rand."""
+    base = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR).astype(np.float32) * 0.7
+    base[sil] = base[sil] * 0.6 + np.array([60, 200, 60]) * 0.4
+    out = np.clip(base, 0, 255).astype(np.uint8)
+    contours, _ = cv2.findContours(sil.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    cv2.drawContours(out, contours, -1, (40, 230, 40), 1)
+    return out
+
+
 def _upscale(img: np.ndarray, min_width: int = 700) -> np.ndarray:
     f = max(1, int(np.ceil(min_width / max(img.shape[1], 1))))
     return cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_NEAREST) if f > 1 else img

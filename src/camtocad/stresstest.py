@@ -126,6 +126,49 @@ def notched_bracket():
     return demo_part().cut(cq.Workplane("XY").box(3, 2, 12, centered=(True, False, False)).translate((0, 18, 0)))
 
 
+# Onderdelen die niet plat zijn (v0.17): de vrije vorm (freeform.py), met de buitenmaten als waarheid
+
+
+def dome():
+    """Halve bol r 30: een ronde bovenkant (die ziet alleen een foto van opzij als rand)."""
+    import cadquery as cq
+    return cq.Workplane("XY").sphere(30).split(keepTop=True)
+
+
+def lying_shaft():
+    """Draaideel, liggend op de kraag: Ø20 x 40, kraag Ø30 x 10, Ø14 x 25 (as op z = 15)."""
+    import cadquery as cq
+    c1 = cq.Workplane("YZ").circle(10).extrude(40)
+    c2 = cq.Workplane("YZ").workplane(offset=40).circle(15).extrude(10)
+    c3 = cq.Workplane("YZ").workplane(offset=50).circle(7).extrude(25)
+    return c1.union(c2).union(c3).translate((-37.5, 0, 15))
+
+
+def stapler():
+    """Zoals een nietmachine: voet 130 x 36 x 10 met ronde hoeken, een gebogen arm erboven (30 breed) en een spleet
+    van 8 mm tussen arm en voet, die alleen heel laag van opzij te zien is."""
+    import cadquery as cq
+    base = cq.Workplane("XY").box(130, 36, 10, centered=(True, True, False)).edges("|Z").fillet(8)
+    arm = (cq.Workplane("XZ").moveTo(-63, 9).lineTo(-63, 38)
+           .spline([(-20, 44), (30, 40), (62, 32)], includeCurrent=True)
+           .lineTo(62, 18).lineTo(-45, 18).lineTo(-45, 9).close().extrude(15, both=True))
+    return base.union(arm)
+
+
+def bracket_3d():
+    """L-beugel: plaat 60 x 40 x 6 met gat Ø8, opstaande flens 6 x 40 x 40 met gat Ø10 (as langs X op z = 26)."""
+    import cadquery as cq
+    plate = cq.Workplane("XY").box(60, 40, 6, centered=(False, True, False))
+    flange = cq.Workplane("XY").box(6, 40, 40, centered=(False, True, False))
+    hole_f = cq.Workplane("YZ").center(0, 26).circle(5).extrude(6)
+    hole_p = cq.Workplane("XY").center(40, 0).circle(4).extrude(6)
+    return plate.union(flange).cut(hole_f).cut(hole_p).translate((-30, 0, 0))
+
+
+def _free(length: float, width: float, height: float) -> dict:
+    return {"h": height, "lengte (X)": length, "breedte (Y)": width, "hoogte (Z)": height}
+
+
 # De waarheid in het assenstelsel van het onderdeel (zoals in het rapport). Een lijst: elk van die waarden kan het
 # zijn (de beugel kan in het rapport ook gespiegeld liggen, en dan zit het gat op 10 in plaats van 70)
 BRACKET = {"h": 12.0, "x": [80.0], "y": [40.0], "R": 3.0, "d": 6.6, "hx": [10.0, 70.0], "hy": [20.0]}
@@ -152,6 +195,11 @@ OBJECTS = {
     "washer": (washer, WASHER),
     "bankpas": (bank_card, {"h": 0.76, "x": [85.6], "y": [53.98], "R": 3.18, "hx": [], "hy": []}),
     "hoekblok": (corner_block, {"h": 8.0, "x": [60.0], "y": [35.0], "R": 1.0, "hx": [], "hy": [], "scherp": 2}),
+    # niet plat (v0.17): de vrije vorm
+    "koepel": (dome, _free(60.0, 60.0, 30.0)),
+    "as_liggend": (lying_shaft, _free(75.0, 30.0, 30.0)),
+    "nietmachine": (stapler, _free(130.0, 36.0, 44.07)),
+    "beugel3d": (bracket_3d, _free(60.0, 40.0, 40.0)),
 }
 
 
@@ -238,6 +286,12 @@ SCENARIOS = {
     "hoeken": dict(BASE, object="hoekblok"),
     "hoeken_onscherp": dict(BASE, object="hoekblok", blur=1.5),
     "bewogen": dict(BASE, blur_some=(0.33, 2.5)),
+    # niet plat (v0.17): de vorm als mesh. Met textuur (vlekken van ~2 mm) ziet de stereo het oppervlak; de koepel
+    # zonder textuur toont de grens van alleen silhouetten (de ronde bovenkant komt te hoog uit)
+    "vrij_beugel": dict(BASE, object="beugel3d", vorm="vrij", texture=(0.35, 2.0)),
+    "vrij_nietmachine": dict(BASE, object="nietmachine", vorm="vrij", texture=(0.35, 2.0)),
+    "vrij_as": dict(BASE, object="as_liggend", vorm="vrij", texture=(0.35, 2.0)),
+    "vrij_koepel": dict(BASE, object="koepel", vorm="vrij"),
 }
 # kleurscenario's die ook als grijsbeelden draaien (controle: wat geeft kleur extra, V8)
 GRAY_CONTROLS = ("blauw", "grijs_kleur")
@@ -349,6 +403,33 @@ def post(img, name, cfg, rng):
     return out
 
 
+def texture_fn(amplitude: float, scale_mm: float = 2.0, seed: int = 7):
+    """Een vlekkerige textuur op het onderdeel (v0.17, voor de stereo van de vrije vorm): ruis op een rooster van
+    `scale_mm` (en de helft daarvan), trilineair geïnterpoleerd, als factor 1 ± `amplitude` op de albedo. Geen
+    golven: een herhalend patroon laat stereo op de verkeerde diepte passen."""
+    rng = np.random.default_rng(seed)
+    n = 64
+    tables = [rng.normal(size=(n, n, n)).astype(np.float32) for _ in range(2)]
+
+    def octave(P: np.ndarray, table: np.ndarray, s: float) -> np.ndarray:
+        g = P / s
+        i0 = np.floor(g).astype(np.int64)
+        f = g - i0
+        out = np.zeros(len(P))
+        for di in (0, 1):
+            for dj in (0, 1):
+                for dk in (0, 1):
+                    w = ((f[:, 0] if di else 1 - f[:, 0]) * (f[:, 1] if dj else 1 - f[:, 1])
+                         * (f[:, 2] if dk else 1 - f[:, 2]))
+                    out += w * table[(i0[:, 0] + di) % n, (i0[:, 1] + dj) % n, (i0[:, 2] + dk) % n]
+        return out
+
+    def texture(P: np.ndarray) -> np.ndarray:
+        v = octave(P, tables[0], scale_mm) + 0.5 * octave(P, tables[1], scale_mm / 2)
+        return np.clip(1.0 + amplitude * v / 0.75, 0.2, 2.0)  # trilineair verzacht: σ ~0,6 + 0,3 → ~0,75
+    return texture
+
+
 def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
     """De foto's van een scenario: [(naam, beeld)], en de waarheid."""
     spec = get_spec(mat)
@@ -370,6 +451,7 @@ def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
     images = []
     color = cfg.get("color")  # albedo per kanaal (R, G, B): een gekleurd onderdeel (V8)
     tint = np.asarray(cfg.get("tint", (1.0, 1.0, 1.0)), np.float32)  # kleur van het licht (R, G, B), na witbalans
+    texture = texture_fn(*cfg["texture"]) if cfg.get("texture") else None  # (amplitude, vlekgrootte mm), v0.17
     some = cfg.get("blur_some")  # (deel van de foto's, σ px): bewogen foto's (V28); een eigen toevalsreeks, zodat de
     pick = np.random.default_rng(seed + 1000) if some else None  # andere scenario's dezelfde foto's houden
     for k, (name, R, t) in enumerate(poses(target, cfg, rng)):
@@ -379,10 +461,11 @@ def make_scan(cfg: dict, seed: int = 1, mat: str = "A4") -> tuple[list, dict]:
             blur = some[1]
         if color is None:
             img, _ = render_view(raster, cam, R, t, m, albedo=cfg.get("albedo", 0.55), light=light,
-                                 noise=0.0, gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng)
+                                 noise=0.0, gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng, texture=texture)
         else:  # per kanaal renderen (lineair in de albedo), dan het licht erover; BGR zoals OpenCV
             chans = [render_view(raster, cam, R, t, m, albedo=a, light=light, noise=0.0,
-                                 gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng)[0].astype(np.float32) * k
+                                 gradient=cfg.get("gradient", 0.08), blur=blur, rng=rng,
+                                 texture=texture)[0].astype(np.float32) * k
                      for a, k in zip(color, tint)]
             img = np.clip(np.dstack(chans[::-1]), 0, 255).astype(np.uint8)
         images.append((name, post(img, name, cfg, rng)))
@@ -417,7 +500,8 @@ def run(name: str, out_dir: str | Path, seed: int = 1, cfg: dict | None = None, 
         cv2.imwrite(str(out / f"foto_{n}.jpg"), img)
     lines: list[str] = []
     try:
-        res = run_scan(images, out / "resultaat", ScanOptions(mat=mat, max_evals=cfg.get("max_evals", 1500)),
+        res = run_scan(images, out / "resultaat", ScanOptions(mat=mat, max_evals=cfg.get("max_evals", 1500),
+                                                              shape=cfg.get("vorm", "auto")),
                        log=lines.append, scan_name=name)
         dims = {d["name"]: round(float(d["measured"]), 3) for d in res["dimensions"]}
         status = "OK"
@@ -512,6 +596,8 @@ def truth_of(name: str, value: float, t: dict) -> float | None:
 
 def kind_of(name: str) -> str:
     """Soort maat voor de samenvatting."""
+    if name.endswith((" (X)", " (Y)", " (Z)")):  # buitenmaten van een vrije vorm (v0.17)
+        return "vrije vorm"
     if name.startswith("verzinking"):
         return "verzinking"
     if name.startswith("kamerboring"):
@@ -532,7 +618,7 @@ def kind_of(name: str) -> str:
 
 
 KINDS = ("hoogte", "lengte", "gat", "verzinking", "kamerboring", "blind gat", "sleuf", "positie", "afronding",
-         "bovenrand", "trede")
+         "bovenrand", "trede", "vrije vorm")
 
 
 def _load(run_dir: Path, sc: str) -> tuple[dict | None, dict | None]:

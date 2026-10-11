@@ -21,14 +21,18 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import (__version__, blindhole, cadmodel, calib, counterbore, countersink, debug, edgefit, holes, hull, initial,
-               masks, placement, preflight, prismcheck, profile, report, silhouette, tone, uncertainty)
+from . import (__version__, blindhole, cadmodel, calib, counterbore, countersink, debug, edgefit, freeform, holes, hull,
+               initial, masks, placement, preflight, prismcheck, profile, report, silhouette, tone, uncertainty)
 from .cadhelpers import afgeronde_hoeken
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
 from .profile import Hole, Slot, dominant_angle
 WORKERS = max(1, min(4, os.cpu_count() or 1))  # parallelle foto's (geheugen: ~250 MB per maskerberekening)
 HDR_WARN_FRAC = 0.25  # een waarschuwing over lokale toonbewerking als minstens dit deel van de foto's een tegelraster heeft
+FREE_MAX_POINTS = 25e6  # vrije vorm: hooguit zoveel roosterpunten (anders een grover rooster)
+FREE_STEREO_WARN = 0.5  # vrije vorm: waarschuwen als minder van het oppervlak met stereo gemeten is
+FREE_IOU = 0.98  # auto: is het onderdeel niet plat en past het platte model minder goed dan dit (de grens voor
+# 'goed' in de kwaliteitstoets), dan de vrije vorm
 
 
 class ScanError(ValueError):
@@ -46,6 +50,9 @@ class ScanOptions:
     # printschaal: gemeten / nominale lengte van de meetlijnen; één getal (beide richtingen) of (X, Y).
     # None: niet gemeten (dan 1,0, maar met de onzekerheid van een onbekende printschaal in U95)
     mat_scale: float | tuple[float, float] | None = None
+    # v0.17: "auto" (route A; is het onderdeel niet plat, dan de vrije vorm), "plat" (alleen route A) of "vrij" (meteen
+    # de vrije vorm: een mesh van de vorm, freeform.py)
+    shape: str = "auto"
 
     @property
     def scale_xy(self) -> tuple[float, float]:
@@ -1016,6 +1023,106 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         imwrite(dbg / "lokalisatie.png",
                     debug.hull_image(coarse, board_bounds, (lo[0] - 6, hi[0] + 6, lo[1] - 6, hi[1] + 6)))
 
+    def free_form(reason: str) -> dict:
+        """Uitvoerniveau 0 (v0.17, freeform.py): de vorm van het onderdeel als mesh, met de buitenmaten."""
+        t_ff = time.time()
+        log(f"vrije vorm ({reason}): de vorm uit de silhouetten en stereo")
+        mid = np.array([target[0], target[1], z_top / 2])
+        mm_px = float(np.median([float((p.R @ mid + p.t)[2]) for p, _ in views])) / cam.K[0, 0]
+        box_lo = np.array([lo[0] - 6.0, lo[1] - 6.0, 0.0])
+        box_hi = np.array([hi[0] + 6.0, hi[1] + 6.0, z_top + 6.0])
+        h = float(np.clip(2.0 * mm_px, 0.5, 1.2))
+        h *= max(1.0, float(np.prod((box_hi - box_lo) / h)) / FREE_MAX_POINTS) ** (1 / 3)
+        cache: dict[str, np.ndarray] = {}
+
+        def image(name: str) -> np.ndarray:
+            if name not in cache:
+                cache[name] = undistort(lookup[name])
+            return cache[name]
+
+        info: dict = {"reden": reason, "rooster_mm": round(h, 3)}
+        mesh = freeform.reconstruct(views, cam.K, box_lo, box_hi, h, images=image, info=info, workers=WORKERS)
+        if len(mesh.F) < 4:
+            raise ScanError("Geen vorm gevonden: de silhouetten van het onderdeel komen in de foto's niet overeen. "
+                            + NO_CONTOUR_HELP.format(debug=dbg) + small_mat)
+        stereo = info.pop("stereo_per_vertex", None)
+        frac = float(np.mean(stereo)) if stereo is not None and len(stereo) == len(mesh.V) else 0.0
+        R, t_pf = freeform.part_frame(mesh)
+        part_mesh = mesh.transformed(R, t_pf)
+        name = scan_name or "camtocad"
+        freeform.write_stl(part_mesh, out / "model.stl", name)
+        freeform.write_3mf(part_mesh, out / "model.3mf", name)
+        ious = [v for v in freeform.view_iou(mesh, views, cam.K) if np.isfinite(v)] or [float("nan")]
+        lo_r, hi_r = freeform.robust_extent(part_mesh)  # zonder losse uitschieters
+        ext = hi_r - np.array([lo_r[0], lo_r[1], 0.0])
+        info.update({"stereo_deel_oppervlak": round(frac, 3), "iou_mediaan": round(float(np.median(ious)), 4),
+                     "iou_min": round(float(np.min(ious)), 4), "driehoeken": len(part_mesh.F)})
+        diag["vrije_vorm"] = info
+        log(f"vrije vorm: {ext[0]:.1f} x {ext[1]:.1f} x {ext[2]:.1f} mm, {len(part_mesh.F)} driehoeken, "
+            f"{100 * frac:.0f}% van het oppervlak met stereo gemeten ({time.time() - t_ff:.0f} s)")
+        if frac < FREE_STEREO_WARN:
+            warnings.append(f"weinig textuur: {100 * (1 - frac):.0f}% van het oppervlak komt alleen uit de silhouetten. "
+                            "Daar kan het model te vol zijn: een kuil, de ruimte onder een overhang of een 'dak' boven "
+                            "een vlakke bovenkant is dan niet te zien. Wat textuur op het onderdeel helpt (een vlekkerig "
+                            "patroon, of matte krijt- of scanspray), net als foto's van laag rondom")
+        warnings.append("vrije vorm (uitvoerniveau 0): een mesh van de vorm, geen parametrisch CAD-model; de maten zijn "
+                        "indicatief. Een holte die op geen enkele foto te zien is (een spleet die alleen heel laag van "
+                        "opzij te zien is, de onderkant), is in de mesh dicht")
+        write_debug()
+        if opts.debug_images:
+            for pose, m in views[:: max(1, len(views) // 4)][:4]:
+                imwrite(dbg / f"vorm_{Path(pose.name).stem}.jpg",
+                        debug.shape_overlay(undistort(lookup[pose.name]), freeform.silhouette(
+                            mesh, pose, cam.K, (m.fg.shape[1], m.fg.shape[0]))))
+        colors = None
+        if stereo is not None and len(stereo) == len(part_mesh.V):
+            colors = np.where(stereo[:, None], np.array(freeform.COLOR_STEREO), np.array(freeform.COLOR_HULL))
+        previews = {k: freeform.render_preview(part_mesh, d, colors=colors) for k, d in freeform.VIEWS.items()}
+        u95 = [0.5 + 0.005 * float(e) for e in ext]  # indicatief: de klasse 'Standaard' uit ARCHITECTURE.md §2.3
+        dims = [{"name": n, "measured": round(float(e), 3), "u95": round(u, 2), "value": round(float(e), 2),
+                 "snapped": False, "reason": "buitenmaat van de mesh, indicatief"}
+                for n, e, u in zip(("lengte (X)", "breedte (Y)", "hoogte (Z)"), ext, u95)]
+        elapsed = time.time() - t_start
+        summary = {
+            "objectklasse": "vrije vorm (uitvoerniveau 0): een mesh, geen parametrisch model",
+            "reden": reason,
+            "buitenmaten": f"{ext[0]:.1f} x {ext[1]:.1f} x {ext[2]:.1f} mm (lengte x breedte x hoogte)",
+            "volume": f"{part_mesh.volume():.0f} mm³",
+            "oppervlak": f"{part_mesh.area():.0f} mm²",
+            "stereo": f"{100 * frac:.0f}% van het oppervlak gemeten met stereo, de rest alleen uit de silhouetten",
+            "foto's gebruikt": f"{len(views)} van {len(images)}",
+            "camera": (f"{camera_label}: " if camera_label else "") + f"f = {cam.K[0, 0]:.1f} px"
+                      + f", reprojectiefout {cam.rms_px:.3f} px",
+            "resolutie op het object": f"{mm_px:.3f} mm/pixel (rooster {h:.2f} mm)",
+            "schaalbron": f"kalibratiemat {spec.label} ({spec.mat_id})",
+            "silhouet-IoU": f"mediaan {np.median(ious):.4f}, minimum {np.min(ious):.4f}",
+            "betrouwbaarheid": "indicatief (vrije vorm)",
+            "rekentijd": f"{elapsed:.0f} s",
+        }
+        data = {
+            "title": f"Scan '{scan_name}' — camtocad {__version__}",
+            "camtocad": __version__,
+            "niveau": 0,
+            "summary": summary,
+            "dimensions": dims,
+            "warnings": warnings,
+            "files": {"stl": "model.stl", "3mf": "model.3mf", "json": "report.json"},
+            "frame": {"R": R.tolist(), "t_mm": t_pf.tolist(),
+                      "beschrijving": "onderdeel = R · mat + t: om Z gedraaid (kleinste omhullende rechthoek, lange zijde "
+                                      "langs X), oorsprong linksonder op de mat"},
+            "mat": {"naam": spec.name, "versie": spec.version, "mat_id": spec.mat_id},
+            "camera": cam.to_dict(),
+            "poses": {n: p.to_dict() for n, p in cal.poses.items()},
+            "vrije_vorm": info,
+        }
+        report.write_freeform(out, data, previews)
+        log(f"klaar in {elapsed:.0f} s: {out / 'model.stl'}")
+        return {"summary": summary, "dimensions": dims, "warnings": warnings, "out_dir": str(out), "niveau": 0,
+                "files": ["report.html", "model.stl", "model.3mf", "report.json"]}
+
+    if opts.shape == "vrij":
+        return free_form("gekozen bij het starten van de scan")
+
     # 5. startmodel uit de bovenaanzichten (hoogte waarop ze samenvallen, met terugvalopties)
     if n_top == 0:
         write_debug()
@@ -1296,9 +1403,15 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         issues.append(f"de rand bij ({m['x']:.1f}, {m['y']:.1f}) mm (mat) ligt in de foto's over {m['lengte']:.1f} mm "
                       f"tot {abs(m['afwijking']):.2f} mm verder naar {'buiten' if m['afwijking'] > 0 else 'binnen'} dan "
                       "in het model: een vorm die het model mist of anders heeft")
+    not_flat = shape is not None and shape.share >= prismcheck.NOT_FLAT_SHARE  # v0.16.4: geen plat onderdeel
+    # v0.17: dan de vorm als mesh, ook als het platte model nog net door de poort komt maar matig past
+    if opts.shape == "auto" and not_flat and stats_fit["iou_median"] < FREE_IOU:
+        write_debug({"kwaliteit": issues})
+        return free_form(f"geen plat onderdeel: langs {100 * shape.share:.0f}% van de rand ligt de bovenkant lager of "
+                         f"hoger dan in een model met één hoogte (silhouet-IoU mediaan {stats_fit['iou_median']:.2f})")
     if stats_fit["iou_median"] < 0.9:
         write_debug({"kwaliteit": issues})
-        if shape is not None and shape.share >= prismcheck.NOT_FLAT_SHARE:  # v0.16.4: geen plat onderdeel
+        if not_flat:
             raise ScanError(not_flat_message(shape, stats_fit["iou_median"], diag.get("vormmodel"), dbg) + small_mat)
         raise ScanError("Het gevonden model past niet bij de foto's (silhouet-IoU mediaan "
                         f"{stats_fit['iou_median']:.2f}). " + NO_CONTOUR_HELP.format(debug=dbg) + small_mat)
