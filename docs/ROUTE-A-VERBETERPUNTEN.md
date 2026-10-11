@@ -592,7 +592,7 @@ De drempels van V19 komen uit gerenderde scans: op elf prisma's bleef de bovenra
 | Bediening | Stap en voortgang (stap 1: recht van boven, 0–5; stap 2: rondom, 0–32). Een onbruikbare foto gaat meteen weg, de laatste foto is terug te nemen (↶), en "Verwerken" staat in de camera zodra alles gedekt is. Liggend staan de knoppen naast het beeld. Tot ~11 beelden per seconde in plaats van ~6: de pagina wacht 90 ms tussen twee beelden in plaats van 150 ms | idem |
 | Opgeruimd | De live begeleiding staat in een eigen module (`live.py`), met per scan een `LiveSession` voor wat ze tussen de beelden onthoudt. De knoppen "Verwerken" en "Opnieuw proberen" (v0.15) stonden in beeld terwijl ze verborgen hoorden te zijn: de opmaak van knoppen won van het attribuut `hidden` | `live.py`, `preflight.py`, `server/app.py` |
 
-<!-- V016-CHECK -->
+**Rekentijd en controle v0.16.** Een livebeeld kost op de pc ~52 ms (was ~41 ms); het onderdeel zoeken kost daarvan ~8 ms. De verwerking van een scan is niet veranderd: op dezelfde machine geven v0.15 en v0.16 voor de beugel en de beugel met sleuf precies dezelfde maten. Tegen de run van v0.15 van een dag eerder, op een andere processor, schuift één maat 0,001 mm, zoals in §3o beschreven. Een volledige stresstest was daarom niet nodig. Er zijn zes nieuwe tests voor de livecamera: het onderdeel (grijs, zwart en wit), een tweede voorwerp en de rand, de ring en de richting van de pijl, schuiven voor de foto's van boven, beweging en een andere lens, en de stappen. De browsertest volgt nu ook het onderdeel, de ring, de stappen, de meters, het geluid en het terugnemen van een foto.
 
 ## 4. Open verbeterpunten, op prioriteit
 
