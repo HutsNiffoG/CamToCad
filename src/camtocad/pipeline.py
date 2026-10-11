@@ -130,6 +130,24 @@ NO_CONTOUR_HELP = (
 )
 
 
+def not_flat_message(shape, iou: float, tried: dict | None, debug: str) -> str:
+    """v0.16.4: het model past niet, en de vormtoets (V19) vond langs een groot deel van de rand een bovenkant die lager
+    of hoger ligt dan het model: waarschijnlijk geen plat onderdeel (de tweede echte fotoset: een nietmachine)."""
+    dev = max((r["afwijking_mm"] for r in shape.details.get("stukken", [])), default=0.0)
+    tried = tried or {}
+    model = {"trede": "een trede", "bovenrand": "een afgeschuinde of afgeronde bovenrand"}.get(tried.get("geprobeerd"))
+    how = "niet goed genoeg" if tried.get("aangenomen") else "niet beter"  # aangenomen: het past beter, maar niet goed
+    fit = f"ook met {model} past het model {how}" if model else "het model past niet"
+    dev_s, iou_s = f"{dev:.1f}".replace(".", ","), f"{iou:.2f}".replace(".", ",")
+    return (f"Dit onderdeel is waarschijnlijk niet plat, en dan lukt de scan niet. Langs {100 * shape.share:.0f}% van de "
+            f"rand ligt de bovenkant lager of hoger dan in een model met één hoogte (in beeld tot {dev_s} mm), en {fit} "
+            f"(silhouet-IoU mediaan {iou_s}). Route A maakt alleen modellen van platte onderdelen (2,5D): één "
+            "vlakke bovenkant en rechte wanden, met gaten en uitsparingen, en eventueel een trede of een afgeschuinde of "
+            "afgeronde bovenrand. Een voorwerp met een schuine of gebogen bovenkant, zoals een nietmachine, lukt niet. "
+            f"Is het onderdeel wel plat, kijk dan in {debug} naar masker_*.jpg (oranje = object): steekt het overal af "
+            "tegen de mat?")
+
+
 def choose_mat(images, requested: str | None, warnings: list[str], log=print) -> MatSpec:
     """De mat op de foto's (herkend aan de markers); een afwijkende keuze wordt gemeld en overruled."""
     asked = None if not requested or requested.lower() == "auto" else get_spec(requested)
@@ -1280,6 +1298,8 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
                       "in het model: een vorm die het model mist of anders heeft")
     if stats_fit["iou_median"] < 0.9:
         write_debug({"kwaliteit": issues})
+        if shape is not None and shape.share >= prismcheck.NOT_FLAT_SHARE:  # v0.16.4: geen plat onderdeel
+            raise ScanError(not_flat_message(shape, stats_fit["iou_median"], diag.get("vormmodel"), dbg) + small_mat)
         raise ScanError("Het gevonden model past niet bij de foto's (silhouet-IoU mediaan "
                         f"{stats_fit['iou_median']:.2f}). " + NO_CONTOUR_HELP.format(debug=dbg) + small_mat)
     if issues:

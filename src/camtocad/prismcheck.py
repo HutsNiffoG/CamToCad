@@ -21,6 +21,10 @@ Een punt telt mee waar er bewijs is: zekere mat vlakbij, of het punt ligt voorbi
 bewijs al in zekere mat (dan steekt het model zeker uit). Twee stukken van dezelfde soort met minder dan
 10 mm ertussen (vaak een hoek zonder bewijs) zijn één stuk.
 
+Wijkt de bovenkant langs een groot deel van de rand af (NOT_FLAT_SHARE, v0.16.4), en past het model ook met een trede
+of afschuining niet, dan is het onderdeel waarschijnlijk niet plat: de scan zegt dat dan in plaats van een algemene
+melding over de maskers (de tweede echte fotoset, een nietmachine: 58% van de rand).
+
 Wat de toets vindt, is ook de start voor V17: de pijplijn probeert dan een rechte trede (door de uiteinden
 van het stuk) of een afschuining of afronding van de bovenrand rondom als model, en toetst daarna opnieuw.
 Vindt de toets meer stukken van dezelfde soort, dan begint de trede bij het kleinste deel van de contour dat
@@ -47,6 +51,9 @@ MERGE_GAP_MM = 10.0  # twee stukken met een kleiner gat ertussen (vaak een hoek 
 TREND_LOW_MM, TREND_HIGH_MM = -0.04, 0.15
 LOW_DEG, HIGH_DEG = 45.0, 60.0
 MIN_VIEWS = 3
+# v0.16.4: wijkt de bovenkant langs minstens zo'n deel van de buitenrand af en past het model niet, dan is het
+# onderdeel waarschijnlijk niet plat (een nietmachine: 58%; een trede is na V17 weer een prisma met trede)
+NOT_FLAT_SHARE = 0.25
 
 
 @dataclass
@@ -61,6 +68,11 @@ class PrismCheck:
     @property
     def trend(self) -> float | None:
         return self.details.get("kijkhoek_verschil_mm")
+
+    @property
+    def share(self) -> float:
+        """Het deel van de buitenrand waar de bovenkant lager of hoger ligt dan het model (v0.16.4)."""
+        return float(self.details.get("deel_rand") or 0.0)
 
 
 def _deviations(prob, x: np.ndarray):
@@ -223,6 +235,8 @@ def check(ef: edgefit.EdgeFit, angle: float = 0.0, shift=(0.0, 0.0)) -> PrismChe
                 else:
                     out.issues.append("in de lage foto's ligt de bovenrand rondom binnen het model: de wanden staan "
                                       "mogelijk niet loodrecht op de mat (tapse wanden of een ronde vorm)")
+    total = float(step.sum())
     out.details = {"stukken": runs, "kijkhoek_verschil_mm": None if trend is None else round(trend, 3),
-                   "bovenrand_mediaan_mm": None if np.isnan(sm).all() else round(float(np.nanmedian(sm)), 3)}
+                   "bovenrand_mediaan_mm": None if np.isnan(sm).all() else round(float(np.nanmedian(sm)), 3),
+                   "deel_rand": round(sum(r["lengte_mm"] for r in runs) / total, 3) if total > 0 else 0.0}
     return out

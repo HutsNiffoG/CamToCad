@@ -82,6 +82,34 @@ def test_a_chamfer_all_round_shows_in_the_low_photos():
     assert any("afgeschuind of afgerond" in m for m in res.issues)
 
 
+def test_a_sloped_top_deviates_along_most_of_the_edge():
+    """v0.16.4: een schuine bovenkant (van 3 naar 13 mm, in lagen) past niet in een model met één hoogte: aan de lage
+    kant ligt de bovenkant lager dan het model, aan de hoge kant hoger, en samen langs het grootste deel van de rand.
+    Past het model dan niet, dan zegt de scan dat het onderdeel niet plat is (zoals een nietmachine)."""
+    slabs = [block(95 + 10 * k, 145, 65, 95, 3.0 + 2.0 * k) for k in range(6)]
+    res = run_check(slabs, block(95, 145, 65, 95, 8.0))
+    kinds = {r["soort"] for r in res.details["stukken"]}
+    assert kinds == {"lager", "hoger"} and res.share >= prismcheck.NOT_FLAT_SHARE, res.details
+    plate = block(95, 145, 65, 95, 6.0, 2.0)
+    assert run_check([plate], plate).share == 0.0
+
+
+def test_a_part_that_is_not_flat_gets_its_own_message():
+    """v0.16.4: past het model niet en wijkt de bovenkant langs een groot deel van de rand af, dan zegt de scan dat het
+    onderdeel niet plat is, in plaats van een algemene melding over maskers en licht."""
+    from camtocad import pipeline
+
+    shape = prismcheck.PrismCheck(details={"stukken": [{"soort": "lager", "afwijking_mm": 4.94}], "deel_rand": 0.58})
+    text = pipeline.not_flat_message(shape, 0.8777, {"geprobeerd": "trede"}, "debug")
+    assert text.startswith("Dit onderdeel is waarschijnlijk niet plat") and "58% van de rand" in text
+    assert "tot 4,9 mm" in text and "ook met een trede past het model niet beter" in text and "0,88" in text
+    assert "2,5D" in text
+    # een afschuining die als model is aangenomen, past beter, maar nog niet goed
+    text = pipeline.not_flat_message(shape, 0.85, {"geprobeerd": "bovenrand", "aangenomen": True}, "debug")
+    assert "ook met een afgeschuinde of afgeronde bovenrand past het model niet goed genoeg" in text
+    assert "(in beeld tot 4,9 mm), en het model past niet (silhouet" in pipeline.not_flat_message(shape, 0.85, None, "d")
+
+
 def test_the_span_of_several_runs_skips_only_the_largest_gap():
     """De start van een trede (V17) bij meer stukken van dezelfde soort: alles behalve het grootste gat, ook als
     het stuk over het begin van de gesloten rij loopt."""
