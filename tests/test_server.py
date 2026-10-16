@@ -125,15 +125,15 @@ def test_measured_rulers_are_passed_as_mat_scale(tmp_path):
 
 
 def test_the_shape_choice_is_passed_and_the_free_form_files_are_listed(tmp_path):
-    """v0.17: 'vorm' (auto, plat, vrij) gaat mee naar de verwerking; een vrije vorm heeft STL en 3MF, en de lijst met
-    bestanden zegt welke er zijn."""
+    """v0.17: 'vorm' (auto, plat, vrij) gaat mee naar de verwerking; een vrije vorm heeft STL en 3MF (en sinds v0.18
+    de vlakken en cilinders in referentie.step), en de lijst met bestanden zegt welke er zijn."""
     seen = {}
 
     def runner(photos, out, opts, log, scan_name=""):
         seen["shape"] = opts.shape
         out.mkdir(parents=True, exist_ok=True)
-        names = ("model.stl", "model.3mf", "report.json") if opts.shape == "vrij" else ("model.step", "model.stl",
-                                                                                       "model.py", "report.json")
+        names = (("model.stl", "model.3mf", "referentie.step", "report.json") if opts.shape == "vrij"
+                 else ("model.step", "model.stl", "model.py", "report.json"))
         for name in names:
             (out / name).write_text("x")
         (out / "report.html").write_text("<h1>rapport</h1>")
@@ -144,8 +144,10 @@ def test_the_shape_choice_is_passed_and_the_free_form_files_are_listed(tmp_path)
     r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))], data={"vorm": "vrij"})
     assert r.status_code == 200 and seen["shape"] == "vrij"
     status = c.get(f"/api/scans/{r.json()['id']}").json()
-    assert status["vorm"] == "vrij" and status["bestanden"] == ["model.3mf", "model.stl", "report.html", "report.json"]
+    assert status["vorm"] == "vrij" and status["bestanden"] == ["model.3mf", "model.stl", "referentie.step",
+                                                                "report.html", "report.json"]
     assert c.get(f"/scans/{r.json()['id']}/model.3mf").status_code == 200
+    assert c.get(f"/scans/{r.json()['id']}/referentie.step").status_code == 200
     r = c.post("/api/scans", files=[("fotos", ("a.jpg", jpg(), "image/jpeg"))])
     assert r.status_code == 200 and seen["shape"] == "auto" and "model.3mf" not in c.get(
         f"/api/scans/{r.json()['id']}").json()["bestanden"]

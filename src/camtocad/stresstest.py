@@ -26,10 +26,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from . import primitives
 from .mat import get_spec, rasterize_board
 from .pipeline import ScanOptions, demo_part, run_scan
 from .render import default_camera, look_at, place, render_view, tessellate
-
 
 # ----------------------------------------------------------------------------- de onderdelen en hun waarheid
 
@@ -165,8 +165,10 @@ def bracket_3d():
     return plate.union(flange).cut(hole_f).cut(hole_p).translate((-30, 0, 0))
 
 
-def _free(length: float, width: float, height: float) -> dict:
-    return {"h": height, "lengte (X)": length, "breedte (Y)": width, "hoogte (Z)": height}
+def _free(length: float, width: float, height: float, shapes: dict[str, list[float]] | None = None) -> dict:
+    """De waarheid van een vrije vorm: de buitenmaten, en per soort maat uit de vormen (v0.18) de waarden die er kunnen
+    zijn ('Ø', 'R', 'dikte', 'afstand', 'opening'; een maat wordt vergeleken met de dichtstbijzijnde)."""
+    return {"h": height, "lengte (X)": length, "breedte (Y)": width, "hoogte (Z)": height, "vrij": shapes or {}}
 
 
 # De waarheid in het assenstelsel van het onderdeel (zoals in het rapport). Een lijst: elk van die waarden kan het
@@ -196,10 +198,12 @@ OBJECTS = {
     "bankpas": (bank_card, {"h": 0.76, "x": [85.6], "y": [53.98], "R": 3.18, "hx": [], "hy": []}),
     "hoekblok": (corner_block, {"h": 8.0, "x": [60.0], "y": [35.0], "R": 1.0, "hx": [], "hy": [], "scherp": 2}),
     # niet plat (v0.17): de vrije vorm
-    "koepel": (dome, _free(60.0, 60.0, 30.0)),
-    "as_liggend": (lying_shaft, _free(75.0, 30.0, 30.0)),
-    "nietmachine": (stapler, _free(130.0, 36.0, 44.07)),
-    "beugel3d": (bracket_3d, _free(60.0, 40.0, 40.0)),
+    "koepel": (dome, _free(60.0, 60.0, 30.0, {"Ø": [60.0]})),
+    "as_liggend": (lying_shaft, _free(75.0, 30.0, 30.0, {"Ø": [14.0, 20.0, 30.0], "afstand": [10.0, 25.0, 40.0, 75.0],
+                                                         "dikte": [10.0]})),
+    "nietmachine": (stapler, _free(130.0, 36.0, 44.07, {"R": [8.0], "afstand": [10.0, 30.0, 36.0, 125.0, 130.0],
+                                                         "dikte": [10.0], "opening": [8.0]})),
+    "beugel3d": (bracket_3d, _free(60.0, 40.0, 40.0, {"Ø": [8.0, 10.0], "dikte": [6.0], "afstand": [40.0, 60.0]})),
 }
 
 
@@ -554,6 +558,13 @@ def truth_of(name: str, value: float, t: dict) -> float | None:
     """De ware waarde van een maat uit het rapport (None: geen waarheid, bijv. een maat die er niet hoort)."""
     if name in t:  # bovenrand, trede
         return t[name]
+    if "vrij" in t and primitives.NAME_RE.match(name):  # een maat uit een vorm van de vrije vorm (v0.18)
+        what = name.split()[-1] if name.endswith((" Ø", " R")) else name.split()[0]
+        options = t["vrij"].get(what) or []
+        if not options:
+            return None
+        c = min(options, key=lambda v: abs(v - value))
+        return c if abs(c - value) < 1.5 else None
     if name.startswith("verzinking"):
         return t.get("csk", 0.0)  # een verzinking waar er geen is: de fout is de hele maat
     if name.startswith("blind gat diepte"):
@@ -598,6 +609,8 @@ def kind_of(name: str) -> str:
     """Soort maat voor de samenvatting."""
     if name.endswith((" (X)", " (Y)", " (Z)")):  # buitenmaten van een vrije vorm (v0.17)
         return "vrije vorm"
+    if primitives.NAME_RE.match(name):  # maten uit de vormen van een vrije vorm (v0.18)
+        return "vorm Ø/R" if name.endswith((" Ø", " R")) else "vorm afstand"
     if name.startswith("verzinking"):
         return "verzinking"
     if name.startswith("kamerboring"):
@@ -618,7 +631,7 @@ def kind_of(name: str) -> str:
 
 
 KINDS = ("hoogte", "lengte", "gat", "verzinking", "kamerboring", "blind gat", "sleuf", "positie", "afronding",
-         "bovenrand", "trede", "vrije vorm")
+         "bovenrand", "trede", "vrije vorm", "vorm Ø/R", "vorm afstand")
 
 
 def _load(run_dir: Path, sc: str) -> tuple[dict | None, dict | None]:

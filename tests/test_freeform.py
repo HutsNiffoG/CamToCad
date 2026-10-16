@@ -178,7 +178,8 @@ def test_fused_depths_put_the_surface_at_the_measured_depth():
 def test_a_free_form_scan_of_a_textured_bracket(tmp_path):
     """Van begin tot eind: een L-beugel met een opstaande flens (geen plat onderdeel) met textuur, als vrije vorm.
     Met 32 foto's in plaats van 46 (sneller) zijn de buitenmaten ~1 mm te ruim (met 46: ~0,4 mm); de eis is 1,5 mm.
-    STL, 3MF en het rapport, geen STEP."""
+    STL, 3MF en het rapport, geen model.step; sinds v0.18 de vlakken in referentie.step, en als maten de dikte van
+    de plaat en de flens (6 mm) en de afstanden tussen de zijkanten (60 en 40 mm)."""
     from camtocad import stresstest
     cfg = dict(stresstest.SCENARIOS["vrij_beugel"], rings=((35.0, 12), (55.0, 10), (72.0, 6)), top_views=4)
     summary = stresstest.run("vrij_beugel", tmp_path / "run", cfg=cfg, log=lambda m: None)
@@ -188,3 +189,9 @@ def test_a_free_form_scan_of_a_textured_bracket(tmp_path):
     res = tmp_path / "run" / "vrij_beugel" / "resultaat"
     assert (res / "model.stl").exists() and (res / "model.3mf").exists() and not (res / "model.step").exists()
     assert "vrije vorm" in (res / "report.html").read_text(encoding="utf-8")
+    assert (res / "referentie.step").exists()
+    shapes = {k: v for k, v in summary["dims"].items() if not k.endswith((" (X)", " (Y)", " (Z)"))}
+    thick = [v for k, v in shapes.items() if k.startswith("dikte")]
+    dist = [v for k, v in shapes.items() if k.startswith("afstand")]
+    assert thick and all(abs(v - 6.0) < 0.5 for v in thick), shapes
+    assert any(abs(v - 60.0) < 0.5 for v in dist) and any(abs(v - 40.0) < 0.5 for v in dist), shapes

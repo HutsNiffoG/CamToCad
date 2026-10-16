@@ -40,7 +40,7 @@ from ..mat import PRESETS, get_spec, write_mat
 from ..pipeline import IMAGE_EXT, ScanOptions, run_scan
 
 STATIC = Path(__file__).parent / "static"
-OUTPUTS = {"model.step", "model.stl", "model.3mf", "model.py", "report.html", "report.json"}
+OUTPUTS = {"model.step", "model.stl", "model.3mf", "model.py", "referentie.step", "report.html", "report.json"}
 SHAPES = ("auto", "plat", "vrij")  # ScanOptions.shape (v0.17)
 DEBUG_FILE = re.compile(r"^(masker_[\w.-]{1,80}\.jpg|lokalisatie\.png|bovenaanzicht\.png|diagnose\.json)$")
 PHOTO_FILE = re.compile(r"^foto_\d{4}\.[a-z]{3,4}$")

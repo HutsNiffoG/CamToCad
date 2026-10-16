@@ -22,7 +22,8 @@ import cv2
 import numpy as np
 
 from . import (__version__, blindhole, cadmodel, calib, counterbore, countersink, debug, edgefit, freeform, holes, hull,
-               initial, masks, placement, preflight, prismcheck, profile, report, silhouette, tone, uncertainty)
+               initial, masks, placement, preflight, primitives, prismcheck, profile, report, silhouette, tone,
+               uncertainty)
 from .cadhelpers import afgeronde_hoeken
 from .imgio import IMAGE_EXT, PhotoInfo, heif_supported, imwrite, read_color, read_gray, read_info, split_chroma
 from .mat import MatSpec, get_spec, rasterize_board
@@ -33,6 +34,17 @@ FREE_MAX_POINTS = 25e6  # vrije vorm: hooguit zoveel roosterpunten (anders een g
 FREE_STEREO_WARN = 0.5  # vrije vorm: waarschuwen als minder van het oppervlak met stereo gemeten is
 FREE_IOU = 0.98  # auto: is het onderdeel niet plat en past het platte model minder goed dan dit (de grens voor
 # 'goed' in de kwaliteitstoets), dan de vrije vorm
+
+
+def shape_u95(name: str, value: float, h: float) -> float:
+    """Indicatieve U95 (mm) van een maat uit een vlak, cilinder of bol van de vrije vorm (v0.18), naar de
+    roosterafstand `h` (mm) van de mesh. Getoetst op gerenderde scans met textuur (rooster 0,5 mm): afstanden tussen
+    vlakken tot 0,1 mm fout, diameters tot 0,25 mm, de straal van een afronding over een kwart cirkel tot 0,4 mm."""
+    if name.endswith(" R"):
+        return 0.4 + 0.4 * h + 0.05 * value
+    if name.endswith(" Ø"):
+        return 0.2 + 0.4 * h + 0.005 * value
+    return 0.1 + 0.4 * h + 0.003 * value
 
 
 class ScanError(ValueError):
@@ -1052,6 +1064,29 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         name = scan_name or "camtocad"
         freeform.write_stl(part_mesh, out / "model.stl", name)
         freeform.write_3mf(part_mesh, out / "model.3mf", name)
+        # vlakken, cilinders en bollen (v0.18, primitives.py): exacte referentiegeometrie en maten uit de mesh
+        t_pr = time.time()
+        # zonder stereo (of als die niets vond) komt alles uit de silhouetten: dan is een vorm onzeker
+        measured = stereo if stereo is not None and len(stereo) == len(part_mesh.V) else np.zeros(len(part_mesh.V), bool)
+        shapes = primitives.detect(part_mesh, stereo=measured)
+        shape_meas = primitives.measurements(shapes, part_mesh)
+        sure = [sh for sh in shapes if sh.reliable]  # alleen die in de STEP en in kleur in het rapport
+        files = ["report.html", "model.stl", "model.3mf"]
+        if any(not primitives.is_bottom(sh) for sh in sure):  # alleen de onderkant: geen STEP
+            try:
+                if primitives.reference_step(sure, part_mesh, out / "referentie.step"):
+                    files.append("referentie.step")
+            except Exception as e:  # noqa: BLE001 - de mesh en het rapport zijn er ook zonder referentiegeometrie
+                log(f"referentie.step niet geschreven: {e}")
+        files.append("report.json")
+        n_unsure = sum(not sh.reliable for sh in shapes)
+        counts: dict[str, int] = {}
+        for sh in shapes:
+            base = primitives.base_name(sh)
+            counts[base] = counts.get(base, 0) + 1
+        shape_text = ", ".join(f"{v} x {k}" for k, v in counts.items()) or "geen"
+        log(f"vormen: {shape_text}" + (f" ({n_unsure} onzeker)" if n_unsure else "")
+            + f" ({time.time() - t_pr:.0f} s)")
         ious = [v for v in freeform.view_iou(mesh, views, cam.K) if np.isfinite(v)] or [float("nan")]
         lo_r, hi_r = freeform.robust_extent(part_mesh)  # zonder losse uitschieters
         ext = hi_r - np.array([lo_r[0], lo_r[1], 0.0])
@@ -1078,10 +1113,21 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
         if stereo is not None and len(stereo) == len(part_mesh.V):
             colors = np.where(stereo[:, None], np.array(freeform.COLOR_STEREO), np.array(freeform.COLOR_HULL))
         previews = {k: freeform.render_preview(part_mesh, d, colors=colors) for k, d in freeform.VIEWS.items()}
+        shape_previews = {}
+        if sure:
+            shape_colors = primitives.colors(part_mesh, sure)
+            shape_previews = {k: freeform.render_preview(part_mesh, freeform.VIEWS[k], colors=shape_colors)
+                              for k in ("schuin", "boven")}
         u95 = [0.5 + 0.005 * float(e) for e in ext]  # indicatief: de klasse 'Standaard' uit ARCHITECTURE.md §2.3
-        dims = [{"name": n, "measured": round(float(e), 3), "u95": round(u, 2), "value": round(float(e), 2),
-                 "snapped": False, "reason": "buitenmaat van de mesh, indicatief"}
+        dims = [{"name": n, "measured": round(float(e), 3), "u95": round(u, 2), "sigma": round(u / 2, 3),
+                 "value": round(float(e), 2), "snapped": False, "reason": "buitenmaat van de mesh, indicatief"}
                 for n, e, u in zip(("lengte (X)", "breedte (Y)", "hoogte (Z)"), ext, u95)]
+        for m in shape_meas:  # de maten uit de vormen; die uit een onzekere vorm alleen in report.json
+            if not m["reliable"]:
+                continue
+            u = shape_u95(m["name"], m["value"], h)
+            dims.append({"name": m["name"], "measured": m["value"], "u95": round(u, 2), "sigma": round(u / 2, 3),
+                         "value": round(m["value"], 2), "snapped": False, "reason": m["text"]})
         elapsed = time.time() - t_start
         summary = {
             "objectklasse": "vrije vorm (uitvoerniveau 0): een mesh, geen parametrisch model",
@@ -1096,6 +1142,7 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "resolutie op het object": f"{mm_px:.3f} mm/pixel (rooster {h:.2f} mm)",
             "schaalbron": f"kalibratiemat {spec.label} ({spec.mat_id})",
             "silhouet-IoU": f"mediaan {np.median(ious):.4f}, minimum {np.min(ious):.4f}",
+            "vormen": shape_text + (f" ({n_unsure} onzeker: alleen uit de silhouetten)" if n_unsure else ""),
             "betrouwbaarheid": "indicatief (vrije vorm)",
             "rekentijd": f"{elapsed:.0f} s",
         }
@@ -1105,8 +1152,13 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "niveau": 0,
             "summary": summary,
             "dimensions": dims,
+            "uncertainty_model": {"methode": "indicatief (vrije vorm): buitenmaten 0,5 mm + 0,5%, maten uit vlakken "
+                                             "en cilinders naar de roosterafstand", "scale_rel": 0.0},
             "warnings": warnings,
-            "files": {"stl": "model.stl", "3mf": "model.3mf", "json": "report.json"},
+            "files": {"stl": "model.stl", "3mf": "model.3mf", "json": "report.json",
+                      **({"step": "referentie.step"} if "referentie.step" in files else {})},
+            "vormen": [primitives.to_dict(sh) for sh in shapes],
+            "maten_vormen": shape_meas,
             "frame": {"R": R.tolist(), "t_mm": t_pf.tolist(),
                       "beschrijving": "onderdeel = R · mat + t: om Z gedraaid (kleinste omhullende rechthoek, lange zijde "
                                       "langs X), oorsprong linksonder op de mat"},
@@ -1115,10 +1167,10 @@ def run_scan(images, out_dir: str | Path, opts: ScanOptions | None = None, log=p
             "poses": {n: p.to_dict() for n, p in cal.poses.items()},
             "vrije_vorm": info,
         }
-        report.write_freeform(out, data, previews)
+        report.write_freeform(out, data, previews, shape_previews)
         log(f"klaar in {elapsed:.0f} s: {out / 'model.stl'}")
         return {"summary": summary, "dimensions": dims, "warnings": warnings, "out_dir": str(out), "niveau": 0,
-                "files": ["report.html", "model.stl", "model.3mf", "report.json"]}
+                "files": files}
 
     if opts.shape == "vrij":
         return free_form("gekozen bij het starten van de scan")

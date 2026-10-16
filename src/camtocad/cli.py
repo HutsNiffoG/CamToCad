@@ -207,15 +207,18 @@ def _ruler_scale(values: list[float] | None) -> tuple[float, float] | None:
 
 
 def _print_result(result: dict) -> None:
-    if result.get("niveau") == 0:  # vrije vorm (v0.17): een mesh met de buitenmaten
-        print("\nVrije vorm (mesh), buitenmaten in mm (indicatief):")
+    if result.get("niveau") == 0:  # vrije vorm (v0.17): een mesh, met de maten uit de vormen erin (v0.18)
+        print("\nVrije vorm (mesh), maten in mm (indicatief):")
         for d in result["dimensions"]:
-            print(f"  {d['name']:24s} {d['measured']:9.1f}  (± {d['u95']:.1f})")
+            print(f"  {d['name']:24s} {d['measured']:9.2f}  (± {d['u95']:.2f})  {d.get('reason', '')}")
+        if result["summary"].get("vormen"):
+            print(f"\nVormen: {result['summary']['vormen']}")
         if result["warnings"]:
             print("\nWaarschuwingen:")
             for w in result["warnings"][:15]:
                 print(f"  - {w}")
-        print(f"\nUitvoer: {result['out_dir']} (model.stl, model.3mf, report.html)")
+        names = [f for f in result.get("files", []) if f != "report.json"]
+        print(f"\nUitvoer: {result['out_dir']} ({', '.join(names)})")
         return
     print("\nMaten (werkassenstelsel, mm):")
     for d in result["dimensions"]:

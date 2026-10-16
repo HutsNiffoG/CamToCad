@@ -163,7 +163,7 @@
       <select id="vorm">
         <option value="auto">automatisch (plat model, anders de vorm als mesh)</option>
         <option value="plat">plat (parametrisch model met maten)</option>
-        <option value="vrij">niet plat: de vorm als mesh (STL, 3MF)</option>
+        <option value="vrij">niet plat: de vorm als mesh (STL, 3MF), met vlakken en cilinders (STEP)</option>
       </select>
       <label for="meetlijn">Meetlijn X</label>
       <span><input id="meetlijn" type="number" inputmode="decimal" step="0.05" min="95" max="105" placeholder="100,0"> mm</span>
@@ -520,14 +520,16 @@ async function load() {
       const when = new Date(s.created * 1000).toLocaleString("nl-NL");
       let body = "";
       if (s.state === "klaar") {
-        // welke bestanden er zijn: een vrije vorm (v0.17) heeft STL en 3MF, geen STEP of script
+        // welke bestanden er zijn: een vrije vorm (v0.17) heeft STL en 3MF, geen STEP of script, en (v0.18) de
+        // herkende vlakken en cilinders als referentiegeometrie in een STEP
         const names = { "report.html": "rapport", "model.step": "STEP", "model.stl": "STL", "model.3mf": "3MF",
-                        "model.py": "CadQuery-script" };
+                        "referentie.step": "vlakken en cilinders (STEP)", "model.py": "CadQuery-script" };
         const have = s.bestanden && s.bestanden.length ? s.bestanden : ["report.html", "model.step", "model.stl", "model.py"];
         body = Object.keys(names).filter((f) => have.includes(f))
           .map((f) => `<a href="scans/${s.id}/${f}">${names[f]}</a>`).join(" · ");
         if (s.summary && s.summary.objectklasse && s.summary.objectklasse.startsWith("vrije vorm"))
-          body += `<div class="muted">vrije vorm: ${esc(s.summary.buitenmaten || "")}</div>`;
+          body += `<div class="muted">vrije vorm: ${esc(s.summary.buitenmaten || "")}` +
+            (s.summary.vormen ? `; ${esc(s.summary.vormen)}` : "") + `</div>`;
         if (s.summary && s.summary.betrouwbaarheid && s.summary.betrouwbaarheid !== "normaal")
           body += `<div class="fout">betrouwbaarheid ${esc(s.summary.betrouwbaarheid)}</div>`;
       } else if (s.state === "fout") {

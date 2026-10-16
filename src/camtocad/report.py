@@ -138,24 +138,64 @@ kritieke maten met een schuifmaat.</p>
     return {"json": jpath, "html": hpath}
 
 
-def write_freeform(out_dir: Path, data: dict, previews: dict[str, np.ndarray]) -> dict[str, Path]:
+def write_freeform(out_dir: Path, data: dict, previews: dict[str, np.ndarray],
+                   shape_previews: dict[str, np.ndarray] | None = None) -> dict[str, Path]:
     """Rapport van een vrije vorm (v0.17, uitvoerniveau 0): JSON, en een HTML-pagina met aanzichten van de mesh (blauwgrijs
-    = gemeten met stereo, oranje = alleen uit de silhouetten), de buitenmaten en de samenvatting."""
+    = gemeten met stereo, oranje = alleen uit de silhouetten), de herkende vlakken, cilinders en bollen (v0.18), de maten
+    en de samenvatting."""
     import base64
 
     import cv2
     out_dir = Path(out_dir)
     jpath = out_dir / "report.json"
     jpath.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=float), encoding="utf-8")
-    figs = []
-    for name, img in previews.items():
-        ok, png = cv2.imencode(".png", img)
-        if ok:
-            figs.append(f'<figure><img alt="{html.escape(name)}" src="data:image/png;base64,'
-                        f'{base64.b64encode(png.tobytes()).decode()}"><figcaption>{html.escape(name)}</figcaption>'
-                        "</figure>")
-    rows = "".join(f"<tr><td>{html.escape(s['name'])}</td><td><b>{s['measured']:.1f}</b></td>"
-                   f"<td>± {s['u95']:.1f} (indicatief)</td></tr>" for s in data.get("dimensions", []))
+
+    def figures(imgs: dict[str, np.ndarray]) -> list[str]:
+        out = []
+        for name, img in imgs.items():
+            ok, png = cv2.imencode(".png", img)
+            if ok:
+                out.append(f'<figure><img alt="{html.escape(name)}" src="data:image/png;base64,'
+                           f'{base64.b64encode(png.tobytes()).decode()}"><figcaption>{html.escape(name)}'
+                           "</figcaption></figure>")
+        return out
+
+    figs = figures(previews)
+    rows = "".join(f"<tr><td>{html.escape(s['name'])}</td><td><b>{s['measured']:.2f}</b></td>"
+                   f"<td>± {s['u95']:.2f} (indicatief)</td><td class=\"muted\">{html.escape(s.get('reason', ''))}</td>"
+                   "</tr>" for s in data.get("dimensions", []))
+    shapes = data.get("vormen") or []
+    shapes_html = ""
+    if shapes:
+        def stereo_text(v: dict) -> str:
+            return "-" if v.get("stereo") is None else f"{100 * v['stereo']:.0f}%"
+
+        def table(rows: list[dict]) -> str:
+            body = "".join(
+                f"<tr><td>{html.escape(v['naam'])}</td><td>{html.escape(v['beschrijving'])}</td>"
+                f"<td>{v['oppervlak_mm2']:.0f}</td><td>{v['rms_mm']:.2f}</td><td>{stereo_text(v)}</td></tr>"
+                for v in rows)
+            return ('<div class="wrap"><table><thead><tr><th>Vorm</th><th>Beschrijving</th><th>mm²</th>'
+                    f"<th>Afwijking (rms, mm)</th><th>Stereo</th></tr></thead><tbody>{body}</tbody></table></div>")
+
+        sure = [v for v in shapes if v["betrouwbaar"]]
+        unsure = [v for v in shapes if not v["betrouwbaar"]]
+        sure_html = table(sure) if sure else "<p>Geen vorm met genoeg stereo om op te vertrouwen.</p>"
+        unsure_html = (f"<details><summary>{len(unsure)} onzekere vormen (alleen uit de silhouetten; niet in de maten "
+                       f"en niet in de STEP)</summary>{table(unsure)}</details>") if unsure else ""
+        step = data.get("files", {}).get("step")
+        shapes_html = f"""<h2>Vlakken, cilinders en bollen</h2>
+<p>In de mesh herkend en exact gefit (RANSAC, kleinste kwadraten).{
+f' In <a href="{html.escape(step)}">{html.escape(step)}</a> staan ze als referentiegeometrie: begrensde vlakken, '
+'cilindervlakken met hun as als lijn, bollen. Open dat bestand naast de mesh in een CAD-programma om op te schetsen en '
+'te meten.' if step else ''}</p>
+<div class="views">{''.join(figures(shape_previews or {}))}</div>
+<p class="muted">Elk vlak een eigen kleur, cilinders oranje, bollen paars; grijs: geen vlak, cilinder of bol (een vrij
+gevormd oppervlak, een afgeronde rand, te ruw) of een onzekere vorm. Onzeker: de vorm komt grotendeels alleen uit de
+silhouetten. Hun omhullende bestaat zelf uit vlakke stukken, en boven een vlakke bovenkant zonder textuur laten ze een
+'dak' staan; zo'n vorm hoeft niet echt te zijn.</p>
+{sure_html}
+{unsure_html}"""
     info_rows = "".join(f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
                         for k, v in data.get("summary", {}).items())
     warnings = "".join(f"<li>{html.escape(w)}</li>" for w in data.get("warnings", [])) or "<li>geen</li>"
@@ -189,8 +229,9 @@ van platte onderdelen.</p>
 <p class="muted"><span class="key" style="background:#99bddb"></span>gemeten met stereo
 <span class="key" style="background:#f5b873"></span>alleen uit de silhouetten: hier kan het model te vol zijn, waar
 geen foto de mat erachter zag (een kuil, een spleet, de ruimte onder een overhang)</p>
-<h2>Buitenmaten</h2>
-<div class="wrap"><table><thead><tr><th>Maat</th><th>mm</th><th>Onzekerheid</th></tr></thead>
+{shapes_html}
+<h2>Maten</h2>
+<div class="wrap"><table><thead><tr><th>Maat</th><th>mm</th><th>Onzekerheid</th><th>Waar</th></tr></thead>
 <tbody>{rows}</tbody></table></div>
 <h2>Samenvatting</h2>
 <div class="wrap"><table>{info_rows}</table></div>
